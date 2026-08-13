@@ -4,3 +4,10 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Build outputs
+/target/
+/.gradle/
+**/.gradle/
+**/.kotlin/
+**/build/

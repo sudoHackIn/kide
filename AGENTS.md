@@ -102,3 +102,31 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
+
+## Build & Test
+
+```bash
+# Rust core and CLI
+cargo check --workspace --all-targets
+cargo test --workspace
+cargo fmt --all -- --check
+
+# Kotlin/JVM worker (SDKMAN OpenJDK 21.0.2; Gradle 9.4.1)
+sdk use java 21.0.2-open
+./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm check
+./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm test
+./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm run --args="--handshake"
+
+# Whole scaffold
+make check
+make test
+```
+
+## Architecture Overview
+
+KIDE Core is a Rust workspace. `kide-core` will own the persistent canonical
+semantic model and query APIs; `kide-cli` is a thin CLI frontend. Build-system
+and language authorities live in disposable external workers. The first worker,
+`workers/kotlin-jvm`, will eventually use Kotlin PSI/K2 and emit normalized
+snapshots; it must not own persistent index state. See
+`docs/architecture/0001-cold-disposable-backend-workers.md`.
