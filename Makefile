@@ -2,6 +2,7 @@
 
 check:
 	cargo check --workspace --all-targets
+	cargo clippy --workspace --all-targets -- -D warnings
 	./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm check
 
 test:
