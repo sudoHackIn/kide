@@ -128,8 +128,11 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         "kide-kotlin-jvm structural worker accepts Kotlin source units only"
     }
     KotlinStructuralExtractor().use { extractor ->
+        val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
+        val sourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) }
+        val resolved = K2SemanticExtractor.resolvedReferences(sourceFiles)
         put("snapshots", buildJsonArray {
-            sourceUnits.forEach { sourceUnit -> add(extractor.analyze(sourceUnit, workspaceRoot)) }
+            K2SnapshotEnricher.enrich(snapshots, workspaceRoot, resolved).forEach(::add)
         })
     }
 }

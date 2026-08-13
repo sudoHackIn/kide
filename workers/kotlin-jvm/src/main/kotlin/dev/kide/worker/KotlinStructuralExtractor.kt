@@ -121,8 +121,13 @@ internal class KotlinStructuralExtractor : AutoCloseable {
                 },
             )
         }
-        val constructors = file.collectDescendantsOfType<KtSecondaryConstructor>().map { constructor ->
-            constructorFact(file, constructor, source, contents, provenance)
+        val constructors = buildList {
+            file.collectDescendantsOfType<KtClass>().mapNotNullTo(this) { clazz ->
+                clazz.nameIdentifier?.let { primaryConstructorFact(file, clazz, source, contents, provenance) }
+            }
+            file.collectDescendantsOfType<KtSecondaryConstructor>().mapTo(this) { constructor ->
+                constructorFact(file, constructor, source, contents, provenance)
+            }
         }
         return (named + constructors)
             .sortedWith(compareBy<SymbolFact>({ it.nameStart }, { it.nameEnd }, { it.json.toString() }))
@@ -164,6 +169,46 @@ internal class KotlinStructuralExtractor : AutoCloseable {
                 put("owner", "kotlin:${source.requiredString("component")}:${source.requiredString("path")}#class:$ownerName:$ownerOffset")
                 put("modifiers", stringArray(modifiers(constructor)))
                 put("annotations", stringArray(annotations(constructor)))
+                put("freshness", "fresh")
+                put("completeness", "partial")
+                put("provenance", provenance)
+            },
+        )
+    }
+
+    private fun primaryConstructorFact(
+        file: KtFile,
+        owner: KtClass,
+        source: kotlinx.serialization.json.JsonObject,
+        contents: String,
+        provenance: JsonElement,
+    ): SymbolFact {
+        val ownerName = owner.name ?: "anonymous"
+        val constructor = owner.primaryConstructor
+        val nameRange = owner.nameIdentifier?.textRange ?: owner.textRange
+        val range = constructor?.textRange ?: nameRange
+        val symbolId = "kotlin:${source.requiredString("component")}:${source.requiredString("path")}#constructor:<init>:${range.startOffset}"
+        return SymbolFact(
+            nameStart = nameRange.startOffset,
+            nameEnd = nameRange.endOffset,
+            json = buildJsonObject {
+                put("id", symbolId)
+                put("backend_key", buildJsonObject {
+                    put("backend", WORKER_NAME)
+                    put("schema_version", 1)
+                    put("value", "${source.requiredString("path")}:${range.startOffset}:primary_constructor")
+                })
+                put("language", "kotlin")
+                put("kind", "constructor")
+                put("name", "<init>")
+                put("qualified_name", "${file.packageFqName.asString()}.$ownerName.<init>")
+                put("signature", constructor?.valueParameters?.joinToString(",", prefix = "(", postfix = ")") { it.typeReference?.text ?: "?" } ?: "()")
+                put("component", source.requiredString("component"))
+                put("declaration", sourceRange(source.requiredString("id"), contents, range.startOffset, range.endOffset))
+                put("name_range", sourceRange(source.requiredString("id"), contents, nameRange.startOffset, nameRange.endOffset))
+                put("owner", ownerSymbolId(source, owner))
+                put("modifiers", stringArray(constructor?.let(::modifiers) ?: emptyList()))
+                put("annotations", stringArray(constructor?.let(::annotations) ?: emptyList()))
                 put("freshness", "fresh")
                 put("completeness", "partial")
                 put("provenance", provenance)
@@ -334,5 +379,5 @@ internal class KotlinStructuralExtractor : AutoCloseable {
     private data class SymbolFact(val nameStart: Int, val nameEnd: Int, val json: JsonElement)
 }
 
-private fun kotlinx.serialization.json.JsonObject.requiredString(name: String): String =
+internal fun kotlinx.serialization.json.JsonObject.requiredString(name: String): String =
     this[name]?.jsonPrimitive?.content ?: error("missing $name")
