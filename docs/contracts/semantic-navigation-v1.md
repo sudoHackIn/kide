@@ -255,3 +255,6 @@ JSON diffs.
 storage transactions, and migration mechanics belong to the backend-protocol
 and storage tasks. They must serialize the canonical records defined here;
 they do not redefine their meaning.
+
+For the MVP's selected local storage and worker transport, see
+[ADR 0002](../architecture/0002-sqlite-and-ndjson-for-mvp.md).

@@ -282,7 +282,8 @@ same query engine and are provided where useful.
 
 ## Non-goals of this decision
 
-This ADR does not select a storage engine, IPC transport, parser, or compiler
-version. It also does not require workers to terminate after every individual
-request; batching and a bounded idle timeout are compatible with a cold-worker
-architecture.
+Storage and local worker transport are selected in
+[ADR 0002: SQLite and NDJSON for the Semantic-Navigation MVP](0002-sqlite-and-ndjson-for-mvp.md).
+This ADR does not select a parser or compiler version. It also does not require
+workers to terminate after every individual request; batching and a bounded idle
+timeout are compatible with a cold-worker architecture.
