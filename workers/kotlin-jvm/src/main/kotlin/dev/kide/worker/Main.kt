@@ -103,6 +103,8 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
 }
 
 internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {
+    // The Gradle model is the authority for every binary artifact, including
+    // platform libraries. This worker never scans a JDK installation itself.
     val artifacts = GradleProjectImporter.resolvedArtifacts(workspaceRoot)
     val start = cursor?.let { previous ->
         artifacts.indexOfFirst { it.cursor == previous }
