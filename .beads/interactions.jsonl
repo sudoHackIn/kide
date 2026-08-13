@@ -1,0 +1,1 @@
+{"id":"int-060a657db469c13724e3a2e7250876cc","kind":"field_change","created_at":"2026-08-13T20:43:42.427815Z","actor":"vladislav","issue_id":"kide-h6o","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"ADR 0001 records the accepted cold/disposable worker architecture and is linked from the PRD."}}
