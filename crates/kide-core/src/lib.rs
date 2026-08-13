@@ -9,12 +9,14 @@ mod discovery;
 mod protocol;
 mod query;
 mod store;
+mod supervisor;
 
 pub use canonical::*;
 pub use discovery::*;
 pub use protocol::*;
 pub use query::*;
 pub use store::*;
+pub use supervisor::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;

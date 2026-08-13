@@ -184,6 +184,12 @@ During `kide index`, a worker remains alive for the analysis batch. During a
 burst of agent queries it may stay warm until the idle timeout. It may then stop
 without affecting already indexed queries.
 
+Core's supervisor uses one NDJSON child process per backend command on demand.
+It validates the envelope and static capability protocol versions at handshake,
+correlates every response by request ID, enforces per-request timeouts, and
+terminates a child on timeout, crash, or explicit idle reap. A worker restart
+never mutates the persistent index by itself.
+
 ## Invalidation
 
 Structural and semantic cache identities are separate:
