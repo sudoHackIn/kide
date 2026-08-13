@@ -189,7 +189,11 @@ pub enum WorkerMessage {
     ProjectManifestResponse(ProjectManifestResponse),
     AnalyzeBatchRequest(AnalyzeBatchRequest),
     AnalysisBatchResponse(AnalysisBatchResponse),
-    AnalysisDelta(AnalysisDelta),
+    /// Kept behind an indirection so one rare, full-file delta does not make
+    /// every handshake and batch message as large as the delta payload.
+    /// `Box` is transparent to serde, therefore the NDJSON protocol is
+    /// unchanged.
+    AnalysisDelta(Box<AnalysisDelta>),
     Error(WorkerError),
 }
 
@@ -204,7 +208,7 @@ pub fn ensure_compatible_protocol_version(version: u32) -> Result<(), WorkerErro
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, mem::size_of, path::PathBuf};
 
     use serde_json::Value;
 
@@ -241,6 +245,24 @@ mod tests {
                 "{name} preserves the wire contract"
             );
         }
+    }
+
+    #[test]
+    fn message_size_is_bounded_by_the_largest_non_delta_batch_payload() {
+        let largest_non_delta_payload = [
+            size_of::<HandshakeRequest>(),
+            size_of::<HandshakeResponse>(),
+            size_of::<ProjectManifestRequest>(),
+            size_of::<ProjectManifestResponse>(),
+            size_of::<AnalyzeBatchRequest>(),
+            size_of::<AnalysisBatchResponse>(),
+            size_of::<WorkerError>(),
+        ]
+        .into_iter()
+        .max()
+        .expect("payload sizes are present");
+
+        assert!(size_of::<WorkerMessage>() <= largest_non_delta_payload);
     }
 
     #[test]

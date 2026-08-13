@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Properties
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
 import org.gradle.tooling.GradleConnector
@@ -31,14 +32,37 @@ internal object GradleProjectImporter {
     fun import(workspace: Path): JsonElement {
         require(Files.isDirectory(workspace)) { "workspace root is not a directory: $workspace" }
         val canonicalRoot = workspace.toRealPath()
-        GradleConnector.newConnector()
-            .forProjectDirectory(canonicalRoot.toFile())
+        connector(canonicalRoot)
             .connect()
             .use { connection ->
                 val environment = connection.getModel(BuildEnvironment::class.java)
                 val project = connection.getModel(IdeaProject::class.java)
                 return manifest(canonicalRoot, environment, project)
             }
+    }
+
+    /**
+     * Tooling API otherwise follows the wrapper URL even when the wrapper has
+     * already installed that Gradle version locally. A cold worker must be
+     * able to reuse that installation and remain usable offline.
+     */
+    private fun connector(root: Path): GradleConnector = GradleConnector.newConnector()
+        .forProjectDirectory(root.toFile())
+        .also { connector -> localWrapperInstallation(root)?.let { connector.useInstallation(it.toFile()) } }
+
+    private fun localWrapperInstallation(root: Path): Path? {
+        val wrapper = root.resolve("gradle/wrapper/gradle-wrapper.properties")
+        if (!wrapper.isRegularFile()) return null
+        val properties = Properties().also { Files.newInputStream(wrapper).use(it::load) }
+        val distribution = properties.getProperty("distributionUrl")
+            ?.substringAfterLast('/')
+            ?.removeSuffix(".zip")
+            ?: return null
+        val candidates = Path.of(System.getProperty("user.home"), ".gradle", "wrapper", "dists", distribution)
+        if (!candidates.isDirectory()) return null
+        return Files.walk(candidates, 3).use { paths ->
+            paths.filter { path -> path.resolve("bin/gradle").isRegularFile() }.findFirst().orElse(null)
+        }
     }
 
     private fun manifest(

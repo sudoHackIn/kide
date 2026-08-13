@@ -141,7 +141,7 @@ pub fn discover_workspace(
         .collect::<Result<Vec<_>, _>>()?;
     let workspace_configuration = fingerprint_files(&root, &configuration_paths)?;
 
-    let mut component_roots = component_roots(&root, &configuration_paths)?;
+    let mut component_roots = component_roots(&configuration_paths)?;
     if !component_roots.contains(&root) {
         component_roots.push(root.clone());
     }
@@ -258,10 +258,7 @@ fn is_configuration_input(root: &Path, path: &Path) -> bool {
         .is_some_and(|relative| relative == Path::new("gradle/wrapper/gradle-wrapper.properties"))
 }
 
-fn component_roots(
-    root: &Path,
-    configuration_paths: &[PathBuf],
-) -> Result<Vec<PathBuf>, DiscoveryError> {
+fn component_roots(configuration_paths: &[PathBuf]) -> Result<Vec<PathBuf>, DiscoveryError> {
     let roots = configuration_paths
         .iter()
         .filter(|path| {
@@ -280,11 +277,7 @@ fn component_roots(
         })
         .filter_map(|path| path.parent().map(Path::to_path_buf))
         .collect::<BTreeSet<_>>();
-    if roots.iter().all(|candidate| candidate != root) {
-        Ok(roots.into_iter().collect())
-    } else {
-        Ok(roots.into_iter().collect())
-    }
+    Ok(roots.into_iter().collect())
 }
 
 fn make_component(

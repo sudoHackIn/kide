@@ -67,7 +67,7 @@ pub enum WorkerSupervisorError {
     #[error("worker reported {error:?}")]
     WorkerReported { error: WorkerError },
     #[error("handshake response had kind {received:?}, expected handshake_response")]
-    InvalidHandshake { received: WorkerMessage },
+    InvalidHandshake { received: Box<WorkerMessage> },
 }
 
 /// A cold child process with a single reader thread for protocol-only stdout.
@@ -128,7 +128,9 @@ impl WorkerSupervisor {
                 }
                 Ok(response)
             }
-            received => Err(WorkerSupervisorError::InvalidHandshake { received }),
+            received => Err(WorkerSupervisorError::InvalidHandshake {
+                received: Box::new(received),
+            }),
         }
     }
 
