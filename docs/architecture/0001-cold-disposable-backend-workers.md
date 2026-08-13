@@ -246,6 +246,23 @@ project discovery
   -> cold-worker CLI queries
 ```
 
+### Filesystem fallback discovery
+
+Before a build-specific worker is available, Core performs a deterministic
+filesystem inventory. It resolves an invocation path to the nearest Gradle
+`settings.gradle[.kts]` ancestor, then `.git`, then a recognised build marker;
+all persisted paths are relative to that root. The fallback inventories Kotlin
+and Java files, marks paths containing a `generated` segment as generated, and
+excludes build outputs and tool state (`build`, `target`, `out`, `.gradle`,
+`.idea`, `.kide`, `.git`, and `node_modules`).
+
+It does not follow workspace-internal symlinks in MVP. They are reported as
+skipped so source units cannot be duplicated or escape the workspace by an
+implicit path traversal. Each source content hash is `sha256`, while its context
+and manifest configuration fingerprint are deterministic hashes over sorted
+configuration inputs. A build worker later refines this fallback manifest; it
+does not replace Core's path or identity ownership.
+
 The required CLI surface is:
 
 ```bash

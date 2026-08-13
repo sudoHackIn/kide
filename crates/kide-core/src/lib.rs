@@ -5,11 +5,13 @@
 //! disposable compute processes as defined by ADR 0001.
 
 mod canonical;
+mod discovery;
 mod protocol;
 mod query;
 mod store;
 
 pub use canonical::*;
+pub use discovery::*;
 pub use protocol::*;
 pub use query::*;
 pub use store::*;
