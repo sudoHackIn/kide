@@ -1,38 +1,20 @@
 //! Persistent, frontend-independent KIDE primitives.
 //!
-//! This crate will own canonical records and query interfaces. Language and
-//! build-system workers remain outside this crate and are disposable compute
-//! processes as defined by ADR 0001.
+//! The canonical model intentionally persists graph facts, not a universal AST
+//! or compiler object graph. Language and build-system workers remain
+//! disposable compute processes as defined by ADR 0001.
 
-use serde::Serialize;
+mod canonical;
+mod query;
 
-/// Index format owned by KIDE Core, independent of any worker's internal AST.
+pub use canonical::*;
+pub use query::*;
+
+/// Version of the normalized records and JSON envelopes owned by KIDE Core.
+pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
+
+/// Format of the physical persistent index.
+///
+/// The storage engine may evolve independently, but a reader must reject a
+/// newer incompatible format rather than treating it as fresh data.
 pub const INDEX_FORMAT_VERSION: u32 = 1;
-
-/// A lightweight identity used until the canonical symbol schema is introduced.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct SymbolId(String);
-
-impl SymbolId {
-    /// Creates an opaque symbol identifier.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Returns the serialized form used by frontends and worker payloads.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn symbol_id_preserves_its_opaque_value() {
-        let id = SymbolId::new("kotlin:example.Service#run()V");
-
-        assert_eq!(id.as_str(), "kotlin:example.Service#run()V");
-    }
-}

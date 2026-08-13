@@ -112,7 +112,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 
 # Kotlin/JVM worker (SDKMAN OpenJDK 21.0.2; Gradle 9.4.1)
-sdk use java 21.0.2-open
+sdk env # or: sdk use java 21.0.2-open
 ./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm check
 ./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm test
 ./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm run --args="--handshake"
