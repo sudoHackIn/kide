@@ -1,0 +1,10 @@
+{
+  "protocol_version": 1,
+  "request_id": "delta-1",
+  "kind": "analysis_delta",
+  "payload": {
+    "source_unit": "gradle:app:main:src/main/kotlin/PaymentProvider.kt",
+    "previous_content": "sha256:payment-provider-v1",
+    "snapshot": null
+  }
+}

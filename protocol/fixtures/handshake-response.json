@@ -1,0 +1,16 @@
+{
+  "protocol_version": 1,
+  "request_id": "handshake-1",
+  "kind": "handshake_response",
+  "payload": {
+    "capabilities": {
+      "identity": {
+        "backend": "kide-kotlin-jvm",
+        "backend_version": "0.1.0"
+      },
+      "protocol_version": 1,
+      "languages": ["kotlin", "java"],
+      "capabilities": ["handshake"]
+    }
+  }
+}

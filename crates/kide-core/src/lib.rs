@@ -5,9 +5,11 @@
 //! disposable compute processes as defined by ADR 0001.
 
 mod canonical;
+mod protocol;
 mod query;
 
 pub use canonical::*;
+pub use protocol::*;
 pub use query::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.

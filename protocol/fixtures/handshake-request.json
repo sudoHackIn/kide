@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "request_id": "handshake-1",
+  "kind": "handshake_request",
+  "payload": {
+    "core_version": "0.1.0"
+  }
+}

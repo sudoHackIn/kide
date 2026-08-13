@@ -1,0 +1,8 @@
+{
+  "protocol_version": 1,
+  "request_id": "manifest-1",
+  "kind": "project_manifest_request",
+  "payload": {
+    "workspace_root": "."
+  }
+}

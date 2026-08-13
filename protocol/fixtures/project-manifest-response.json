@@ -1,0 +1,29 @@
+{
+  "protocol_version": 1,
+  "request_id": "manifest-1",
+  "kind": "project_manifest_response",
+  "payload": {
+    "manifest": {
+      "workspace": "workspace:demo",
+      "root": ".",
+      "components": [
+        {
+          "id": "gradle:app:main",
+          "name": "app-main",
+          "build_system": "gradle",
+          "root": ".",
+          "languages": ["kotlin"],
+          "configuration": "sha256:project-config"
+        }
+      ],
+      "dependencies": [],
+      "fingerprint": "sha256:project-model",
+      "provenance": {
+        "backend": "kide-gradle",
+        "backend_version": "0.1.0",
+        "protocol_version": 1,
+        "analysis_options": "sha256:default"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "protocol_version": 1,
+  "request_id": "handshake-unsupported",
+  "kind": "error",
+  "payload": {
+    "code": "incompatible_protocol_version",
+    "message": "worker protocol version 2 is incompatible; supported version is 1",
+    "retryable": false,
+    "supported_protocol_version": 1,
+    "received_protocol_version": 2
+  }
+}

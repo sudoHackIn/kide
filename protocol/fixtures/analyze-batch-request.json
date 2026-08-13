@@ -1,0 +1,30 @@
+{
+  "protocol_version": 1,
+  "request_id": "analyze-1",
+  "kind": "analyze_batch_request",
+  "payload": {
+    "workspace": "workspace:demo",
+    "project_fingerprint": "sha256:project-model",
+    "requested_facts": ["symbols", "occurrences", "references", "types"],
+    "source_units": [
+      {
+        "id": "gradle:app:main:src/main/kotlin/PaymentService.kt",
+        "component": "gradle:app:main",
+        "path": "src/main/kotlin/PaymentService.kt",
+        "language": "kotlin",
+        "origin": "source",
+        "content": "sha256:payment-service-v1",
+        "context": "sha256:project-model"
+      },
+      {
+        "id": "gradle:app:main:src/main/kotlin/PaymentProvider.kt",
+        "component": "gradle:app:main",
+        "path": "src/main/kotlin/PaymentProvider.kt",
+        "language": "kotlin",
+        "origin": "source",
+        "content": "sha256:payment-provider-v1",
+        "context": "sha256:project-model"
+      }
+    ]
+  }
+}

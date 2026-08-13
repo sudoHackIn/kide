@@ -1,0 +1,89 @@
+{
+  "protocol_version": 1,
+  "request_id": "analyze-1",
+  "kind": "analysis_batch_response",
+  "payload": {
+    "snapshots": [
+      {
+        "source_unit": {
+          "id": "gradle:app:main:src/main/kotlin/PaymentService.kt",
+          "component": "gradle:app:main",
+          "path": "src/main/kotlin/PaymentService.kt",
+          "language": "kotlin",
+          "origin": "source",
+          "content": "sha256:payment-service-v1",
+          "context": "sha256:project-model"
+        },
+        "symbols": [
+          {
+            "id": "kotlin:demo.PaymentService",
+            "backend_key": {
+              "backend": "kide-kotlin-jvm",
+              "schema_version": 1,
+              "value": "demo/PaymentService"
+            },
+            "language": "kotlin",
+            "kind": "class",
+            "name": "PaymentService",
+            "qualified_name": "demo.PaymentService",
+            "signature": null,
+            "component": "gradle:app:main",
+            "declaration": {
+              "source_unit": "gradle:app:main:src/main/kotlin/PaymentService.kt",
+              "bytes": { "start": 6, "end": 20 }
+            },
+            "name_range": {
+              "source_unit": "gradle:app:main:src/main/kotlin/PaymentService.kt",
+              "bytes": { "start": 12, "end": 26 }
+            },
+            "owner": null,
+            "freshness": "fresh",
+            "completeness": "complete",
+            "provenance": {
+              "backend": "kide-kotlin-jvm",
+              "backend_version": "0.1.0",
+              "protocol_version": 1,
+              "analysis_options": "sha256:default"
+            }
+          }
+        ],
+        "occurrences": [],
+        "references": [],
+        "calls": [],
+        "hierarchy": [],
+        "types": [],
+        "completeness": "complete",
+        "provenance": {
+          "backend": "kide-kotlin-jvm",
+          "backend_version": "0.1.0",
+          "protocol_version": 1,
+          "analysis_options": "sha256:default"
+        }
+      },
+      {
+        "source_unit": {
+          "id": "gradle:app:main:src/main/kotlin/PaymentProvider.kt",
+          "component": "gradle:app:main",
+          "path": "src/main/kotlin/PaymentProvider.kt",
+          "language": "kotlin",
+          "origin": "source",
+          "content": "sha256:payment-provider-v1",
+          "context": "sha256:project-model"
+        },
+        "symbols": [],
+        "occurrences": [],
+        "references": [],
+        "calls": [],
+        "hierarchy": [],
+        "types": [],
+        "completeness": "partial",
+        "provenance": {
+          "backend": "kide-kotlin-jvm",
+          "backend_version": "0.1.0",
+          "protocol_version": 1,
+          "analysis_options": "sha256:default"
+        }
+      }
+    ]
+  }
+}
