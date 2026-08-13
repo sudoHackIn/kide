@@ -13,7 +13,11 @@
           "build_system": "gradle",
           "root": ".",
           "languages": ["kotlin"],
-          "configuration": "sha256:project-config"
+          "configuration": "sha256:project-config",
+          "source_sets": [],
+          "classpath": [],
+          "toolchain": null,
+          "compiler_configuration": null
         }
       ],
       "dependencies": [],

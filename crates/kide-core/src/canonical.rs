@@ -216,6 +216,36 @@ pub struct Component {
     pub root: WorkspacePath,
     pub languages: Vec<Language>,
     pub configuration: Fingerprint,
+    #[serde(default)]
+    pub source_sets: Vec<SourceSet>,
+    /// SHA-256 content fingerprints of resolved external classpath artifacts.
+    #[serde(default)]
+    pub classpath: Vec<Fingerprint>,
+    /// The Gradle JVM/toolchain identity used to construct this component.
+    #[serde(default)]
+    pub toolchain: Option<Toolchain>,
+    /// Hash of compiler arguments and language-plugin configuration. Raw
+    /// arguments remain worker-local until a later, language-specific schema.
+    #[serde(default)]
+    pub compiler_configuration: Option<Fingerprint>,
+}
+
+/// Source-set roots discovered from an explicit build-system model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSet {
+    pub name: String,
+    pub source_roots: Vec<WorkspacePath>,
+    pub generated_roots: Vec<WorkspacePath>,
+    pub test: bool,
+}
+
+/// Machine-readable toolchain version data that is safe to persist with a
+/// portable manifest. Absolute JDK paths deliberately stay worker-local.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Toolchain {
+    pub jvm_version: String,
+    pub gradle_version: String,
+    pub kotlin_version: Option<String>,
 }
 
 /// A relation from one component to another component or immutable artifact.

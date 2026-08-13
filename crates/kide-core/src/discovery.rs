@@ -314,6 +314,10 @@ fn make_component(
         root,
         languages: vec![Language::Kotlin, Language::Java],
         configuration: configuration.clone(),
+        source_sets: Vec::new(),
+        classpath: Vec::new(),
+        toolchain: None,
+        compiler_configuration: None,
     })
 }
 

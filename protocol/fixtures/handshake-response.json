@@ -10,7 +10,7 @@
       },
       "protocol_version": 1,
       "languages": ["kotlin", "java"],
-      "capabilities": ["handshake"]
+      "capabilities": ["handshake", "project_manifest"]
     }
   }
 }

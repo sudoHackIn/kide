@@ -78,6 +78,13 @@ No JVM classpath, PSI node, JVM descriptor, or Gradle-only field is required in
 `SourceUnit`, `SymbolRecord`, or a query envelope. Backend-specific detail is
 kept in a versioned `BackendKey` or an explicit future extension payload.
 
+`ProjectManifest.Component` may additionally carry build-model data required
+to create a cold language analysis session: `source_sets` (main/test source and
+generated roots), resolved external `classpath` content fingerprints, portable
+`toolchain` version data, and a `compiler_configuration` fingerprint. These
+fields are optional/defaulted for filesystem fallback manifests. They never
+store an absolute JDK path or a live Gradle/PSI object.
+
 ## Paths, locations, and ranges
 
 All persisted source paths are normalized, slash-separated paths relative to

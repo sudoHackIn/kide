@@ -81,9 +81,18 @@ ProjectManifest
   component dependency edges
   immutable dependency artifacts
   toolchains and SDKs
-  compiler/backend options
-  configuration fingerprints
+compiler/backend options
+configuration fingerprints
 ```
+
+For the first Gradle importer, the worker uses Gradle's public Tooling API and
+its `IdeaProject`/`BuildEnvironment` models, not build-script parsing. It
+supports conventional Kotlin/JVM and Java multi-project builds with standard
+main/test source sets. The import records resolved external classpath artifacts
+by content hash, Gradle project edges, source/generated roots, and a
+configuration fingerprint. Android variants and compiler-plugin-specific
+settings remain explicitly out of the initial supported subset; they must
+return a structured `unsupported_capability` result rather than being guessed.
 
 KIDE persists the manifest. Gradle, Maven, Cargo, Bazel, or another importer is
 only restarted when its inputs have changed or the manifest is missing or
