@@ -14,7 +14,7 @@ class K2SemanticExtractorTest {
         Files.writeString(declaration, "package fixture\nclass Api\n")
         Files.writeString(use, "package fixture\nfun use() = Api()\n")
 
-        val references = K2SemanticExtractor.resolvedReferences(listOf(declaration, use))
+        val references = K2SemanticExtractor.resolvedReferences(selectedSourceFiles = listOf(declaration, use))
         assertTrue(references.isNotEmpty(), references.toString())
 
         assertTrue(references.any { reference ->

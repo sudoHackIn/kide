@@ -7,18 +7,37 @@ import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
 
 /** Runs the standalone K2 CLI with the FIR collector loaded as a compiler plugin. */
 internal object K2SemanticExtractor {
-    fun resolvedReferences(sourceFiles: List<Path>): List<K2ResolvedReference> {
+    fun resolvedReferences(
+        selectedSourceFiles: List<Path>,
+        context: GradleProjectImporter.KotlinCompilationContext? = null,
+    ): List<K2ResolvedReference> {
+        val sourceFiles = (context?.sourceFiles.orEmpty() + selectedSourceFiles)
+            .map { path -> path.toAbsolutePath().normalize() }
+            .distinct()
+            .sortedBy(Path::toString)
         require(sourceFiles.isNotEmpty()) { "K2 analysis requires at least one Kotlin source file" }
         KideFirCollector.reset()
         val output = Files.createTempDirectory("kide-k2-output-")
         try {
             val plugin = pluginJar()
+            val classpath = (context?.classpath.orEmpty() + listOf(kotlinStdlib())).distinct()
+                .joinToString(System.getProperty("path.separator"))
             val arguments = buildList {
                 add("-Xplugin=$plugin")
                 add("-no-stdlib")
                 add("-no-reflect")
+                context?.let {
+                    add("-jdk-home")
+                    add(it.jdkHome.toString())
+                    // Tooling API gives us the configured JDK home but not the
+                    // Kotlin jvmTarget. Analyse at that JDK level so inline
+                    // library metadata remains readable; target fidelity is
+                    // refined with compiler-option import later in .11.
+                    add("-jvm-target")
+                    add(Runtime.version().feature().toString())
+                }
                 add("-classpath")
-                add(kotlinStdlib().toString())
+                add(classpath)
                 add("-d")
                 add(output.toString())
                 sourceFiles.sorted().forEach { add(it.toAbsolutePath().normalize().toString()) }

@@ -129,12 +129,38 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
     }
     KotlinStructuralExtractor().use { extractor ->
         val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
-        val sourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) }
-        val resolved = K2SemanticExtractor.resolvedReferences(sourceFiles)
+        val contexts = gradleContexts(workspaceRoot)
+        // Compile all requested source units in one K2 session. A Gradle module
+        // dependency can be represented as sources rather than a built output;
+        // the union allows cross-module resolution without keeping a backend
+        // alive or materialising project artifacts.
+        val context = contexts.values.combinedForBatch()
+        val resolved = K2SemanticExtractor.resolvedReferences(
+            selectedSourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
+            context = context,
+        )
         put("snapshots", buildJsonArray {
             K2SnapshotEnricher.enrich(snapshots, workspaceRoot, resolved).forEach(::add)
         })
     }
+}
+
+internal fun Collection<GradleProjectImporter.KotlinCompilationContext>.combinedForBatch(): GradleProjectImporter.KotlinCompilationContext? {
+    if (isEmpty()) return null
+    val jdkHomes = map { it.jdkHome }.distinct()
+    require(jdkHomes.size == 1) { "K2 batch spans incompatible Gradle JVM toolchains" }
+    return GradleProjectImporter.KotlinCompilationContext(
+        component = "k2-batch",
+        sourceFiles = flatMap { it.sourceFiles }.distinct().sortedBy(Path::toString),
+        classpath = flatMap { it.classpath }.distinct().sortedBy(Path::toString),
+        jdkHome = jdkHomes.single(),
+    )
+}
+
+private fun gradleContexts(workspaceRoot: Path): Map<String, GradleProjectImporter.KotlinCompilationContext> {
+    val hasBuild = listOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts")
+        .any { name -> workspaceRoot.resolve(name).toFile().isFile }
+    return if (hasBuild) GradleProjectImporter.kotlinCompilationContexts(workspaceRoot) else emptyMap()
 }
 
 private fun failureMessage(error: Throwable, fallback: String): String = generateSequence(error) { it.cause }
