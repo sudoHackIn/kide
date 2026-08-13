@@ -50,6 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .into_iter()
                         .map(|source_unit| FileAnalysisSnapshot {
                             source_unit,
+                            structural_fingerprint: None,
+                            public_api_fingerprint: None,
                             symbols: Vec::new(),
                             occurrences: Vec::new(),
                             references: Vec::new(),

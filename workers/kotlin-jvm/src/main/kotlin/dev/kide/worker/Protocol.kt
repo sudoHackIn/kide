@@ -96,6 +96,7 @@ internal fun handshakeEnvelope(): WorkerEnvelope =
                 put("capabilities", buildJsonArray {
                     add(JsonPrimitive("handshake"))
                     add(JsonPrimitive("project_manifest"))
+                    add(JsonPrimitive("file_analysis_snapshot"))
                 })
             })
         },

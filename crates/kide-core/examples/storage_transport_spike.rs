@@ -286,6 +286,8 @@ fn probe_batch(source_unit: &SourceUnitId) -> AnalysisBatchProbe {
             bytes: ByteRange { start: 20, end: 23 },
         },
         owner: Some(SymbolId::new("kotlin:app:com.example.PaymentService")),
+        modifiers: Vec::new(),
+        annotations: Vec::new(),
         freshness: Freshness::Fresh,
         completeness: Completeness::Complete,
         provenance: provenance(),

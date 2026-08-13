@@ -26,6 +26,8 @@ use crate::{
 pub struct WorkerLaunch {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    /// Workspace root used to resolve worker-relative source paths.
+    pub working_directory: Option<PathBuf>,
     pub idle_timeout: Duration,
     pub request_timeout: Duration,
 }
@@ -35,6 +37,7 @@ impl WorkerLaunch {
         Self {
             program: program.into(),
             args: Vec::new(),
+            working_directory: None,
             idle_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
         }
@@ -238,6 +241,9 @@ impl WorkerSupervisor {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(directory) = &self.launch.working_directory {
+            command.current_dir(directory);
+        }
         let mut child = command
             .spawn()
             .map_err(|source| WorkerSupervisorError::Start {

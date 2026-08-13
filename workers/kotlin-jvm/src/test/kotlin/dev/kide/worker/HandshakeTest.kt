@@ -18,7 +18,7 @@ class HandshakeTest {
         assertEquals(WorkerMessageKind.HANDSHAKE_RESPONSE, envelope.kind)
         assertEquals("kide-kotlin-jvm", envelope.payload.jsonObject["capabilities"]!!.jsonObject["identity"]!!.jsonObject["backend"]!!.jsonPrimitive.content)
         assertEquals(
-            listOf("handshake", "project_manifest"),
+            listOf("handshake", "project_manifest", "file_analysis_snapshot"),
             envelope.payload.jsonObject["capabilities"]!!.jsonObject["capabilities"]!!.jsonArray.map { it.jsonPrimitive.content },
         )
     }

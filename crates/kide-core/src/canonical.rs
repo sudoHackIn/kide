@@ -328,6 +328,10 @@ pub struct SymbolRecord {
     pub declaration: SourceRange,
     pub name_range: SourceRange,
     pub owner: Option<SymbolId>,
+    #[serde(default)]
+    pub modifiers: Vec<String>,
+    #[serde(default)]
+    pub annotations: Vec<String>,
     pub freshness: Freshness,
     pub completeness: Completeness,
     pub provenance: Provenance,

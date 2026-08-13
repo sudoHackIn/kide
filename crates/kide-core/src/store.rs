@@ -804,6 +804,8 @@ mod tests {
                 bytes: ByteRange { start: 12, end: 26 },
             },
             owner: None,
+            modifiers: Vec::new(),
+            annotations: Vec::new(),
             freshness: Freshness::Fresh,
             completeness: Completeness::Complete,
             provenance: provenance.clone(),
@@ -825,6 +827,8 @@ mod tests {
         let supertype = SymbolId::new("kotlin:demo.PaymentProvider");
         FileAnalysisSnapshot {
             source_unit: source_unit.clone(),
+            structural_fingerprint: None,
+            public_api_fingerprint: None,
             symbols: vec![symbol.clone()],
             occurrences: vec![occurrence.clone()],
             references: vec![ReferenceEdge {

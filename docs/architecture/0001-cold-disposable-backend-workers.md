@@ -124,6 +124,15 @@ The payload is normalized and language-neutral where the concepts are truly
 shared. Language-specific details use explicitly versioned opaque fields rather
 than forcing all languages into a universal AST.
 
+The first Kotlin stage is deliberately **structural**: it runs embedded Kotlin
+PSI in the disposable worker and reports declarations, modifiers/annotations,
+syntax ranges, imports, type-reference and call candidates, parse diagnostics,
+plus structural/public-API fingerprints. PSI's UTF-16 offsets are converted to
+canonical UTF-8 byte ranges before leaving the worker. Candidates have no
+semantic target and are marked `approximate`/`partial`; they create no
+`ReferenceEdge` or `CallEdge`. The later K2 stage is the only authority allowed
+to add exact targets, calls, types, and hierarchy facts.
+
 ## Persistence boundary
 
 KIDE does not persist a compiler object graph as its primary index. It persists

@@ -88,6 +88,10 @@ pub struct AnalyzeBatchRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileAnalysisSnapshot {
     pub source_unit: SourceUnit,
+    #[serde(default)]
+    pub structural_fingerprint: Option<Fingerprint>,
+    #[serde(default)]
+    pub public_api_fingerprint: Option<Fingerprint>,
     pub symbols: Vec<SymbolRecord>,
     pub occurrences: Vec<SourceOccurrence>,
     pub references: Vec<ReferenceEdge>,

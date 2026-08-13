@@ -4,6 +4,8 @@ import java.nio.file.Path
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -64,7 +66,32 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                 unsupported(request.requestId, error.message ?: "Gradle project import failed")
             }
         }
+        WorkerMessageKind.ANALYZE_BATCH_REQUEST -> {
+            try {
+                WorkerEnvelope(
+                    protocolVersion = WORKER_PROTOCOL_VERSION,
+                    requestId = request.requestId,
+                    kind = WorkerMessageKind.ANALYSIS_BATCH_RESPONSE,
+                    payload = structuralBatch(request.payload, Path.of(".")),
+                )
+            } catch (error: Exception) {
+                unsupported(request.requestId, error.message ?: "Kotlin structural analysis failed")
+            }
+        }
         else -> unsupported(request.requestId, "worker does not implement ${request.kind.name.lowercase()}")
+    }
+}
+
+internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path) = buildJsonObject {
+    val sourceUnits = payload.jsonObject["source_units"]?.jsonArray
+        ?: error("analyze_batch_request requires source_units")
+    require(sourceUnits.all { source -> source.jsonObject["language"]?.jsonPrimitive?.content == "kotlin" }) {
+        "kide-kotlin-jvm structural worker accepts Kotlin source units only"
+    }
+    KotlinStructuralExtractor().use { extractor ->
+        put("snapshots", buildJsonArray {
+            sourceUnits.forEach { sourceUnit -> add(extractor.analyze(sourceUnit, workspaceRoot)) }
+        })
     }
 }
 

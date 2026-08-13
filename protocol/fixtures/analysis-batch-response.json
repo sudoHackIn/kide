@@ -14,6 +14,8 @@
           "content": "sha256:payment-service-v1",
           "context": "sha256:project-model"
         },
+        "structural_fingerprint": null,
+        "public_api_fingerprint": null,
         "symbols": [
           {
             "id": "kotlin:demo.PaymentService",
@@ -37,6 +39,8 @@
               "bytes": { "start": 12, "end": 26 }
             },
             "owner": null,
+            "modifiers": [],
+            "annotations": [],
             "freshness": "fresh",
             "completeness": "complete",
             "provenance": {
@@ -71,6 +75,8 @@
           "content": "sha256:payment-provider-v1",
           "context": "sha256:project-model"
         },
+        "structural_fingerprint": null,
+        "public_api_fingerprint": null,
         "symbols": [],
         "occurrences": [],
         "references": [],
