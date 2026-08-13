@@ -366,6 +366,31 @@ pub struct TypeRecord {
     pub provenance: Provenance,
 }
 
+/// Severity attached to a diagnostic emitted while analyzing one source unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+/// A persisted, source-owned analysis diagnostic. Diagnostics are data, not
+/// worker process state: a later query can report why a snapshot is partial
+/// after the worker that created it has exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticRecord {
+    pub source_unit: SourceUnitId,
+    pub range: Option<ByteRange>,
+    pub severity: DiagnosticSeverity,
+    pub code: Option<String>,
+    pub message: String,
+    pub freshness: Freshness,
+    pub completeness: Completeness,
+    pub provenance: Provenance,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

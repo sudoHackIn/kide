@@ -7,10 +7,12 @@
 mod canonical;
 mod protocol;
 mod query;
+mod store;
 
 pub use canonical::*;
 pub use protocol::*;
 pub use query::*;
+pub use store::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;

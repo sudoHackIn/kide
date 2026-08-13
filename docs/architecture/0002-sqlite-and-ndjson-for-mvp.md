@@ -54,14 +54,20 @@ SQLite stores scalar keys needed by its indexes alongside canonical record JSON
 for a narrow MVP implementation:
 
 ```text
-source_snapshots(source_unit_id, content_fingerprint, schema_version)
+kide_metadata(index_format_version) + schema_migrations(version)
+project_manifests(workspace_id, fingerprint, protocol_version, record_json)
+source_snapshots(source_unit_id, content_fingerprint, context_fingerprint, snapshot_json)
 symbols(symbol_id, source_unit_id, name, name_start_byte, record_json)
 occurrences(source_unit_id, start_byte, end_byte, kind, target_symbol_id, record_json)
-reference_edges(source_unit_id, start_byte, target_symbol_id, record_json)
+reference_edges(source_unit_id, start_byte, end_byte, target_symbol_id, record_json)
+call_edges(source_unit_id, start_byte, end_byte, target_symbol_id, record_json)
+hierarchy_edges(source_unit_id, subtype_symbol_id, supertype_symbol_id, record_json)
+type_records(source_unit_id, type_id, record_json)
+diagnostics(source_unit_id, range, severity, record_json)
 ```
 
-The next storage task will add calls, hierarchy, types, manifests, migrations,
-and complete integrity constraints. It must retain these access patterns:
+`IndexStore` now retains these access patterns while storing the canonical JSON
+record losslessly alongside the indexed scalar fields:
 
 ```text
 name -> symbols                 symbols_by_name

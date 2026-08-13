@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CallEdge, Completeness, Fingerprint, HierarchyEdge, Language, ProjectManifest, ReferenceEdge,
-    SourceOccurrence, SourceUnit, SourceUnitId, SymbolRecord, TypeRecord, WorkspaceId,
-    WorkspacePath,
+    CallEdge, Completeness, DiagnosticRecord, Fingerprint, HierarchyEdge, Language,
+    ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolRecord,
+    TypeRecord, WorkspaceId, WorkspacePath,
 };
 
 /// First version of the Core-to-worker wire protocol.
@@ -94,6 +94,7 @@ pub struct FileAnalysisSnapshot {
     pub calls: Vec<CallEdge>,
     pub hierarchy: Vec<HierarchyEdge>,
     pub types: Vec<TypeRecord>,
+    pub diagnostics: Vec<DiagnosticRecord>,
     pub completeness: Completeness,
     pub provenance: crate::Provenance,
 }

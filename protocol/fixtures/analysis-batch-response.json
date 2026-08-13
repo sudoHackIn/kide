@@ -52,6 +52,7 @@
         "calls": [],
         "hierarchy": [],
         "types": [],
+        "diagnostics": [],
         "completeness": "complete",
         "provenance": {
           "backend": "kide-kotlin-jvm",
@@ -76,6 +77,7 @@
         "calls": [],
         "hierarchy": [],
         "types": [],
+        "diagnostics": [],
         "completeness": "partial",
         "provenance": {
           "backend": "kide-kotlin-jvm",
