@@ -8,6 +8,8 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
 internal const val WORKER_NAME = "kide-kotlin-jvm"
@@ -63,7 +65,7 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                     },
                 )
             } catch (error: Exception) {
-                unsupported(request.requestId, error.message ?: "Gradle project import failed")
+                unsupported(request.requestId, failureMessage(error, "Gradle project import failed"))
             }
         }
         WorkerMessageKind.ANALYZE_BATCH_REQUEST -> {
@@ -75,11 +77,46 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                     payload = structuralBatch(request.payload, Path.of(".")),
                 )
             } catch (error: Exception) {
-                unsupported(request.requestId, error.message ?: "Kotlin structural analysis failed")
+                unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
+            }
+        }
+        WorkerMessageKind.ARTIFACT_ANALYSIS_REQUEST -> {
+            val workspaceRoot = request.payload.jsonObject["workspace_root"]?.jsonPrimitive?.content
+                ?: return unsupported(request.requestId, "artifact_analysis_request requires workspace_root")
+            val maxArtifacts = request.payload.jsonObject["max_artifacts"]?.jsonPrimitive?.intOrNull
+                ?: return unsupported(request.requestId, "artifact_analysis_request requires max_artifacts")
+            if (maxArtifacts !in 1..64) return unsupported(request.requestId, "max_artifacts must be between 1 and 64")
+            val cursor = request.payload.jsonObject["cursor"]?.jsonPrimitive?.contentOrNull
+            try {
+                WorkerEnvelope(
+                    protocolVersion = WORKER_PROTOCOL_VERSION,
+                    requestId = request.requestId,
+                    kind = WorkerMessageKind.ARTIFACT_ANALYSIS_RESPONSE,
+                    payload = artifactBatch(Path.of(workspaceRoot), maxArtifacts, cursor),
+                )
+            } catch (error: Exception) {
+                unsupported(request.requestId, failureMessage(error, "JVM dependency analysis failed"))
             }
         }
         else -> unsupported(request.requestId, "worker does not implement ${request.kind.name.lowercase()}")
     }
+}
+
+internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {
+    val artifacts = GradleProjectImporter.resolvedArtifacts(workspaceRoot)
+    val start = cursor?.let { previous ->
+        artifacts.indexOfFirst { it.cursor == previous }
+            .takeIf { it >= 0 }
+            ?.plus(1)
+            ?: error("artifact cursor is not valid for this workspace")
+    } ?: 0
+    val batch = artifacts.drop(start).take(maxArtifacts)
+    put("snapshots", buildJsonArray {
+        batch.forEach { artifact ->
+            JvmBytecodeExtractor.extract(artifact.path, artifact.component, artifact.context).forEach(::add)
+        }
+    })
+    put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
 }
 
 internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path) = buildJsonObject {
@@ -94,6 +131,12 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         })
     }
 }
+
+private fun failureMessage(error: Throwable, fallback: String): String = generateSequence(error) { it.cause }
+    .mapNotNull { cause -> cause.message?.takeIf(String::isNotBlank) }
+    .distinct()
+    .joinToString("; ")
+    .ifBlank { fallback }
 
 private fun unsupported(requestId: String, message: String): WorkerEnvelope =
     WorkerEnvelope(

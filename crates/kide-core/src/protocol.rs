@@ -11,8 +11,8 @@ use crate::{
     TypeRecord, WorkspaceId, WorkspacePath,
 };
 
-/// First version of the Core-to-worker wire protocol.
-pub const WORKER_PROTOCOL_VERSION: u32 = 1;
+/// Second version adds cold JVM dependency-artifact analysis.
+pub const WORKER_PROTOCOL_VERSION: u32 = 2;
 
 /// A named feature a worker can advertise before Core opens an analysis session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -21,6 +21,7 @@ pub enum WorkerCapability {
     Handshake,
     ProjectManifest,
     FileAnalysisSnapshot,
+    DependencyAnalysis,
     AnalysisDelta,
 }
 
@@ -109,6 +110,23 @@ pub struct AnalysisBatchResponse {
     pub snapshots: Vec<FileAnalysisSnapshot>,
 }
 
+/// Requests analysis of the resolved binary artifacts for one workspace. Their
+/// absolute paths remain worker-local; Core receives only canonical snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactAnalysisRequest {
+    pub workspace_root: WorkspacePath,
+    /// Hard cap on worker-local artifacts included in one NDJSON response.
+    pub max_artifacts: u32,
+    /// Opaque continuation cursor returned by the previous response.
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactAnalysisResponse {
+    pub snapshots: Vec<FileAnalysisSnapshot>,
+    pub next_cursor: Option<String>,
+}
+
 /// A conservative incremental update. `snapshot: None` removes a source unit;
 /// otherwise Core replaces all persisted facts for that source-unit snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +207,8 @@ pub enum WorkerMessage {
     ProjectManifestResponse(ProjectManifestResponse),
     AnalyzeBatchRequest(AnalyzeBatchRequest),
     AnalysisBatchResponse(AnalysisBatchResponse),
+    ArtifactAnalysisRequest(ArtifactAnalysisRequest),
+    ArtifactAnalysisResponse(ArtifactAnalysisResponse),
     /// Kept behind an indirection so one rare, full-file delta does not make
     /// every handshake and batch message as large as the delta payload.
     /// `Box` is transparent to serde, therefore the NDJSON protocol is
@@ -272,7 +292,10 @@ mod tests {
 
         assert_eq!(error.code, WorkerErrorCode::IncompatibleProtocolVersion);
         assert!(!error.retryable);
-        assert_eq!(error.received_protocol_version, Some(2));
+        assert_eq!(
+            error.received_protocol_version,
+            Some(WORKER_PROTOCOL_VERSION + 1)
+        );
     }
 
     #[test]

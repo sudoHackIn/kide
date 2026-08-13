@@ -29,6 +29,10 @@ import kotlinx.serialization.json.put
  * after returning only normalized data to Core.
  */
 internal object GradleProjectImporter {
+    data class ResolvedArtifact(val path: Path, val component: String, val context: String) {
+        val cursor: String get() = path.toAbsolutePath().normalize().toString()
+    }
+
     fun import(workspace: Path): JsonElement {
         require(Files.isDirectory(workspace)) { "workspace root is not a directory: $workspace" }
         val canonicalRoot = workspace.toRealPath()
@@ -39,6 +43,24 @@ internal object GradleProjectImporter {
                 val project = connection.getModel(IdeaProject::class.java)
                 return manifest(canonicalRoot, environment, project)
             }
+    }
+
+    /** Local artifact locations are intentionally exposed only inside the worker. */
+    fun resolvedArtifacts(workspace: Path): List<ResolvedArtifact> {
+        val root = workspace.toRealPath()
+        connector(root).connect().use { connection ->
+            val environment = connection.getModel(BuildEnvironment::class.java)
+            val project = connection.getModel(IdeaProject::class.java)
+            return project.modules.flatMap { module ->
+                val context = fingerprint(listOf(
+                    "gradle=${environment.gradle.gradleVersion}".encodeToByteArray(),
+                    "module=${module.gradleProject.path}".encodeToByteArray(),
+                ))
+                module.dependencies.filterIsInstance<IdeaSingleEntryLibraryDependency>().map { dependency ->
+                    ResolvedArtifact(dependency.file.toPath(), componentId(module), context)
+                }
+            }.distinctBy { it.path.toAbsolutePath().normalize() }.sortedBy { it.path.toString() }
+        }
     }
 
     /**

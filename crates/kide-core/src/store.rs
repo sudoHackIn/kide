@@ -760,10 +760,8 @@ mod tests {
             .expect_err("future protocol is rejected");
         assert!(matches!(
             error,
-            IndexStoreError::IncompatibleWorkerProtocol {
-                found: 2,
-                supported: 1
-            }
+            IndexStoreError::IncompatibleWorkerProtocol { found, supported }
+                if found == WORKER_PROTOCOL_VERSION + 1 && supported == WORKER_PROTOCOL_VERSION
         ));
         assert_eq!(store.source_unit(&source.id).expect("reads source"), None);
     }

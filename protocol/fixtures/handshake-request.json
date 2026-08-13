@@ -1,5 +1,5 @@
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "handshake-1",
   "kind": "handshake_request",
   "payload": {

@@ -1,5 +1,5 @@
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "request_id": "manifest-1",
   "kind": "project_manifest_request",
   "payload": {
