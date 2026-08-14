@@ -13,9 +13,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::{
-    CallEdge, DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, INDEX_FORMAT_VERSION,
-    ProjectManifest, Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId,
-    SymbolId, SymbolRecord, TypeRecord, WORKER_PROTOCOL_VERSION,
+    AnalysisInput, CallEdge, DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge,
+    INDEX_FORMAT_VERSION, ProjectManifest, Provenance, ReferenceEdge, SourceOccurrence, SourceUnit,
+    SourceUnitId, SymbolId, SymbolRecord, TypeRecord, WORKER_PROTOCOL_VERSION,
 };
 
 const MIGRATION_1: &str = r#"
@@ -278,6 +278,27 @@ impl IndexStore {
         records
             .into_iter()
             .map(|record| serde_json::from_str(&record).map_err(IndexStoreError::from))
+            .collect()
+    }
+
+    /// Returns persisted source inputs together with the worker provenance
+    /// that produced them, for conservative incremental planning.
+    pub fn analysis_inputs(&self) -> Result<Vec<AnalysisInput>, IndexStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT snapshot_json FROM source_snapshots ORDER BY source_unit_id")?;
+        let snapshots = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        snapshots
+            .into_iter()
+            .map(|record| {
+                let snapshot: FileAnalysisSnapshot = serde_json::from_str(&record)?;
+                Ok(AnalysisInput {
+                    source_unit: snapshot.source_unit,
+                    provenance: snapshot.provenance,
+                })
+            })
             .collect()
     }
 
@@ -754,6 +775,13 @@ mod tests {
         assert_eq!(
             store.source_units().expect("lists inputs"),
             vec![source.clone()]
+        );
+        assert_eq!(
+            store.analysis_inputs().expect("lists analysis inputs"),
+            vec![AnalysisInput {
+                source_unit: source.clone(),
+                provenance: provenance(),
+            }]
         );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
