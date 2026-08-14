@@ -1,10 +1,12 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    AnalysisFact, AnalyzeBatchRequest, ComponentId, Fingerprint, Language, SourceOrigin,
-    SourceUnit, SourceUnitId, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSupervisor,
-    WorkerSupervisorError, WorkspaceId, WorkspacePath,
+    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, ComponentId,
+    Fingerprint, Language, SourceOrigin, SourceUnit, SourceUnitId, WorkerEnvelope, WorkerLaunch,
+    WorkerMessage, WorkerSupervisor, WorkerSupervisorError, WorkspaceId, WorkspacePath,
+    materialize_artifact,
 };
+use tempfile::tempdir;
 
 fn launch(mode: &str) -> WorkerLaunch {
     let mut launch = WorkerLaunch::new(PathBuf::from(env!("CARGO_BIN_EXE_kide-fixture-worker")));
@@ -100,6 +102,40 @@ fn mismatched_protobuf_request_id_stops_the_worker() {
     assert!(!supervisor.is_running());
 }
 
+#[test]
+fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
+    let directory = tempdir().expect("temporary directories");
+    let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+    let staging = directory.path().join("staging");
+    let mut supervisor = WorkerSupervisor::new(launch("materialize"));
+    supervisor
+        .handshake("materialize-handshake")
+        .expect("starts worker");
+
+    assert!(
+        materialize_artifact(
+            &mut supervisor,
+            &cache,
+            WorkspacePath::new("."),
+            descriptor(),
+            &staging,
+            "materialize-1"
+        )
+        .expect("promotes miss")
+    );
+    assert!(
+        !materialize_artifact(
+            &mut supervisor,
+            &cache,
+            WorkspacePath::new("."),
+            descriptor(),
+            &staging,
+            "materialize-2"
+        )
+        .expect("reuses hit")
+    );
+}
+
 fn batch(request_id: &str, count: usize) -> WorkerEnvelope {
     WorkerEnvelope::new(
         request_id,
@@ -121,5 +157,25 @@ fn source_unit(index: usize) -> SourceUnit {
         origin: SourceOrigin::Source,
         content: Fingerprint::new(format!("sha256:content-{index}")),
         context: Fingerprint::new("sha256:context"),
+    }
+}
+
+fn descriptor() -> ArtifactDescriptor {
+    ArtifactDescriptor {
+        source_unit: SourceUnit {
+            id: SourceUnitId::new("jvm:sha256:fixture-artifact"),
+            component: ComponentId::new("fixture:main"),
+            path: WorkspacePath::new(".kide/dependencies/fixture"),
+            language: Language::Java,
+            origin: SourceOrigin::Dependency,
+            content: Fingerprint::new("sha256:fixture-artifact"),
+            context: Fingerprint::new("sha256:fixture-context"),
+        },
+        provenance: kide_core::Provenance {
+            backend: "kide-fixture-worker".into(),
+            backend_version: "0.1.0".into(),
+            protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
+            analysis_options: Fingerprint::new("sha256:fixture"),
+        },
     }
 }

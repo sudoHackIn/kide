@@ -8,7 +8,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{Cursor, Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use sha2::{Digest, Sha256};
@@ -63,6 +63,10 @@ pub enum ArtifactBlobCacheError {
     InvalidHeader,
     #[error("artifact blob stream ended before its declared {expected} byte payload")]
     TruncatedPayload { expected: u64 },
+    #[error("staged artifact length {actual} does not match worker metadata {expected}")]
+    StagedLengthMismatch { expected: u64, actual: u64 },
+    #[error("staged artifact checksum does not match worker metadata")]
+    StagedChecksumMismatch,
 }
 
 /// A validated payload file. Opening it reads only the fixed-size header;
@@ -206,6 +210,40 @@ impl ArtifactBlobCache {
         }
     }
 
+    /// Verifies then promotes a worker-staged blob without buffering its
+    /// payload. Verification and publication intentionally use independent
+    /// file handles: a failed checksum can therefore never publish a blob.
+    pub fn promote_staged(
+        &self,
+        key: &ArtifactBlobKey,
+        staged: impl AsRef<Path>,
+        expected_length: u64,
+        expected_sha256: [u8; 32],
+    ) -> Result<bool, ArtifactBlobCacheError> {
+        let staged = staged.as_ref();
+        let actual = fs::metadata(staged)?.len();
+        if actual != expected_length {
+            return Err(ArtifactBlobCacheError::StagedLengthMismatch {
+                expected: expected_length,
+                actual,
+            });
+        }
+        let mut hasher = Sha256::new();
+        let mut file = File::open(staged)?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        if hasher.finalize().as_slice() != expected_sha256 {
+            return Err(ArtifactBlobCacheError::StagedChecksumMismatch);
+        }
+        self.publish_stream(key, expected_length, File::open(staged)?)
+    }
+
     fn path_for(&self, key: &ArtifactBlobKey) -> PathBuf {
         self.root.join("v1").join(key.filename())
     }
@@ -342,5 +380,36 @@ mod tests {
             protocol_version: WORKER_PROTOCOL_VERSION,
             analysis_options: Fingerprint::new("sha256:options"),
         }
+    }
+
+    #[test]
+    fn promotes_a_verified_staged_file_without_reading_it_into_memory() {
+        let directory = tempdir().expect("temporary cache directory");
+        let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+        let payload = vec![0x5a; 256 * 1024];
+        let staged = directory.path().join("staged.blob");
+        fs::write(&staged, &payload).expect("writes staged payload");
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+
+        assert!(
+            cache
+                .promote_staged(&key(), &staged, payload.len() as u64, digest)
+                .expect("promotes staged blob")
+        );
+        assert_eq!(cache.load(&key()).expect("loads cache"), Some(payload));
+    }
+
+    #[test]
+    fn rejects_bad_staged_metadata_before_publication() {
+        let directory = tempdir().expect("temporary cache directory");
+        let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+        let staged = directory.path().join("staged.blob");
+        fs::write(&staged, b"payload").expect("writes staged payload");
+
+        assert!(matches!(
+            cache.promote_staged(&key(), &staged, 7, [0; 32]),
+            Err(ArtifactBlobCacheError::StagedChecksumMismatch)
+        ));
+        assert!(cache.open_blob(&key()).expect("opens cache").is_none());
     }
 }

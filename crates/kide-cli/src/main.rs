@@ -8,8 +8,8 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kide_core::{
-    CANONICAL_SCHEMA_VERSION, IndexStore, Language, QueryProblem, QueryResponse, QueryStatus,
-    ResultMetadata, WorkerLaunch, discover_workspace, index_batch,
+    ArtifactBlobCache, CANONICAL_SCHEMA_VERSION, IndexStore, Language, QueryProblem, QueryResponse,
+    QueryStatus, ResultMetadata, WorkerLaunch, discover_workspace, index_batch_with_artifact_cache,
 };
 
 /// Headless, persistent semantic code platform.
@@ -86,11 +86,19 @@ fn index(path: PathBuf) -> Result<QueryStatus> {
         .into_iter()
         .filter(|source| source.language == Language::Kotlin)
         .collect::<Vec<_>>();
-    let run = index_batch(
+    let artifact_cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| discovery.root.join(".kide/artifact-cache"));
+    let artifact_cache = ArtifactBlobCache::open(artifact_cache_root)?;
+    let staging = discovery.root.join(".kide/staging");
+    std::fs::create_dir_all(&staging)?;
+    let run = index_batch_with_artifact_cache(
         &mut store,
         &discovery.manifest,
         &sources,
         kotlin_worker_launch(&discovery.root),
+        &artifact_cache,
+        &staging,
     )?;
     println!(
         "{}",

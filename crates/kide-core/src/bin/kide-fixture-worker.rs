@@ -7,11 +7,13 @@ use std::{
 };
 
 use kide_core::{
-    AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDiscoveryResponse, Completeness,
-    FileAnalysisSnapshot, HandshakeResponse, Language, Provenance, WORKER_PROTOCOL_VERSION,
+    AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryResponse,
+    ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, HandshakeResponse,
+    Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WORKER_PROTOCOL_VERSION,
     WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
-    worker_framing, worker_proto_adapter,
+    artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
 };
+use sha2::{Digest, Sha256};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args()
@@ -80,9 +82,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             WorkerMessage::ArtifactDiscoveryRequest(_) => {
                 WorkerMessage::ArtifactDiscoveryResponse(ArtifactDiscoveryResponse {
-                    artifacts: Vec::new(),
+                    artifacts: if mode == "materialize" {
+                        vec![descriptor()]
+                    } else {
+                        Vec::new()
+                    },
                     next_cursor: None,
                 })
+            }
+            WorkerMessage::ArtifactMaterializationRequest(request) if mode == "materialize" => {
+                std::fs::create_dir_all(&request.staging_directory)?;
+                let bytes = ArtifactBlobLayout::encode(&artifact_proto::GraphArtifact {
+                    snapshots: vec![artifact_proto::GraphSnapshot {
+                        source_unit: Some(artifact_proto::ArtifactSourceUnit {
+                            id: "jvm:sha256:fixture-artifact".into(),
+                            component: "fixture:main".into(),
+                            path: ".kide/dependencies/fixture".into(),
+                            language: "java".into(),
+                            origin: "dependency".into(),
+                            content_fingerprint: "sha256:fixture-artifact".into(),
+                            context_fingerprint: "sha256:fixture-context".into(),
+                        }),
+                        provenances: vec![artifact_proto::ArtifactProvenance {
+                            backend: "kide-fixture-worker".into(),
+                            backend_version: "0.1.0".into(),
+                            worker_protocol_version: WORKER_PROTOCOL_VERSION,
+                            analysis_options_fingerprint: "sha256:fixture".into(),
+                        }],
+                        completeness: "partial".into(),
+                        ..Default::default()
+                    }],
+                })
+                .bytes()
+                .to_vec();
+                let filename = "fixture-artifact.blob";
+                std::fs::write(
+                    std::path::Path::new(&request.staging_directory).join(filename),
+                    &bytes,
+                )?;
+                WorkerMessage::ArtifactMaterializationResponse(Box::new(
+                    ArtifactMaterializationResponse {
+                        staged_filename: filename.into(),
+                        byte_length: bytes.len() as u64,
+                        sha256: kide_core::Fingerprint::new(format!(
+                            "sha256:{}",
+                            Sha256::digest(&bytes)
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        )),
+                        blob_format_version: 1,
+                    },
+                ))
             }
             _ => continue,
         };
@@ -97,6 +148,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         worker_framing::write_frame(&mut stdout, &worker_proto_adapter::envelope(&response)?)?;
     }
     Ok(())
+}
+
+fn descriptor() -> ArtifactDescriptor {
+    ArtifactDescriptor {
+        source_unit: SourceUnit {
+            id: SourceUnitId::new("jvm:sha256:fixture-artifact"),
+            component: kide_core::ComponentId::new("fixture:main"),
+            path: kide_core::WorkspacePath::new(".kide/dependencies/fixture"),
+            language: Language::Java,
+            origin: SourceOrigin::Dependency,
+            content: kide_core::Fingerprint::new("sha256:fixture-artifact"),
+            context: kide_core::Fingerprint::new("sha256:fixture-context"),
+        },
+        provenance: provenance(),
+    }
 }
 
 fn provenance() -> Provenance {

@@ -13,6 +13,29 @@ message ArtifactEnvelope {
   GraphArtifact artifact = 4;
 }
 
+// The physical JVM blob is a fixed header followed by this TOC and independent
+// protobuf sections. Offsets are absolute byte positions in the blob.
+message ArtifactBlobToc {
+  uint32 layout_version = 1;
+  repeated ArtifactBlobSection sections = 2;
+}
+message ArtifactBlobSection {
+  ArtifactBlobSectionKind kind = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+  bytes sha256 = 4;
+}
+enum ArtifactBlobSectionKind {
+  ARTIFACT_BLOB_SECTION_KIND_UNSPECIFIED = 0;
+  ARTIFACT_BLOB_SECTION_KIND_SYMBOL_DICTIONARY = 1;
+  ARTIFACT_BLOB_SECTION_KIND_GRAPH_FACTS = 2;
+}
+
+message ArtifactSymbolDictionary {
+  repeated ArtifactSymbolDictionaryEntry entries = 1;
+}
+message ArtifactSymbolDictionaryEntry { string id = 1; string name = 2; }
+
 message GraphArtifact {
   repeated GraphSnapshot snapshots = 1;
 }

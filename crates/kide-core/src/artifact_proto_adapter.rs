@@ -60,6 +60,12 @@ pub fn decode_snapshots(bytes: &[u8]) -> Result<Vec<FileAnalysisSnapshot>, Artif
     if envelope.payload_sha256 != Sha256::digest(&payload).as_slice() {
         return Err(ArtifactProtoError::ChecksumMismatch);
     }
+    decode_graph_artifact(artifact)
+}
+
+pub fn decode_graph_artifact(
+    artifact: artifact_proto::GraphArtifact,
+) -> Result<Vec<FileAnalysisSnapshot>, ArtifactProtoError> {
     artifact
         .snapshots
         .into_iter()

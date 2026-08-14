@@ -20,6 +20,7 @@ fun main(args: Array<String>) {
     }
 }
 
+
 /** Runs one framed protobuf request/response stream for Core's supervisor. */
 private fun serve() {
     while (true) {
@@ -87,6 +88,14 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 unsupported(request.requestId, failureMessage(error, "JVM dependency discovery failed"))
             }
         }
+        Worker.Envelope.MessageCase.ARTIFACT_MATERIALIZATION_REQUEST -> {
+            try {
+                Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
+                    .setArtifactMaterializationResponse(ArtifactMaterializer.materialize(request.artifactMaterializationRequest)).build()
+            } catch (error: Exception) {
+                unsupported(request.requestId, failureMessage(error, "JVM artifact materialization failed"))
+            }
+        }
         else -> unsupported(request.requestId, "worker does not implement ${request.messageCase.name.lowercase()}")
     }
 }
@@ -98,7 +107,7 @@ private fun workspaceRoot(): Path = System.getenv("KIDE_WORKSPACE_ROOT")
     ?.normalize()
     ?: Path.of(".").toAbsolutePath().normalize()
 
-private fun resolveWorkspacePath(value: String): Path {
+internal fun resolveWorkspacePath(value: String): Path {
     val path = Path.of(value)
     return if (path.isAbsolute) path else workspaceRoot().resolve(path).normalize()
 }
