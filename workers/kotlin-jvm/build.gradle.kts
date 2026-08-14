@@ -1,4 +1,5 @@
 plugins {
+    id("com.google.protobuf") version "0.9.5"
     kotlin("jvm") version "2.4.10"
     kotlin("plugin.serialization") version "2.4.10"
     application
@@ -20,6 +21,16 @@ dependencies {
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
     testImplementation(kotlin("test-junit5"))
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+protobuf {
+    protoc { artifact = "com.google.protobuf:protoc:4.32.0" }
+}
+
+sourceSets {
+    main {
+        proto.srcDir("../../protocol")
+    }
 }
 
 sourceSets {

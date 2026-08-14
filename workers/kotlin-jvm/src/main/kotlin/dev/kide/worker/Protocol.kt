@@ -10,7 +10,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-internal const val WORKER_PROTOCOL_VERSION = 2
+internal const val WORKER_PROTOCOL_VERSION = 3
 
 /** The stable NDJSON envelope shared with KIDE Core. */
 @Serializable
@@ -47,6 +47,12 @@ internal enum class WorkerMessageKind {
 
     @SerialName("artifact_analysis_response")
     ARTIFACT_ANALYSIS_RESPONSE,
+
+    @SerialName("artifact_discovery_request")
+    ARTIFACT_DISCOVERY_REQUEST,
+
+    @SerialName("artifact_discovery_response")
+    ARTIFACT_DISCOVERY_RESPONSE,
 
     @SerialName("analysis_delta")
     ANALYSIS_DELTA,

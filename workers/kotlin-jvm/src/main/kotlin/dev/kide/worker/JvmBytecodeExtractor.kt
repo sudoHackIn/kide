@@ -28,6 +28,18 @@ import org.objectweb.asm.Type
  * persistence transaction artifact-granular rather than class-granular.
  */
 internal object JvmBytecodeExtractor {
+    fun descriptor(artifact: Path, component: String, context: String): JsonElement {
+        require(artifact.isRegularFile() || artifact.isDirectory()) { "artifact does not exist: $artifact" }
+        val artifactHash = fingerprint(artifactBytes(artifact))
+        return buildJsonObject {
+            put("source_unit", buildJsonObject {
+                put("id", "jvm:$artifactHash"); put("component", component)
+                put("path", ".kide/dependencies/${artifactHash.removePrefix("sha256:")}")
+                put("language", "java"); put("origin", "dependency"); put("content", artifactHash); put("context", context)
+            })
+            put("provenance", provenance(context))
+        }
+    }
     /**
      * Resolves a bounded set of K2 target keys to the durable IDs emitted by
      * [extract]. Only classes requested by K2 are opened; an overloaded JVM

@@ -75,7 +75,7 @@ fn provenance() -> Provenance {
     Provenance {
         backend: "fixture".to_owned(),
         backend_version: "0.1.0".to_owned(),
-        protocol_version: 2,
+        protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
         analysis_options: Fingerprint::new("sha256:project"),
     }
 }

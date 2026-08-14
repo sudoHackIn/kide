@@ -7,9 +7,9 @@ use std::{
 };
 
 use kide_core::{
-    AnalysisBatchResponse, ArtifactAnalysisResponse, Completeness, FileAnalysisSnapshot,
-    HandshakeResponse, Language, Provenance, WORKER_PROTOCOL_VERSION, WorkerCapabilities,
-    WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
+    AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDiscoveryResponse, Completeness,
+    FileAnalysisSnapshot, HandshakeResponse, Language, Provenance, WORKER_PROTOCOL_VERSION,
+    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             WorkerMessage::ArtifactAnalysisRequest(_) => {
                 WorkerMessage::ArtifactAnalysisResponse(ArtifactAnalysisResponse {
                     snapshots: Vec::new(),
+                    next_cursor: None,
+                })
+            }
+            WorkerMessage::ArtifactDiscoveryRequest(_) => {
+                WorkerMessage::ArtifactDiscoveryResponse(ArtifactDiscoveryResponse {
+                    artifacts: Vec::new(),
                     next_cursor: None,
                 })
             }

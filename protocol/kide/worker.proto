@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package kide.worker.v1;
+
+// Control-plane contract between KIDE Core and disposable workers. Artifact
+// payloads are deliberately absent: workers write KIDE-owned binary blobs to
+// Core-provided staging paths and report only their metadata here.
+message Envelope {
+  uint32 protocol_version = 1;
+  string request_id = 2;
+  oneof message {
+    HandshakeRequest handshake_request = 10;
+    HandshakeResponse handshake_response = 11;
+    ArtifactDiscoveryRequest artifact_discovery_request = 12;
+    ArtifactDiscoveryResponse artifact_discovery_response = 13;
+    Error error = 14;
+  }
+}
+
+message HandshakeRequest { string core_version = 1; }
+message HandshakeResponse {
+  string backend = 1;
+  string backend_version = 2;
+  uint32 protocol_version = 3;
+  repeated string capabilities = 4;
+}
+
+message ArtifactDiscoveryRequest {
+  string workspace_root = 1;
+  uint32 max_artifacts = 2;
+  optional string cursor = 3;
+}
+message ArtifactDescriptor {
+  string source_unit_id = 1;
+  string component_id = 2;
+  string workspace_path = 3;
+  string content_fingerprint = 4;
+  string context_fingerprint = 5;
+  string backend = 6;
+  string backend_version = 7;
+  uint32 worker_protocol_version = 8;
+  string analysis_options_fingerprint = 9;
+}
+message ArtifactDiscoveryResponse {
+  repeated ArtifactDescriptor artifacts = 1;
+  optional string next_cursor = 2;
+}
+message Error {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  uint32 supported_protocol_version = 4;
+  optional uint32 received_protocol_version = 5;
+}

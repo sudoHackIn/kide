@@ -11,8 +11,8 @@ use crate::{
     TypeRecord, WorkspaceId, WorkspacePath,
 };
 
-/// Second version adds cold JVM dependency-artifact analysis.
-pub const WORKER_PROTOCOL_VERSION: u32 = 2;
+/// Third version separates dependency discovery from expensive fact extraction.
+pub const WORKER_PROTOCOL_VERSION: u32 = 3;
 
 /// A named feature a worker can advertise before Core opens an analysis session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,6 +127,28 @@ pub struct ArtifactAnalysisResponse {
     pub next_cursor: Option<String>,
 }
 
+/// A lightweight resolved artifact identity. It deliberately does not carry a
+/// worker-local file path or semantic payload, so Core can check shared cache
+/// state before asking a cold worker to extract class facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactDescriptor {
+    pub source_unit: SourceUnit,
+    pub provenance: crate::Provenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactDiscoveryRequest {
+    pub workspace_root: WorkspacePath,
+    pub max_artifacts: u32,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactDiscoveryResponse {
+    pub artifacts: Vec<ArtifactDescriptor>,
+    pub next_cursor: Option<String>,
+}
+
 /// A conservative incremental update. `snapshot: None` removes a source unit;
 /// otherwise Core replaces all persisted facts for that source-unit snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +231,8 @@ pub enum WorkerMessage {
     AnalysisBatchResponse(AnalysisBatchResponse),
     ArtifactAnalysisRequest(ArtifactAnalysisRequest),
     ArtifactAnalysisResponse(ArtifactAnalysisResponse),
+    ArtifactDiscoveryRequest(ArtifactDiscoveryRequest),
+    ArtifactDiscoveryResponse(ArtifactDiscoveryResponse),
     /// Kept behind an indirection so one rare, full-file delta does not make
     /// every handshake and batch message as large as the delta payload.
     /// `Box` is transparent to serde, therefore the NDJSON protocol is
