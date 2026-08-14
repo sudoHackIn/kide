@@ -7,6 +7,7 @@
 mod canonical;
 mod discovery;
 mod freshness;
+mod orchestrator;
 mod protocol;
 mod query;
 mod store;
@@ -15,6 +16,7 @@ mod supervisor;
 pub use canonical::*;
 pub use discovery::*;
 pub use freshness::*;
+pub use orchestrator::*;
 pub use protocol::*;
 pub use query::*;
 pub use store::*;
