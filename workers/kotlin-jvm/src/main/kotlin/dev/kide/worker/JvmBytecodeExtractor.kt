@@ -62,7 +62,11 @@ internal object JvmBytecodeExtractor {
     private fun classEntries(artifact: Path): List<Pair<String, ByteArray>> = when {
         artifact.isRegularFile() -> JarFile(artifact.toFile()).use { jar ->
             jar.entries().asSequence()
-                .filter { !it.isDirectory && it.name.endsWith(".class") && !it.name.endsWith("module-info.class") }
+                .filter { entry ->
+                    !entry.isDirectory && entry.name.endsWith(".class") &&
+                        !entry.name.endsWith("module-info.class") &&
+                        !entry.name.startsWith("META-INF/versions/")
+                }
                 .sortedBy { it.name }
                 .map { entry -> entry.name to jar.getInputStream(entry).use { it.readBytes() } }
                 .toList()

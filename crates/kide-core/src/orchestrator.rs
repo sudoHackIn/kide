@@ -58,11 +58,12 @@ pub fn index_batch(
             }
         }
     }
+    // An unchanged manifest/source context also means the artifact model has
+    // not changed, so do not start a worker merely to rediscover dependencies.
     if reanalyze.is_empty() {
         store.put_manifest(manifest)?;
         return Ok(run);
     }
-
     let mut supervisor = WorkerSupervisor::new(launch);
     supervisor.handshake("index-handshake")?;
     let response = supervisor.request(WorkerEnvelope::new(

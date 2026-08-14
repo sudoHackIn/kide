@@ -11,3 +11,5 @@
 **/.gradle/
 **/.kotlin/
 **/build/
+**/.kide/
+.DS_Store

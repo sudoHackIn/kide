@@ -1,11 +1,15 @@
-use std::path::PathBuf;
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kide_core::{
-    CANONICAL_SCHEMA_VERSION, QueryProblem, QueryResponse, QueryStatus, ResultMetadata,
+    CANONICAL_SCHEMA_VERSION, IndexStore, Language, QueryProblem, QueryResponse, QueryStatus,
+    ResultMetadata, WorkerLaunch, discover_workspace, index_batch,
 };
 
 /// Headless, persistent semantic code platform.
@@ -63,7 +67,7 @@ fn run() -> Result<QueryStatus> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Index { path } => pending("index", path.display().to_string()),
+        Command::Index { path } => index(path),
         Command::Status => pending("status", String::new()),
         Command::Symbols { query } => pending("symbols", query),
         Command::Definition { location } => pending("definition", location),
@@ -72,6 +76,53 @@ fn run() -> Result<QueryStatus> {
         Command::Callers { target } => pending("callers", target),
         Command::TypeAt { location } => pending("type-at", location),
     }
+}
+
+fn index(path: PathBuf) -> Result<QueryStatus> {
+    let discovery = discover_workspace(&path)?;
+    let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
+    let sources = discovery
+        .source_units
+        .into_iter()
+        .filter(|source| source.language == Language::Kotlin)
+        .collect::<Vec<_>>();
+    let run = index_batch(
+        &mut store,
+        &discovery.manifest,
+        &sources,
+        kotlin_worker_launch(&discovery.root),
+    )?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": CANONICAL_SCHEMA_VERSION,
+            "status": "ok",
+            "workspace": discovery.root,
+            "reused": run.reused,
+            "analyzed": run.analyzed,
+        "removed": run.removed,
+        "worker_starts": run.worker_starts,
+        })
+    );
+    Ok(QueryStatus::Ok)
+}
+
+fn kotlin_worker_launch(workspace: &Path) -> WorkerLaunch {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let worker = repository.join("workers/kotlin-jvm");
+    let mut launch = WorkerLaunch::new(worker.join("gradlew"));
+    launch.args = vec![
+        OsString::from("-q"),
+        OsString::from("--project-dir"),
+        worker.into_os_string(),
+        OsString::from("run"),
+        OsString::from("--args=--serve"),
+    ];
+    launch.environment.insert(
+        OsString::from("KIDE_WORKSPACE_ROOT"),
+        workspace.as_os_str().to_os_string(),
+    );
+    launch
 }
 
 fn pending(command: &str, argument: String) -> Result<QueryStatus> {

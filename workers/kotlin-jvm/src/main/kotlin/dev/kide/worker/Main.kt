@@ -61,7 +61,7 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                     requestId = request.requestId,
                     kind = WorkerMessageKind.PROJECT_MANIFEST_RESPONSE,
                     payload = buildJsonObject {
-                        put("manifest", GradleProjectImporter.import(Path.of(workspaceRoot)))
+                        put("manifest", GradleProjectImporter.import(resolveWorkspacePath(workspaceRoot)))
                     },
                 )
             } catch (error: Exception) {
@@ -74,7 +74,7 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                     protocolVersion = WORKER_PROTOCOL_VERSION,
                     requestId = request.requestId,
                     kind = WorkerMessageKind.ANALYSIS_BATCH_RESPONSE,
-                    payload = structuralBatch(request.payload, Path.of(".")),
+                    payload = structuralBatch(request.payload, workspaceRoot()),
                 )
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
@@ -92,7 +92,7 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
                     protocolVersion = WORKER_PROTOCOL_VERSION,
                     requestId = request.requestId,
                     kind = WorkerMessageKind.ARTIFACT_ANALYSIS_RESPONSE,
-                    payload = artifactBatch(Path.of(workspaceRoot), maxArtifacts, cursor),
+                    payload = artifactBatch(resolveWorkspacePath(workspaceRoot), maxArtifacts, cursor),
                 )
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "JVM dependency analysis failed"))
@@ -100,6 +100,18 @@ internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
         }
         else -> unsupported(request.requestId, "worker does not implement ${request.kind.name.lowercase()}")
     }
+}
+
+private fun workspaceRoot(): Path = System.getenv("KIDE_WORKSPACE_ROOT")
+    ?.takeIf(String::isNotBlank)
+    ?.let(Path::of)
+    ?.toAbsolutePath()
+    ?.normalize()
+    ?: Path.of(".").toAbsolutePath().normalize()
+
+private fun resolveWorkspacePath(value: String): Path {
+    val path = Path.of(value)
+    return if (path.isAbsolute) path else workspaceRoot().resolve(path).normalize()
 }
 
 internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {

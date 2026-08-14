@@ -4,7 +4,7 @@
 //! compiler/build state; Core owns every committed fact independently.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     io::{self, BufRead, BufReader, Write},
     path::PathBuf,
@@ -28,6 +28,8 @@ pub struct WorkerLaunch {
     pub args: Vec<OsString>,
     /// Workspace root used to resolve worker-relative source paths.
     pub working_directory: Option<PathBuf>,
+    /// Process-local worker configuration; never serialized into the protocol.
+    pub environment: BTreeMap<OsString, OsString>,
     pub idle_timeout: Duration,
     pub request_timeout: Duration,
 }
@@ -38,6 +40,7 @@ impl WorkerLaunch {
             program: program.into(),
             args: Vec::new(),
             working_directory: None,
+            environment: BTreeMap::new(),
             idle_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
         }
@@ -240,6 +243,7 @@ impl WorkerSupervisor {
         let mut command = Command::new(&self.launch.program);
         command
             .args(&self.launch.args)
+            .envs(&self.launch.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
