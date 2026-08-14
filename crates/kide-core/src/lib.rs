@@ -139,6 +139,16 @@ mod worker_framing_tests {
     }
 
     #[test]
+    fn protobuf_readers_ignore_unknown_envelope_fields() {
+        // Field 99 is intentionally absent from worker.proto. Protobuf's
+        // forward-compatibility rule lets an older Core accept this envelope.
+        let envelope = worker_proto::Envelope::decode(&[0x98, 0x06, 0x01][..])
+            .expect("unknown field is skipped");
+        assert_eq!(envelope.protocol_version, 0);
+        assert!(envelope.message.is_none());
+    }
+
+    #[test]
     fn source_unit_adapter_preserves_snapshot_identity() {
         let source = SourceUnit {
             id: SourceUnitId::new("gradle:app:Main.kt"),
