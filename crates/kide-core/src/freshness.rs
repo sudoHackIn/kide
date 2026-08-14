@@ -6,12 +6,21 @@
 
 use std::collections::BTreeMap;
 
-use crate::{SourceUnit, SourceUnitId};
+use crate::{Provenance, SourceUnit, SourceUnitId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidationReason {
     ContentChanged,
     ContextChanged,
+    BackendChanged,
+    AnalysisOptionsChanged,
+}
+
+/// Inputs that can additionally detect a worker implementation or option drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisInput {
+    pub source_unit: SourceUnit,
+    pub provenance: Provenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +72,62 @@ pub fn plan_invalidation(current: &[SourceUnit], persisted: &[SourceUnit]) -> Ve
     }
     for id in persisted.keys().filter(|id| !current.contains_key(*id)) {
         actions.push(IndexAction::Remove {
-            source_unit: SourceUnitId::new(id),
+            source_unit: SourceUnitId::new((*id).clone()),
+        });
+    }
+    actions
+}
+
+/// Extends source comparison with worker identity and analysis-option checks.
+pub fn plan_analysis_invalidation(
+    current: &[AnalysisInput],
+    persisted: &[AnalysisInput],
+) -> Vec<IndexAction> {
+    let current = current
+        .iter()
+        .map(|input| (input.source_unit.id.as_str(), input))
+        .collect::<BTreeMap<_, _>>();
+    let persisted = persisted
+        .iter()
+        .map(|input| (input.source_unit.id.as_str(), input))
+        .collect::<BTreeMap<_, _>>();
+    let mut actions = Vec::with_capacity(current.len() + persisted.len());
+    for (id, input) in &current {
+        let source_unit = input.source_unit.clone();
+        let reason = match persisted.get(id) {
+            None => Some(InvalidationReason::ContentChanged),
+            Some(previous) if previous.source_unit.context != source_unit.context => {
+                Some(InvalidationReason::ContextChanged)
+            }
+            Some(previous) if previous.source_unit.content != source_unit.content => {
+                Some(InvalidationReason::ContentChanged)
+            }
+            Some(previous)
+                if previous.provenance.backend != input.provenance.backend
+                    || previous.provenance.backend_version != input.provenance.backend_version
+                    || previous.provenance.protocol_version
+                        != input.provenance.protocol_version =>
+            {
+                Some(InvalidationReason::BackendChanged)
+            }
+            Some(previous)
+                if previous.provenance.analysis_options != input.provenance.analysis_options =>
+            {
+                Some(InvalidationReason::AnalysisOptionsChanged)
+            }
+            Some(_) => None,
+        };
+        actions.push(match reason {
+            Some(reason) => IndexAction::Reanalyze {
+                source_unit,
+                reason,
+            },
+            None => IndexAction::Reuse(source_unit),
+        });
+    }
+    for id in persisted.keys().filter(|id| !current.contains_key(*id)) {
+        actions.push(IndexAction::Remove {
+            source_unit: SourceUnitId::new(*id),
         });
     }
     actions
@@ -116,5 +180,45 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn invalidates_when_backend_or_analysis_options_change() {
+        let source = unit("source", "sha256:a", "sha256:context");
+        let current = AnalysisInput {
+            source_unit: source.clone(),
+            provenance: provenance("1", "sha256:options"),
+        };
+        let old_backend = AnalysisInput {
+            source_unit: source.clone(),
+            provenance: provenance("0", "sha256:options"),
+        };
+        let old_options = AnalysisInput {
+            source_unit: source.clone(),
+            provenance: provenance("1", "sha256:old-options"),
+        };
+        assert!(matches!(
+            plan_analysis_invalidation(std::slice::from_ref(&current), &[old_backend])[..],
+            [IndexAction::Reanalyze {
+                reason: InvalidationReason::BackendChanged,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            plan_analysis_invalidation(&[current], &[old_options])[..],
+            [IndexAction::Reanalyze {
+                reason: InvalidationReason::AnalysisOptionsChanged,
+                ..
+            }]
+        ));
+    }
+
+    fn provenance(version: &str, options: &str) -> Provenance {
+        Provenance {
+            backend: "fixture-worker".to_owned(),
+            backend_version: version.to_owned(),
+            protocol_version: 2,
+            analysis_options: Fingerprint::new(options),
+        }
     }
 }
