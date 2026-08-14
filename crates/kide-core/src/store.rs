@@ -267,6 +267,28 @@ impl IndexStore {
         )
     }
 
+    /// Returns every persisted source input in stable order for incremental planning.
+    pub fn source_units(&self) -> Result<Vec<SourceUnit>, IndexStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT source_unit_json FROM source_snapshots ORDER BY source_unit_id")?;
+        let records = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|record| serde_json::from_str(&record).map_err(IndexStoreError::from))
+            .collect()
+    }
+
+    /// Removes all facts owned by a source unit in one transaction.
+    pub fn remove_snapshot(&mut self, source_unit: &SourceUnitId) -> Result<(), IndexStoreError> {
+        let transaction = self.connection.transaction()?;
+        delete_file_owned_facts(&transaction, source_unit)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn symbols_named(&self, name: &str) -> Result<Vec<SymbolRecord>, IndexStoreError> {
         self.json_many(
             "SELECT record_json FROM symbols WHERE name = ?1 ORDER BY source_unit_id, name_start_byte, symbol_id",
@@ -716,6 +738,30 @@ mod tests {
                 .symbols_named("PaymentService")
                 .expect("reads existing facts"),
             old_snapshot.symbols
+        );
+    }
+
+    #[test]
+    fn lists_inputs_and_removes_a_deleted_source_atomically() {
+        let directory = tempdir().expect("temporary index directory");
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        let source = source_unit("sha256:content-v1");
+        store
+            .replace_snapshot(&source, &snapshot(source.clone()))
+            .expect("commits snapshot");
+
+        assert_eq!(
+            store.source_units().expect("lists inputs"),
+            vec![source.clone()]
+        );
+        store.remove_snapshot(&source.id).expect("removes source");
+        assert!(store.source_units().expect("lists inputs").is_empty());
+        assert!(
+            store
+                .symbols_named("PaymentService")
+                .expect("reads facts")
+                .is_empty()
         );
     }
 
