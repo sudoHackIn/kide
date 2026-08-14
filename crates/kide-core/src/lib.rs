@@ -7,6 +7,7 @@
 pub mod artifact_blob_layout;
 mod artifact_cache;
 pub mod artifact_proto_adapter;
+pub mod query_resolver;
 pub mod worker_proto {
     include!(concat!(env!("OUT_DIR"), "/kide.worker.v1.rs"));
 }

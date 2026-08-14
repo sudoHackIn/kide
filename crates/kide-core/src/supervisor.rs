@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    io::{self, BufReader},
+    io::{self, BufRead, BufReader, Read},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
@@ -153,6 +153,8 @@ impl WorkerSupervisor {
         self.ensure_running()?;
 
         let request_id = request.request_id.clone();
+        let _span = tracing::debug_span!(target: "kide::worker", "worker_request", request_id = %request_id).entered();
+        tracing::debug!(target: "kide::worker", "sending request");
         let timeout = self.launch.request_timeout;
         let response = {
             let running = self.running.as_mut().expect("worker starts before request");
@@ -172,10 +174,12 @@ impl WorkerSupervisor {
                 return Err(WorkerSupervisorError::Frame(error));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::warn!(target: "kide::worker", "worker response channel disconnected");
                 self.stop();
                 return Err(WorkerSupervisorError::Exited);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(target: "kide::worker", timeout_secs = timeout.as_secs(), "worker request timed out");
                 self.stop();
                 return Err(WorkerSupervisorError::TimedOut { timeout });
             }
@@ -203,6 +207,7 @@ impl WorkerSupervisor {
         if let Some(running) = self.running.as_mut() {
             running.last_activity = Instant::now();
         }
+        tracing::debug!(target: "kide::worker", "received response");
         Ok(envelope)
     }
 
@@ -234,12 +239,16 @@ impl WorkerSupervisor {
         }
 
         let mut command = Command::new(&self.launch.program);
+        tracing::info!(target: "kide::worker", program = %self.launch.program.display(), "starting worker");
         command
             .args(&self.launch.args)
             .envs(&self.launch.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            // stdout is reserved for framed protobuf.  Core owns the worker's
+            // stderr too, so it can merge operational messages into its own
+            // tracing pipeline instead of requiring a terminal attachment.
+            .stderr(Stdio::piped());
         if let Some(directory) = &self.launch.working_directory {
             command.current_dir(directory);
         }
@@ -251,6 +260,7 @@ impl WorkerSupervisor {
             })?;
         let stdin = child.stdin.take().expect("piped stdin is present");
         let stdout = child.stdout.take().expect("piped stdout is present");
+        let stderr = child.stderr.take().expect("piped stderr is present");
         let (sender, responses) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
@@ -269,6 +279,7 @@ impl WorkerSupervisor {
                 }
             }
         });
+        thread::spawn(move || forward_worker_stderr(stderr));
         self.running = Some(RunningWorker {
             child,
             stdin,
@@ -277,6 +288,7 @@ impl WorkerSupervisor {
             last_activity: Instant::now(),
         });
         self.starts += 1;
+        tracing::info!(target: "kide::worker", starts = self.starts, "worker started");
         Ok(())
     }
 
@@ -287,6 +299,33 @@ impl WorkerSupervisor {
             .is_some_and(|running| running.child.try_wait().ok().flatten().is_some());
         if exited {
             self.running = None;
+        }
+    }
+}
+
+fn forward_worker_stderr(stderr: impl Read) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return,
+            Ok(_) => {
+                let message = line.trim_end();
+                if message.contains(" ERROR ") {
+                    tracing::error!(target: "kide::worker", worker_log = %message, "worker stderr");
+                } else if message.contains(" WARN ") {
+                    tracing::warn!(target: "kide::worker", worker_log = %message, "worker stderr");
+                } else if message.contains(" INFO ") {
+                    tracing::info!(target: "kide::worker", worker_log = %message, "worker stderr");
+                } else {
+                    tracing::debug!(target: "kide::worker", worker_log = %message, "worker stderr");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "kide::worker", %error, "failed to read worker stderr");
+                return;
+            }
         }
     }
 }

@@ -10,8 +10,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 fun main(args: Array<String>) {
+    configureLogging()
     when {
         args.contentEquals(arrayOf("--handshake")) -> ProtobufFraming.write(System.out, handshakeEnvelope())
         args.contentEquals(arrayOf("--version")) -> println("$WORKER_NAME $WORKER_VERSION")
@@ -23,6 +26,7 @@ fun main(args: Array<String>) {
 
 /** Runs one framed protobuf request/response stream for Core's supervisor. */
 private fun serve() {
+    logger().info("Worker started; waiting for framed protobuf requests")
     while (true) {
         val request = try {
             ProtobufFraming.read(System.`in`) ?: return
@@ -30,11 +34,20 @@ private fun serve() {
             ProtobufFraming.write(System.out, protocolError("unknown", "invalid_request", error.message ?: error::class.simpleName.orEmpty()))
             return
         }
+        logger().debug("Received request {} ({})", request.requestId, request.messageCase)
+        val startedAt = System.nanoTime()
         val response = try {
             dispatch(request)
         } catch (error: Exception) {
+            logger().error("Request {} failed", request.requestId, error)
             protocolError(request.requestId, "invalid_request", error.message ?: error::class.simpleName.orEmpty())
         }
+        logger().debug(
+            "Completed request {} ({}) in {} ms",
+            request.requestId,
+            request.messageCase,
+            (System.nanoTime() - startedAt) / 1_000_000,
+        )
         ProtobufFraming.write(System.out, response)
     }
 }
@@ -175,16 +188,22 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
 }
 
 private fun workerPhase(message: String) {
-    val line = "[kide-kotlin-worker] $message"
-    System.err.println(line)
-    System.getenv("KIDE_WORKER_PHASE_LOG")?.takeIf(String::isNotBlank)?.let { path ->
-        java.nio.file.Files.writeString(
-            Path.of(path), "$line\n",
-            java.nio.file.StandardOpenOption.CREATE,
-            java.nio.file.StandardOpenOption.APPEND,
-        )
-    }
+    logger().debug(message)
 }
+
+private fun configureLogging() {
+    val level = System.getenv("KIDE_WORKER_LOG_LEVEL")
+        ?.lowercase()
+        ?.takeIf { it in setOf("trace", "debug", "info", "warn", "error") }
+        ?: "warn"
+    // Keep third-party libraries quiet even when KIDE requests worker debug
+    // logs; the useful diagnostic boundary is our own worker package.
+    System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
+    System.setProperty("org.slf4j.simpleLogger.log.dev.kide.worker", level)
+    System.setProperty("org.slf4j.simpleLogger.logFile", "System.err")
+}
+
+private fun logger(): Logger = LoggerFactory.getLogger("dev.kide.worker")
 
 internal fun Collection<GradleProjectImporter.KotlinCompilationContext>.combinedForBatch(): GradleProjectImporter.KotlinCompilationContext? {
     if (isEmpty()) return null

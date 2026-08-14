@@ -79,9 +79,13 @@ pub fn materialize_artifact(
     {
         return Err(IndexOrchestratorError::InvalidStagedArtifact);
     }
-    cache
-        .promote_staged(&key, staged, response.byte_length, digest)
-        .map_err(Into::into)
+    let promoted = cache
+        .promote_staged(&key, &staged, response.byte_length, digest)
+        .map_err(IndexOrchestratorError::from)?;
+    // A promoted blob is immutable in the cache. The worker-created file is
+    // only a verified hand-off buffer and must not retain a second full copy.
+    std::fs::remove_file(staged).map_err(ArtifactBlobCacheError::from)?;
+    Ok(promoted)
 }
 
 fn sha256_bytes(value: &Fingerprint) -> Option<[u8; 32]> {
@@ -140,6 +144,9 @@ fn index_batch_with_optional_cache(
         .filter(|source| source.origin != SourceOrigin::Dependency)
         .collect::<Vec<_>>();
     let actions = plan_invalidation(current, &persisted_sources);
+    let _span = tracing::info_span!(target: "kide::index", "index_batch", sources = current.len())
+        .entered();
+    tracing::debug!(target: "kide::index", actions = actions.len(), "planned source actions");
     let mut reanalyze = Vec::new();
     let mut run = IndexRun {
         reused: 0,
@@ -166,6 +173,7 @@ fn index_batch_with_optional_cache(
         return Ok(run);
     }
     let mut supervisor = WorkerSupervisor::new(launch);
+    tracing::debug!(target: "kide::index", "starting worker handshake");
     supervisor.handshake("index-handshake")?;
     let response = supervisor.request(WorkerEnvelope::new(
         "index-batch",
@@ -183,6 +191,7 @@ fn index_batch_with_optional_cache(
             source_units: reanalyze.clone(),
         }),
     ))?;
+    tracing::debug!(target: "kide::index", "received source batch response");
     let WorkerMessage::AnalysisBatchResponse(response) = response.message else {
         return Err(IndexOrchestratorError::InvalidResponse {
             received: Box::new(response.message),

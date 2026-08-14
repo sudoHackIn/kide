@@ -1,5 +1,9 @@
 .PHONY: check test fmt storage-transport-spike worker-handshake
 
+build:
+	cargo build
+	./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm installDist
+
 check:
 	cargo check --workspace --all-targets
 	cargo clippy --workspace --all-targets -- -D warnings

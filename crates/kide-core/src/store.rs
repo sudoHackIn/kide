@@ -16,7 +16,7 @@ use crate::{
     AnalysisInput, ByteRange, CallEdge, ComponentId, DiagnosticRecord, FileAnalysisSnapshot,
     HierarchyEdge, INDEX_FORMAT_VERSION, ProjectManifest, Provenance, ReferenceEdge,
     SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TypeRecord,
-    WORKER_PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION, WorkspacePath,
 };
 
 const MIGRATION_1: &str = r#"
@@ -278,10 +278,13 @@ impl IndexStore {
         snapshot: &FileAnalysisSnapshot,
     ) -> Result<(), IndexStoreError> {
         validate_snapshot(expected, snapshot)?;
+        let _span = tracing::debug_span!(target: "kide::store", "replace_snapshot", source_unit_id = %expected.id.as_str()).entered();
+        tracing::debug!(target: "kide::store", symbols = snapshot.symbols.len(), "writing snapshot");
         let transaction = self.connection.transaction()?;
         delete_file_owned_facts(&transaction, &expected.id)?;
         insert_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
+        tracing::debug!(target: "kide::store", "snapshot committed");
         Ok(())
     }
 
@@ -299,6 +302,25 @@ impl IndexStore {
             .prepare("SELECT source_unit_json FROM source_snapshots ORDER BY source_unit_id")?;
         let records = statement
             .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|record| serde_json::from_str(&record).map_err(IndexStoreError::from))
+            .collect()
+    }
+
+    /// Finds persisted units at one workspace-relative path. Multiple build
+    /// components may legitimately contribute the same generated path.
+    pub fn source_units_at_path(
+        &self,
+        path: &WorkspacePath,
+    ) -> Result<Vec<SourceUnit>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_unit_json FROM source_snapshots
+             WHERE workspace_path = ?1 ORDER BY source_unit_id",
+        )?;
+        let records = statement
+            .query_map(params![path.as_str()], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         records
             .into_iter()
@@ -364,6 +386,67 @@ impl IndexStore {
                 Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
             })
             .collect()
+    }
+
+    /// Decodes declarations owned by one source unit in source order. This is
+    /// used only for a location resolver after the path has narrowed the
+    /// candidate set to one unit.
+    pub fn symbols_for_source(
+        &self,
+        source_unit: &SourceUnitId,
+    ) -> Result<Vec<SymbolRecord>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
+             FROM symbols JOIN source_snapshots USING (source_unit_id)
+             WHERE symbols.source_unit_id = ?1
+             ORDER BY symbols.name_start_byte, symbols.symbol_id",
+        )?;
+        let rows = statement
+            .query_map(params![source_unit.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, name, record, source, provenance)| {
+                let record = decode_stored_symbol(&record)?;
+                let source_unit = serde_json::from_str(&source)?;
+                let provenance = bincode::deserialize(&provenance)?;
+                Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
+            })
+            .collect()
+    }
+
+    /// Looks up one declaration by its stable semantic ID.
+    pub fn symbol(&self, symbol: &SymbolId) -> Result<Option<SymbolRecord>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
+             FROM symbols JOIN source_snapshots USING (source_unit_id)
+             WHERE symbols.symbol_id = ?1",
+        )?;
+        statement
+            .query_row(params![symbol.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })
+            .optional()?
+            .map(|(id, name, record, source, provenance)| {
+                let record = decode_stored_symbol(&record)?;
+                let source_unit = serde_json::from_str(&source)?;
+                let provenance = bincode::deserialize(&provenance)?;
+                Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
+            })
+            .transpose()
     }
 
     pub fn occurrences_at(

@@ -134,6 +134,13 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
         )
         .expect("reuses hit")
     );
+    assert!(
+        std::fs::read_dir(&staging)
+            .expect("reads staging directory")
+            .next()
+            .is_none(),
+        "successful promotion removes its staging file"
+    );
 }
 
 fn batch(request_id: &str, count: usize) -> WorkerEnvelope {
