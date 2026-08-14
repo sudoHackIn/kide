@@ -14,6 +14,12 @@ message Envelope {
     ArtifactDiscoveryRequest artifact_discovery_request = 12;
     ArtifactDiscoveryResponse artifact_discovery_response = 13;
     Error error = 14;
+    ProjectManifestRequest project_manifest_request = 15;
+    ProjectManifestResponse project_manifest_response = 19;
+    AnalyzeBatchRequest analyze_batch_request = 16;
+    AnalysisBatchResponse analysis_batch_response = 20;
+    ArtifactMaterializationRequest artifact_materialization_request = 17;
+    ArtifactMaterializationResponse artifact_materialization_response = 18;
   }
 }
 
@@ -23,6 +29,124 @@ message HandshakeResponse {
   string backend_version = 2;
   uint32 protocol_version = 3;
   repeated string capabilities = 4;
+}
+
+message ProjectManifestRequest { string workspace_root = 1; }
+message SourceSet { string name = 1; repeated string source_roots = 2; repeated string generated_roots = 3; bool test = 4; }
+message Toolchain { string jvm_version = 1; string gradle_version = 2; optional string kotlin_version = 3; }
+message Component {
+  string id = 1; string name = 2; string build_system = 3; string root = 4;
+  repeated string languages = 5; string configuration_fingerprint = 6;
+  repeated SourceSet source_sets = 7; repeated string classpath_fingerprints = 8;
+  optional Toolchain toolchain = 9; optional string compiler_configuration_fingerprint = 10;
+}
+message DependencyEdge { string from_component_id = 1; oneof target { string component_id = 2; string artifact_fingerprint = 3; } string scope = 4; }
+message ProjectManifest { string workspace = 1; string root = 2; repeated Component components = 3; repeated DependencyEdge dependencies = 4; string fingerprint = 5; Provenance provenance = 6; }
+message ProjectManifestResponse { ProjectManifest manifest = 1; }
+
+message SourceUnit {
+  string id = 1;
+  string component = 2;
+  string path = 3;
+  string language = 4;
+  string origin = 5;
+  string content = 6;
+  string context = 7;
+}
+message Provenance {
+  string backend = 1;
+  string backend_version = 2;
+  uint32 protocol_version = 3;
+  string analysis_options_fingerprint = 4;
+}
+message AnalyzeBatchRequest {
+  string workspace = 1;
+  string project_fingerprint = 2;
+  repeated string requested_facts = 3;
+  repeated SourceUnit source_units = 4;
+}
+message ByteRange { uint64 start = 1; uint64 end = 2; }
+message SymbolDeclaration {
+  string id = 1;
+  uint32 source_unit_index = 2;
+  uint32 provenance_index = 3;
+  string backend_key = 4;
+  uint32 backend_schema_version = 5;
+  string language = 6;
+  string kind = 7;
+  string name = 8;
+  optional string qualified_name = 9;
+  optional string signature = 10;
+  ByteRange declaration = 11;
+  ByteRange name_range = 12;
+  optional string owner_id = 13;
+  repeated string modifiers = 14;
+  repeated string annotations = 15;
+  string freshness = 16;
+  string completeness = 17;
+}
+message AnalysisBatchResponse {
+  repeated SourceUnit source_units = 1;
+  repeated Provenance provenances = 2;
+  repeated SymbolDeclaration symbols = 3;
+  repeated ReferenceEdge references = 4;
+  repeated CallEdge calls = 5;
+  repeated HierarchyEdge hierarchy = 6;
+  repeated Occurrence occurrences = 7;
+  repeated TypeRecord types = 8;
+  repeated Diagnostic diagnostics = 9;
+}
+message SourceLocation {
+  uint32 source_unit_index = 1;
+  ByteRange range = 2;
+}
+message ReferenceEdge {
+  uint32 source_occurrence_index = 1;
+  string target_symbol_id = 2;
+  string precision = 3;
+}
+message CallEdge {
+  uint32 source_occurrence_index = 1;
+  string target_symbol_id = 2;
+  optional string caller_symbol_id = 3;
+  string precision = 4;
+}
+message HierarchyEdge {
+  string subtype_symbol_id = 1;
+  string supertype_symbol_id = 2;
+  string precision = 3;
+  uint32 provenance_index = 4;
+}
+message Occurrence {
+  SourceLocation location = 1;
+  string kind = 2;
+  optional string enclosing_symbol_id = 3;
+  optional string target_symbol_id = 4;
+  optional string type_id = 5;
+  string precision = 6;
+  string freshness = 7;
+  string completeness = 8;
+  uint32 provenance_index = 9;
+}
+message TypeRecord {
+  string id = 1;
+  string language = 2;
+  string display = 3;
+  optional string backend_key = 4;
+  uint32 backend_schema_version = 5;
+  string freshness = 6;
+  string completeness = 7;
+  uint32 provenance_index = 8;
+}
+message Diagnostic {
+  uint32 source_unit_index = 1;
+  optional ByteRange range = 2;
+  string severity = 3;
+  optional string code = 4;
+  string message = 5;
+  string freshness = 6;
+  string completeness = 7;
+  uint32 provenance_index = 8;
 }
 
 message ArtifactDiscoveryRequest {
@@ -44,6 +168,18 @@ message ArtifactDescriptor {
 message ArtifactDiscoveryResponse {
   repeated ArtifactDescriptor artifacts = 1;
   optional string next_cursor = 2;
+}
+message ArtifactMaterializationRequest {
+  string workspace_root = 1;
+  ArtifactDescriptor artifact = 2;
+  string staging_directory = 3;
+  uint32 blob_format_version = 4;
+}
+message ArtifactMaterializationResponse {
+  string staged_filename = 1;
+  uint64 byte_length = 2;
+  bytes sha256 = 3;
+  uint32 blob_format_version = 4;
 }
 message Error {
   string code = 1;
