@@ -84,17 +84,27 @@ message SymbolDeclaration {
   repeated string annotations = 15;
   string freshness = 16;
   string completeness = 17;
+  string component_id = 18;
 }
 message AnalysisBatchResponse {
-  repeated SourceUnit source_units = 1;
-  repeated Provenance provenances = 2;
-  repeated SymbolDeclaration symbols = 3;
-  repeated ReferenceEdge references = 4;
-  repeated CallEdge calls = 5;
-  repeated HierarchyEdge hierarchy = 6;
-  repeated Occurrence occurrences = 7;
-  repeated TypeRecord types = 8;
-  repeated Diagnostic diagnostics = 9;
+  repeated FileAnalysisSnapshot snapshots = 1;
+}
+// Facts are grouped by the immutable source snapshot that owns them. This
+// prevents a worker response from accidentally mixing generations of a file.
+message FileAnalysisSnapshot {
+  SourceUnit source_unit = 1;
+  optional string structural_fingerprint = 2;
+  optional string public_api_fingerprint = 3;
+  repeated Provenance provenances = 4;
+  repeated SymbolDeclaration symbols = 5;
+  repeated Occurrence occurrences = 6;
+  repeated ReferenceEdge references = 7;
+  repeated CallEdge calls = 8;
+  repeated HierarchyEdge hierarchy = 9;
+  repeated TypeRecord types = 10;
+  repeated Diagnostic diagnostics = 11;
+  string completeness = 12;
+  uint32 provenance_index = 13;
 }
 message SourceLocation {
   uint32 source_unit_index = 1;

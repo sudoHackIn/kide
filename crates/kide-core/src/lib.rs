@@ -63,358 +63,15 @@ pub mod worker_framing {
     }
 }
 
-pub mod worker_proto_adapter {
-    use thiserror::Error;
-
-    use crate::{
-        AnalyzeBatchRequest, ArtifactDescriptor, ArtifactDiscoveryRequest,
-        ArtifactDiscoveryResponse, BuildSystem, Component, ComponentId, DependencyEdge,
-        DependencyTarget, Fingerprint, Language, ProjectManifest, Provenance, SourceOrigin,
-        SourceSet, SourceUnit, SourceUnitId, Toolchain, WorkspaceId, WorkspacePath, worker_proto,
-    };
-
-    #[derive(Debug, Error)]
-    pub enum AdapterError {
-        #[error("missing required protobuf field {0}")]
-        Missing(&'static str),
-        #[error("unsupported protobuf enum value {0}")]
-        Unsupported(String),
-    }
-
-    fn language(value: String) -> Language {
-        match value.as_str() {
-            "kotlin" => Language::Kotlin,
-            "java" => Language::Java,
-            "rust" => Language::Rust,
-            "typescript" => Language::TypeScript,
-            other => Language::Other(other.to_owned()),
-        }
-    }
-
-    fn build_system(value: String) -> BuildSystem {
-        match value.as_str() {
-            "gradle" => BuildSystem::Gradle,
-            "maven" => BuildSystem::Maven,
-            "cargo" => BuildSystem::Cargo,
-            "npm" => BuildSystem::Npm,
-            "bazel" => BuildSystem::Bazel,
-            "filesystem" => BuildSystem::Filesystem,
-            other => BuildSystem::Other(other.to_owned()),
-        }
-    }
-
-    fn provenance(value: worker_proto::Provenance) -> Provenance {
-        Provenance {
-            backend: value.backend,
-            backend_version: value.backend_version,
-            protocol_version: value.protocol_version,
-            analysis_options: Fingerprint::new(value.analysis_options_fingerprint),
-        }
-    }
-
-    fn proto_provenance(value: &Provenance) -> worker_proto::Provenance {
-        worker_proto::Provenance {
-            backend: value.backend.clone(),
-            backend_version: value.backend_version.clone(),
-            protocol_version: value.protocol_version,
-            analysis_options_fingerprint: value.analysis_options.as_str().to_owned(),
-        }
-    }
-
-    fn source_origin(value: String) -> Result<SourceOrigin, AdapterError> {
-        match value.as_str() {
-            "source" => Ok(SourceOrigin::Source),
-            "generated" => Ok(SourceOrigin::Generated),
-            "dependency" => Ok(SourceOrigin::Dependency),
-            other => Err(AdapterError::Unsupported(format!("source origin {other}"))),
-        }
-    }
-
-    fn proto_language(value: &Language) -> String {
-        match value {
-            Language::Kotlin => "kotlin".to_owned(),
-            Language::Java => "java".to_owned(),
-            Language::Rust => "rust".to_owned(),
-            Language::TypeScript => "typescript".to_owned(),
-            Language::Other(value) => value.clone(),
-        }
-    }
-
-    fn proto_source_origin(value: &SourceOrigin) -> &'static str {
-        match value {
-            SourceOrigin::Source => "source",
-            SourceOrigin::Generated => "generated",
-            SourceOrigin::Dependency => "dependency",
-        }
-    }
-
-    pub fn source_unit(value: &SourceUnit) -> worker_proto::SourceUnit {
-        worker_proto::SourceUnit {
-            id: value.id.as_str().to_owned(),
-            component: value.component.as_str().to_owned(),
-            path: value.path.as_str().to_owned(),
-            language: proto_language(&value.language),
-            origin: proto_source_origin(&value.origin).to_owned(),
-            content: value.content.as_str().to_owned(),
-            context: value.context.as_str().to_owned(),
-        }
-    }
-
-    pub fn decode_source_unit(value: worker_proto::SourceUnit) -> Result<SourceUnit, AdapterError> {
-        Ok(SourceUnit {
-            id: SourceUnitId::new(value.id),
-            component: ComponentId::new(value.component),
-            path: WorkspacePath::new(value.path),
-            language: language(value.language),
-            origin: source_origin(value.origin)?,
-            content: Fingerprint::new(value.content),
-            context: Fingerprint::new(value.context),
-        })
-    }
-
-    pub fn analyze_batch_request(value: &AnalyzeBatchRequest) -> worker_proto::AnalyzeBatchRequest {
-        worker_proto::AnalyzeBatchRequest {
-            workspace: value.workspace.as_str().to_owned(),
-            project_fingerprint: value.project_fingerprint.as_str().to_owned(),
-            requested_facts: value
-                .requested_facts
-                .iter()
-                .map(|fact| format!("{fact:?}").to_lowercase())
-                .collect(),
-            source_units: value.source_units.iter().map(source_unit).collect(),
-        }
-    }
-
-    pub fn decode_manifest(
-        value: worker_proto::ProjectManifest,
-    ) -> Result<ProjectManifest, AdapterError> {
-        let worker_provenance = value
-            .provenance
-            .ok_or(AdapterError::Missing("manifest.provenance"))?;
-        let components = value
-            .components
-            .into_iter()
-            .map(|component| Component {
-                id: ComponentId::new(component.id),
-                name: component.name,
-                build_system: build_system(component.build_system),
-                root: WorkspacePath::new(component.root),
-                languages: component.languages.into_iter().map(language).collect(),
-                configuration: Fingerprint::new(component.configuration_fingerprint),
-                source_sets: component
-                    .source_sets
-                    .into_iter()
-                    .map(|set| SourceSet {
-                        name: set.name,
-                        source_roots: set
-                            .source_roots
-                            .into_iter()
-                            .map(WorkspacePath::new)
-                            .collect(),
-                        generated_roots: set
-                            .generated_roots
-                            .into_iter()
-                            .map(WorkspacePath::new)
-                            .collect(),
-                        test: set.test,
-                    })
-                    .collect(),
-                classpath: component
-                    .classpath_fingerprints
-                    .into_iter()
-                    .map(Fingerprint::new)
-                    .collect(),
-                toolchain: component.toolchain.map(|toolchain| Toolchain {
-                    jvm_version: toolchain.jvm_version,
-                    gradle_version: toolchain.gradle_version,
-                    kotlin_version: toolchain.kotlin_version,
-                }),
-                compiler_configuration: component
-                    .compiler_configuration_fingerprint
-                    .map(Fingerprint::new),
-            })
-            .collect();
-        let dependencies = value
-            .dependencies
-            .into_iter()
-            .map(|edge| {
-                let target = edge
-                    .target
-                    .ok_or(AdapterError::Missing("dependency.target"))?;
-                Ok(DependencyEdge {
-                    from: ComponentId::new(edge.from_component_id),
-                    target: match target {
-                        worker_proto::dependency_edge::Target::ComponentId(component) => {
-                            DependencyTarget::Component {
-                                component: ComponentId::new(component),
-                            }
-                        }
-                        worker_proto::dependency_edge::Target::ArtifactFingerprint(content) => {
-                            DependencyTarget::Artifact {
-                                content: Fingerprint::new(content),
-                            }
-                        }
-                    },
-                    scope: edge.scope,
-                })
-            })
-            .collect::<Result<Vec<_>, AdapterError>>()?;
-        Ok(ProjectManifest {
-            workspace: WorkspaceId::new(value.workspace),
-            root: WorkspacePath::new(value.root),
-            components,
-            dependencies,
-            fingerprint: Fingerprint::new(value.fingerprint),
-            provenance: provenance(worker_provenance),
-        })
-    }
-
-    pub fn discovery_request(
-        request: &ArtifactDiscoveryRequest,
-    ) -> worker_proto::ArtifactDiscoveryRequest {
-        worker_proto::ArtifactDiscoveryRequest {
-            workspace_root: request.workspace_root.as_str().to_owned(),
-            max_artifacts: request.max_artifacts,
-            cursor: request.cursor.clone(),
-        }
-    }
-
-    pub fn discovery_response(
-        response: &ArtifactDiscoveryResponse,
-    ) -> worker_proto::ArtifactDiscoveryResponse {
-        worker_proto::ArtifactDiscoveryResponse {
-            artifacts: response.artifacts.iter().map(descriptor).collect(),
-            next_cursor: response.next_cursor.clone(),
-        }
-    }
-
-    fn descriptor(value: &ArtifactDescriptor) -> worker_proto::ArtifactDescriptor {
-        let unit = &value.source_unit;
-        worker_proto::ArtifactDescriptor {
-            source_unit_id: unit.id.as_str().to_owned(),
-            component_id: unit.component.as_str().to_owned(),
-            workspace_path: unit.path.as_str().to_owned(),
-            content_fingerprint: unit.content.as_str().to_owned(),
-            context_fingerprint: unit.context.as_str().to_owned(),
-            backend: value.provenance.backend.clone(),
-            backend_version: value.provenance.backend_version.clone(),
-            worker_protocol_version: value.provenance.protocol_version,
-            analysis_options_fingerprint: value.provenance.analysis_options.as_str().to_owned(),
-        }
-    }
-
-    pub fn decode_descriptor(value: worker_proto::ArtifactDescriptor) -> ArtifactDescriptor {
-        ArtifactDescriptor {
-            source_unit: SourceUnit {
-                id: SourceUnitId::new(value.source_unit_id),
-                component: ComponentId::new(value.component_id),
-                path: WorkspacePath::new(value.workspace_path),
-                language: Language::Java,
-                origin: SourceOrigin::Dependency,
-                content: Fingerprint::new(value.content_fingerprint),
-                context: Fingerprint::new(value.context_fingerprint),
-            },
-            provenance: Provenance {
-                backend: value.backend,
-                backend_version: value.backend_version,
-                protocol_version: value.worker_protocol_version,
-                analysis_options: Fingerprint::new(value.analysis_options_fingerprint),
-            },
-        }
-    }
-
-    pub fn decode_discovery_response(
-        value: worker_proto::ArtifactDiscoveryResponse,
-    ) -> ArtifactDiscoveryResponse {
-        ArtifactDiscoveryResponse {
-            artifacts: value.artifacts.into_iter().map(decode_descriptor).collect(),
-            next_cursor: value.next_cursor,
-        }
-    }
-
-    pub fn manifest(value: &ProjectManifest) -> worker_proto::ProjectManifest {
-        worker_proto::ProjectManifest {
-            workspace: value.workspace.as_str().to_owned(),
-            root: value.root.as_str().to_owned(),
-            components: value
-                .components
-                .iter()
-                .map(|component| worker_proto::Component {
-                    id: component.id.as_str().to_owned(),
-                    name: component.name.clone(),
-                    build_system: format!("{:?}", component.build_system).to_lowercase(),
-                    root: component.root.as_str().to_owned(),
-                    languages: component
-                        .languages
-                        .iter()
-                        .map(|language| format!("{:?}", language).to_lowercase())
-                        .collect(),
-                    configuration_fingerprint: component.configuration.as_str().to_owned(),
-                    source_sets: component
-                        .source_sets
-                        .iter()
-                        .map(|set| worker_proto::SourceSet {
-                            name: set.name.clone(),
-                            source_roots: set
-                                .source_roots
-                                .iter()
-                                .map(|path| path.as_str().to_owned())
-                                .collect(),
-                            generated_roots: set
-                                .generated_roots
-                                .iter()
-                                .map(|path| path.as_str().to_owned())
-                                .collect(),
-                            test: set.test,
-                        })
-                        .collect(),
-                    classpath_fingerprints: component
-                        .classpath
-                        .iter()
-                        .map(|fingerprint| fingerprint.as_str().to_owned())
-                        .collect(),
-                    toolchain: component.toolchain.as_ref().map(|toolchain| {
-                        worker_proto::Toolchain {
-                            jvm_version: toolchain.jvm_version.clone(),
-                            gradle_version: toolchain.gradle_version.clone(),
-                            kotlin_version: toolchain.kotlin_version.clone(),
-                        }
-                    }),
-                    compiler_configuration_fingerprint: component
-                        .compiler_configuration
-                        .as_ref()
-                        .map(|fingerprint| fingerprint.as_str().to_owned()),
-                })
-                .collect(),
-            dependencies: value
-                .dependencies
-                .iter()
-                .map(|edge| worker_proto::DependencyEdge {
-                    from_component_id: edge.from.as_str().to_owned(),
-                    scope: edge.scope.clone(),
-                    target: Some(match &edge.target {
-                        DependencyTarget::Component { component } => {
-                            worker_proto::dependency_edge::Target::ComponentId(
-                                component.as_str().to_owned(),
-                            )
-                        }
-                        DependencyTarget::Artifact { content } => {
-                            worker_proto::dependency_edge::Target::ArtifactFingerprint(
-                                content.as_str().to_owned(),
-                            )
-                        }
-                    }),
-                })
-                .collect(),
-            fingerprint: value.fingerprint.as_str().to_owned(),
-            provenance: Some(proto_provenance(&value.provenance)),
-        }
-    }
-}
+pub mod worker_proto_adapter;
 
 #[cfg(test)]
 mod worker_framing_tests {
-    use crate::{worker_framing, worker_proto};
+    use crate::{
+        BackendKey, ByteRange, Completeness, ComponentId, Fingerprint, Freshness, Language,
+        Provenance, SourceOrigin, SourceRange, SourceUnit, SourceUnitId, SymbolId, SymbolKind,
+        SymbolRecord, WorkspacePath, worker_framing, worker_proto,
+    };
 
     #[test]
     fn protobuf_frames_round_trip_a_descriptor_request() {
@@ -433,6 +90,181 @@ mod worker_framing_tests {
             worker_framing::decode(&worker_framing::encode(&message)).expect("decodes frame"),
             message
         );
+    }
+
+    #[test]
+    fn source_unit_adapter_preserves_snapshot_identity() {
+        let source = SourceUnit {
+            id: SourceUnitId::new("gradle:app:Main.kt"),
+            component: ComponentId::new("gradle:app:main"),
+            path: WorkspacePath::new("src/Main.kt"),
+            language: Language::Kotlin,
+            origin: SourceOrigin::Generated,
+            content: Fingerprint::new("sha256:content"),
+            context: Fingerprint::new("sha256:context"),
+        };
+
+        let restored = crate::worker_proto_adapter::decode_source_unit(
+            crate::worker_proto_adapter::source_unit(&source),
+        )
+        .expect("known source origin decodes");
+
+        assert_eq!(restored, source);
+    }
+
+    #[test]
+    fn analyze_batch_request_adapter_round_trips() {
+        let envelope: crate::WorkerEnvelope = serde_json::from_str(include_str!(
+            "../../../protocol/fixtures/analyze-batch-request.json"
+        ))
+        .expect("fixture parses");
+        let crate::WorkerMessage::AnalyzeBatchRequest(request) = envelope.message else {
+            panic!("fixture is an analyze request")
+        };
+
+        let restored = crate::worker_proto_adapter::decode_analyze_batch_request(
+            crate::worker_proto_adapter::analyze_batch_request(&request),
+        )
+        .expect("request decodes");
+
+        assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn symbol_adapter_round_trips_declaration_metadata() {
+        let source = SourceUnit {
+            id: SourceUnitId::new("unit"),
+            component: ComponentId::new("component"),
+            path: WorkspacePath::new("Main.kt"),
+            language: Language::Kotlin,
+            origin: SourceOrigin::Source,
+            content: Fingerprint::new("sha256:content"),
+            context: Fingerprint::new("sha256:context"),
+        };
+        let provenance = Provenance {
+            backend: "kotlin".into(),
+            backend_version: "1".into(),
+            protocol_version: 3,
+            analysis_options: Fingerprint::new("sha256:options"),
+        };
+        let symbol = SymbolRecord {
+            id: SymbolId::new("symbol"),
+            backend_key: BackendKey {
+                backend: "kotlin".into(),
+                schema_version: 1,
+                value: "key".into(),
+            },
+            language: Language::Kotlin,
+            kind: SymbolKind::Class,
+            name: "Main".into(),
+            qualified_name: Some("demo.Main".into()),
+            signature: None,
+            component: source.component.clone(),
+            declaration: SourceRange {
+                source_unit: source.id.clone(),
+                bytes: ByteRange { start: 0, end: 4 },
+            },
+            name_range: SourceRange {
+                source_unit: source.id.clone(),
+                bytes: ByteRange { start: 0, end: 4 },
+            },
+            owner: None,
+            modifiers: vec!["public".into()],
+            annotations: vec![],
+            freshness: Freshness::Fresh,
+            completeness: Completeness::Complete,
+            provenance: provenance.clone(),
+        };
+
+        let restored = crate::worker_proto_adapter::decode_symbol_declaration(
+            crate::worker_proto_adapter::symbol_declaration(&symbol),
+            &source,
+            &provenance,
+        )
+        .expect("encoded declaration decodes");
+
+        assert_eq!(restored, symbol);
+    }
+
+    #[test]
+    fn analysis_snapshot_adapter_round_trips_every_fact_table() {
+        let envelope: crate::WorkerEnvelope = serde_json::from_str(include_str!(
+            "../../../protocol/fixtures/analysis-batch-response.json"
+        ))
+        .expect("fixture parses");
+        let crate::WorkerMessage::AnalysisBatchResponse(response) = envelope.message else {
+            panic!("fixture is an analysis response")
+        };
+        let mut snapshot = response
+            .snapshots
+            .into_iter()
+            .next()
+            .expect("fixture snapshot");
+        let occurrence = crate::SourceOccurrence {
+            range: SourceRange {
+                source_unit: snapshot.source_unit.id.clone(),
+                bytes: ByteRange { start: 30, end: 34 },
+            },
+            kind: crate::OccurrenceKind::Call,
+            enclosing_symbol: snapshot.symbols.first().map(|symbol| symbol.id.clone()),
+            target: Some(SymbolId::new("kotlin:demo.target")),
+            type_id: Some(crate::TypeId::new("kotlin:String")),
+            precision: crate::Precision::Exact,
+            freshness: Freshness::Fresh,
+            completeness: Completeness::Complete,
+            provenance: snapshot.provenance.clone(),
+        };
+        snapshot.occurrences = vec![occurrence.clone()];
+        snapshot.references = vec![crate::ReferenceEdge {
+            source: occurrence.clone(),
+            target: SymbolId::new("kotlin:demo.target"),
+            precision: crate::Precision::Exact,
+        }];
+        snapshot.calls = vec![crate::CallEdge {
+            source: occurrence,
+            target: SymbolId::new("kotlin:demo.target"),
+            caller: snapshot.symbols.first().map(|symbol| symbol.id.clone()),
+            precision: crate::Precision::Exact,
+        }];
+        snapshot.hierarchy = vec![crate::HierarchyEdge {
+            subtype: SymbolId::new("kotlin:demo.Child"),
+            supertype: SymbolId::new("kotlin:demo.Parent"),
+            precision: crate::Precision::Exact,
+            provenance: snapshot.provenance.clone(),
+        }];
+        snapshot.types = vec![crate::TypeRecord {
+            id: crate::TypeId::new("kotlin:String"),
+            language: Language::Kotlin,
+            display: "String".into(),
+            backend_key: Some(BackendKey {
+                backend: snapshot.provenance.backend.clone(),
+                schema_version: 1,
+                value: "kotlin.String".into(),
+            }),
+            freshness: Freshness::Fresh,
+            completeness: Completeness::Complete,
+            provenance: snapshot.provenance.clone(),
+        }];
+        snapshot.diagnostics = vec![crate::DiagnosticRecord {
+            source_unit: snapshot.source_unit.id.clone(),
+            range: Some(ByteRange { start: 40, end: 45 }),
+            severity: crate::DiagnosticSeverity::Warning,
+            code: Some("W1".into()),
+            message: "warning".into(),
+            freshness: Freshness::Fresh,
+            completeness: Completeness::Complete,
+            provenance: snapshot.provenance.clone(),
+        }];
+
+        let response = crate::AnalysisBatchResponse {
+            snapshots: vec![snapshot.clone()],
+        };
+        let encoded = crate::worker_proto_adapter::analysis_batch_response(&response)
+            .expect("response encodes");
+        let restored = crate::worker_proto_adapter::decode_analysis_batch_response(encoded)
+            .expect("response decodes");
+
+        assert_eq!(restored, response);
     }
 }
 mod canonical;
