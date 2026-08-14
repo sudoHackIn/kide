@@ -10,7 +10,12 @@ internal object K2SemanticExtractor {
     fun resolvedReferences(
         selectedSourceFiles: List<Path>,
         context: GradleProjectImporter.KotlinCompilationContext? = null,
-    ): List<K2ResolvedReference> {
+    ): List<K2ResolvedReference> = semanticFacts(selectedSourceFiles, context).references
+
+    fun semanticFacts(
+        selectedSourceFiles: List<Path>,
+        context: GradleProjectImporter.KotlinCompilationContext? = null,
+    ): K2SemanticFacts {
         val sourceFiles = (context?.sourceFiles.orEmpty() + selectedSourceFiles)
             .map { path -> path.toAbsolutePath().normalize() }
             .distinct()

@@ -20,11 +20,12 @@ internal object K2SnapshotEnricher {
         workspaceRoot: Path,
         resolved: List<K2ResolvedReference>,
         externalTargets: Map<String, String> = emptyMap(),
+        hierarchy: List<K2HierarchyEdge> = emptyList(),
     ): List<JsonElement> {
         val sourceTargets = targetIds(snapshots)
         val targets = sourceTargets + externalTargets.filterKeys { it !in sourceTargets }
         val bySource = resolved.groupBy { Path.of(it.sourcePath).toAbsolutePath().normalize() }
-        return snapshots.map { snapshot -> enrichSnapshot(snapshot.jsonObject, workspaceRoot, bySource, targets) }
+        return snapshots.map { snapshot -> enrichSnapshot(snapshot.jsonObject, workspaceRoot, bySource, targets, hierarchy) }
     }
 
     private fun enrichSnapshot(
@@ -32,12 +33,25 @@ internal object K2SnapshotEnricher {
         workspaceRoot: Path,
         bySource: Map<Path, List<K2ResolvedReference>>,
         targets: Map<String, String>,
+        hierarchy: List<K2HierarchyEdge>,
     ): JsonElement {
         val sourceUnit = snapshot["source_unit"]!!.jsonObject
         val path = workspaceRoot.resolve(sourceUnit.requiredString("path")).toAbsolutePath().normalize()
         val contents = Files.readString(path)
         val provenance = snapshot["provenance"]!!
         val owners = enclosingSymbols(snapshot["symbols"]!!.jsonArray)
+        val snapshotSymbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject.requiredString("id") }.toSet()
+        val hierarchyFacts = hierarchy.mapNotNull { edge ->
+            val subtype = targets[edge.subtypeKey] ?: return@mapNotNull null
+            val supertype = targets[edge.supertypeKey] ?: return@mapNotNull null
+            if (subtype !in snapshotSymbols) return@mapNotNull null
+            buildJsonObject {
+                put("subtype", subtype)
+                put("supertype", supertype)
+                put("precision", "exact")
+                put("provenance", provenance)
+            }
+        }.distinctBy { it.toString() }
         val exact = bySource[path].orEmpty().mapNotNull { reference ->
             val target = targets[reference.targetKey] ?: return@mapNotNull null
             val start = utf8Offset(contents, reference.startUtf16)
@@ -48,13 +62,13 @@ internal object K2SnapshotEnricher {
                 occurrence(sourceUnit.requiredString("id"), start, end, reference, target, enclosingSymbol(owners, start, end), provenance),
             )
         }.distinctBy { it.reference.sourcePath to it.reference.startUtf16 to it.reference.endUtf16 to it.target }
-        if (exact.isEmpty()) return snapshot
+        if (exact.isEmpty() && hierarchyFacts.isEmpty()) return snapshot
 
         val exactRanges = exact.map { rangeKey(it.occurrence) }.toSet()
         val remainingOccurrences = snapshot["occurrences"]!!.jsonArray.filter { rangeKey(it) !in exactRanges }
         return buildJsonObject {
             snapshot.forEach { (key, value) ->
-                if (key !in setOf("occurrences", "references", "calls", "types")) put(key, value)
+                if (key !in setOf("occurrences", "references", "calls", "types", "hierarchy")) put(key, value)
             }
             put("occurrences", buildJsonArray {
                 (remainingOccurrences + exact.map { it.occurrence }).forEach(::add)
@@ -83,6 +97,7 @@ internal object K2SnapshotEnricher {
                     add(typeRecord(display, provenance))
                 }
             })
+            put("hierarchy", buildJsonArray { hierarchyFacts.forEach(::add) })
         }
     }
 

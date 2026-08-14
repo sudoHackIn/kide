@@ -135,16 +135,16 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         // the union allows cross-module resolution without keeping a backend
         // alive or materialising project artifacts.
         val context = contexts.values.combinedForBatch()
-        val resolved = K2SemanticExtractor.resolvedReferences(
+        val facts = K2SemanticExtractor.semanticFacts(
             selectedSourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
             context = context,
         )
         val externalTargets = JvmBytecodeExtractor.resolvedTargetIds(
             classpath = context?.classpath.orEmpty(),
-            targetKeys = resolved.mapTo(sortedSetOf()) { it.targetKey },
+            targetKeys = (facts.references.map { it.targetKey } + facts.hierarchy.flatMap { listOf(it.subtypeKey, it.supertypeKey) }).toSortedSet(),
         )
         put("snapshots", buildJsonArray {
-            K2SnapshotEnricher.enrich(snapshots, workspaceRoot, resolved, externalTargets).forEach(::add)
+            K2SnapshotEnricher.enrich(snapshots, workspaceRoot, facts.references, externalTargets, facts.hierarchy).forEach(::add)
         })
     }
 }

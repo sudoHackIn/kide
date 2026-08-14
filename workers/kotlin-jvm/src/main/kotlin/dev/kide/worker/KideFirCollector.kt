@@ -9,14 +9,21 @@ import org.jetbrains.kotlin.config.CompilerConfiguration
 import org.jetbrains.kotlin.diagnostics.DiagnosticReporter
 import org.jetbrains.kotlin.fir.FirSession
 import org.jetbrains.kotlin.fir.analysis.checkers.MppCheckerKind
+import org.jetbrains.kotlin.fir.analysis.checkers.findClosestClassOrObject
+import org.jetbrains.kotlin.fir.analysis.checkers.overriddenFunctions
 import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirExpressionChecker
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
 import org.jetbrains.kotlin.fir.expressions.FirQualifiedAccessExpression
 import org.jetbrains.kotlin.fir.declarations.FirFunction
+import org.jetbrains.kotlin.fir.declarations.FirClass
+import org.jetbrains.kotlin.fir.declarations.FirNamedFunction
+import org.jetbrains.kotlin.fir.analysis.checkers.declaration.DeclarationCheckers
+import org.jetbrains.kotlin.fir.analysis.checkers.declaration.FirDeclarationChecker
 import org.jetbrains.kotlin.fir.types.FirResolvedTypeRef
 import org.jetbrains.kotlin.fir.types.resolvedType
+import org.jetbrains.kotlin.fir.types.ConeClassLikeType
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrar
 import org.jetbrains.kotlin.fir.references.FirResolvedNamedReference
 import org.jetbrains.kotlin.fir.symbols.FirBasedSymbol
@@ -32,12 +39,24 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirClassSymbol
 @OptIn(SymbolInternals::class)
 internal object KideFirCollector {
     private val references = ConcurrentLinkedQueue<K2ResolvedReference>()
+    private val hierarchy = ConcurrentLinkedQueue<K2HierarchyEdge>()
 
-    fun reset() = references.clear()
+    fun reset() { references.clear(); hierarchy.clear() }
 
-    fun snapshot(): List<K2ResolvedReference> = references.toList().sortedWith(
-        compareBy({ it.sourcePath }, { it.startUtf16 }, { it.endUtf16 }, { it.targetKey }),
+    fun snapshot(): K2SemanticFacts = K2SemanticFacts(
+        references = references.toList().sortedWith(compareBy({ it.sourcePath }, { it.startUtf16 }, { it.endUtf16 }, { it.targetKey })),
+        hierarchy = hierarchy.toList().distinct().sortedWith(compareBy({ it.subtypeKey }, { it.supertypeKey })),
     )
+
+    internal fun recordHierarchy(subtype: FirClass, supertype: ConeClassLikeType) {
+        val subtypeKey = "class:${subtype.symbol.classId.asSingleFqName().asString()}"
+        val supertypeKey = "class:${supertype.lookupTag.classId.asSingleFqName().asString()}"
+        if (supertypeKey != "class:kotlin.Any") hierarchy.add(K2HierarchyEdge(subtypeKey, supertypeKey))
+    }
+
+    internal fun recordOverride(overriding: FirCallableSymbol<*>, overridden: FirCallableSymbol<*>) {
+        hierarchy.add(K2HierarchyEdge(targetKey(overriding), targetKey(overridden)))
+    }
 
     internal fun record(
         sourcePath: String,
@@ -81,6 +100,9 @@ internal data class K2ResolvedReference(
     val typeDisplay: String?,
 )
 
+internal data class K2HierarchyEdge(val subtypeKey: String, val supertypeKey: String)
+internal data class K2SemanticFacts(val references: List<K2ResolvedReference>, val hierarchy: List<K2HierarchyEdge>)
+
 /** Registered through the standard compiler-plugin service entry. */
 @OptIn(ExperimentalCompilerApi::class)
 internal class KideFirPluginRegistrar : CompilerPluginRegistrar() {
@@ -99,9 +121,32 @@ internal class KideFirExtensionRegistrar : FirExtensionRegistrar() {
 }
 
 internal class KideFirCheckersExtension(session: FirSession) : FirAdditionalCheckersExtension(session) {
+    override val declarationCheckers: DeclarationCheckers = object : DeclarationCheckers() {
+        override val classCheckers: Set<FirDeclarationChecker<FirClass>> = setOf(KideClassHierarchyChecker)
+        override val simpleFunctionCheckers: Set<FirDeclarationChecker<FirNamedFunction>> = setOf(KideFunctionOverrideChecker)
+    }
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
         override val qualifiedAccessExpressionCheckers: Set<FirExpressionChecker<FirQualifiedAccessExpression>> =
             setOf(KideQualifiedAccessChecker)
+    }
+}
+
+private object KideClassHierarchyChecker : FirDeclarationChecker<FirClass>(MppCheckerKind.Platform) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(declaration: FirClass) {
+        declaration.symbol.resolvedSuperTypes.filterIsInstance<ConeClassLikeType>().forEach { supertype ->
+            KideFirCollector.recordHierarchy(declaration, supertype)
+        }
+    }
+}
+
+private object KideFunctionOverrideChecker : FirDeclarationChecker<FirNamedFunction>(MppCheckerKind.Platform) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(declaration: FirNamedFunction) {
+        val owner = context.findClosestClassOrObject() ?: return
+        declaration.symbol.overriddenFunctions(owner).forEach { overridden ->
+            KideFirCollector.recordOverride(declaration.symbol, overridden)
+        }
     }
 }
 
