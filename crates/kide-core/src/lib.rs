@@ -5,8 +5,12 @@
 //! disposable compute processes as defined by ADR 0001.
 
 mod artifact_cache;
+pub mod artifact_proto_adapter;
 pub mod worker_proto {
     include!(concat!(env!("OUT_DIR"), "/kide.worker.v1.rs"));
+}
+pub mod artifact_proto {
+    include!(concat!(env!("OUT_DIR"), "/kide.artifact.v1.rs"));
 }
 
 /// Length-delimited protobuf frames for future cold-worker transport.
@@ -107,6 +111,8 @@ pub mod worker_proto_adapter;
 
 #[cfg(test)]
 mod worker_framing_tests {
+    use prost::Message;
+
     use crate::{
         BackendKey, ByteRange, Completeness, ComponentId, Fingerprint, Freshness, Language,
         Provenance, SourceOrigin, SourceRange, SourceUnit, SourceUnitId, SymbolId, SymbolKind,
@@ -436,6 +442,40 @@ mod worker_framing_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn graph_artifact_round_trips_canonical_snapshots_and_rejects_bad_envelopes() {
+        let envelope: crate::WorkerEnvelope = serde_json::from_str(include_str!(
+            "../../../protocol/fixtures/analysis-batch-response.json"
+        ))
+        .expect("fixture parses");
+        let crate::WorkerMessage::AnalysisBatchResponse(response) = envelope.message else {
+            panic!("fixture is an analysis response")
+        };
+
+        let encoded = crate::artifact_proto_adapter::encode_snapshots(&response.snapshots)
+            .expect("encodes storage artifact");
+        assert_eq!(
+            crate::artifact_proto_adapter::decode_snapshots(&encoded).expect("decodes artifact"),
+            response.snapshots
+        );
+
+        let mut incompatible = crate::artifact_proto::ArtifactEnvelope::decode(encoded.as_slice())
+            .expect("envelope parses");
+        incompatible.format_version += 1;
+        assert!(matches!(
+            crate::artifact_proto_adapter::decode_snapshots(&incompatible.encode_to_vec()),
+            Err(crate::artifact_proto_adapter::ArtifactProtoError::UnsupportedVersion(_))
+        ));
+
+        let mut corrupt = crate::artifact_proto::ArtifactEnvelope::decode(encoded.as_slice())
+            .expect("envelope parses");
+        corrupt.payload_sha256[0] ^= 1;
+        assert!(matches!(
+            crate::artifact_proto_adapter::decode_snapshots(&corrupt.encode_to_vec()),
+            Err(crate::artifact_proto_adapter::ArtifactProtoError::ChecksumMismatch)
+        ));
     }
 }
 mod canonical;

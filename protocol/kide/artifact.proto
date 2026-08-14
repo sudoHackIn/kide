@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package kide.artifact.v1;
+
+// Persistent graph-artifact format. This schema deliberately does not import
+// worker.proto: a stored blob must stay readable when the disposable-worker
+// control plane evolves. The outer envelope is not the cache-file header; it
+// protects the protobuf payload after a worker has staged it.
+message ArtifactEnvelope {
+  uint32 format_version = 1;
+  uint64 payload_length = 2;
+  bytes payload_sha256 = 3;
+  GraphArtifact artifact = 4;
+}
+
+message GraphArtifact {
+  repeated GraphSnapshot snapshots = 1;
+}
+
+// Facts remain grouped by their immutable source unit, exactly as in the
+// canonical model. IDs are opaque stable strings rather than worker objects.
+message GraphSnapshot {
+  ArtifactSourceUnit source_unit = 1;
+  optional string structural_fingerprint = 2;
+  optional string public_api_fingerprint = 3;
+  repeated ArtifactProvenance provenances = 4;
+  repeated ArtifactSymbol symbols = 5;
+  repeated ArtifactOccurrence occurrences = 6;
+  repeated ArtifactReference references = 7;
+  repeated ArtifactCall calls = 8;
+  repeated ArtifactHierarchy hierarchy = 9;
+  repeated ArtifactType types = 10;
+  repeated ArtifactDiagnostic diagnostics = 11;
+  string completeness = 12;
+  uint32 provenance_index = 13;
+}
+
+message ArtifactSourceUnit {
+  string id = 1;
+  string component = 2;
+  string path = 3;
+  string language = 4;
+  string origin = 5;
+  string content_fingerprint = 6;
+  string context_fingerprint = 7;
+}
+
+message ArtifactProvenance {
+  string backend = 1;
+  string backend_version = 2;
+  uint32 worker_protocol_version = 3;
+  string analysis_options_fingerprint = 4;
+}
+
+message ArtifactRange { uint64 start = 1; uint64 end = 2; }
+message ArtifactLocation { uint32 source_unit_index = 1; ArtifactRange range = 2; }
+
+message ArtifactSymbol {
+  string id = 1;
+  string backend_key = 2;
+  uint32 backend_schema_version = 3;
+  string language = 4;
+  string kind = 5;
+  string name = 6;
+  optional string qualified_name = 7;
+  optional string signature = 8;
+  ArtifactRange declaration = 9;
+  ArtifactRange name_range = 10;
+  optional string owner_id = 11;
+  repeated string modifiers = 12;
+  repeated string annotations = 13;
+  string freshness = 14;
+  string completeness = 15;
+  string component_id = 16;
+  uint32 provenance_index = 17;
+}
+
+message ArtifactOccurrence {
+  ArtifactLocation location = 1;
+  string kind = 2;
+  optional string enclosing_symbol_id = 3;
+  optional string target_symbol_id = 4;
+  optional string type_id = 5;
+  string precision = 6;
+  string freshness = 7;
+  string completeness = 8;
+  uint32 provenance_index = 9;
+}
+
+message ArtifactReference { uint32 source_occurrence_index = 1; string target_symbol_id = 2; string precision = 3; }
+message ArtifactCall { uint32 source_occurrence_index = 1; string target_symbol_id = 2; optional string caller_symbol_id = 3; string precision = 4; }
+message ArtifactHierarchy { string subtype_symbol_id = 1; string supertype_symbol_id = 2; string precision = 3; uint32 provenance_index = 4; }
+message ArtifactType { string id = 1; string language = 2; string display = 3; optional string backend_key = 4; uint32 backend_schema_version = 5; string freshness = 6; string completeness = 7; uint32 provenance_index = 8; }
+message ArtifactDiagnostic { uint32 source_unit_index = 1; optional ArtifactRange range = 2; string severity = 3; optional string code = 4; string message = 5; string freshness = 6; string completeness = 7; uint32 provenance_index = 8; }
