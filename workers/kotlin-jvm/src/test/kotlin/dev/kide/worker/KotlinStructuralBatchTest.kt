@@ -30,8 +30,35 @@ class KotlinStructuralBatchTest {
             .map { it.jsonObject }
             .single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("Two.kt") }
         assertEquals(1, use["calls"]!!.jsonArray.size)
-        val target = use["calls"]!!.jsonArray.single().jsonObject["target"]!!.toString()
+        val call = use["calls"]!!.jsonArray.single().jsonObject
+        val target = call["target"]!!.toString()
         assertTrue(target.contains("One.kt") && target.contains("constructor"))
+        assertTrue(call["caller"]!!.toString().contains("Two.kt") && call["caller"]!!.toString().contains("function:create"))
+    }
+
+    @Test
+    fun mapsTheExactSelectedSourceOverload() {
+        val root = Files.createTempDirectory("kide-k2-overload-")
+        Files.writeString(root.resolve("Overload.kt"), """
+            package fixture
+            fun pick(value: Int) = value
+            fun pick(value: String) = value
+            fun use() = pick(1)
+        """.trimIndent())
+        val payload = buildJsonObject {
+            put("source_units", buildJsonArray { add(sourceUnit("Overload.kt")) })
+        }
+
+        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+
+        val call = snapshot["calls"]!!.jsonArray.single().jsonObject
+        val expected = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }.single { symbol ->
+            symbol["name"]!!.toString().contains("pick") && symbol["signature"]!!.toString().contains("Int")
+        }["id"]!!.toString()
+        assertEquals(expected, call["target"]!!.toString())
+        val typeId = call["source"]!!.jsonObject["type_id"]
+        assertTrue(typeId != null && typeId.toString().contains("kotlin:type:"))
+        assertTrue(snapshot["types"]!!.jsonArray.any { type -> type.jsonObject["id"] == typeId })
     }
 
     private fun sourceUnit(path: String) = buildJsonObject {

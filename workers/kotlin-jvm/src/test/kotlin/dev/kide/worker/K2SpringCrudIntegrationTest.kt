@@ -19,5 +19,11 @@ class K2SpringCrudIntegrationTest {
             references.any { it.targetKey.contains("org/springframework") },
             "K2 did not resolve any Spring symbol: $references",
         )
+        val mapped = JvmBytecodeExtractor.resolvedTargetIds(
+            classpath = context.classpath,
+            targetKeys = references.mapTo(sortedSetOf()) { it.targetKey },
+        )
+        assertTrue(mapped.isNotEmpty(), "No unambiguous dependency targets: ${references.map { it.targetKey }}")
+        assertTrue(mapped.values.any { it.startsWith("jvm:sha256:") })
     }
 }

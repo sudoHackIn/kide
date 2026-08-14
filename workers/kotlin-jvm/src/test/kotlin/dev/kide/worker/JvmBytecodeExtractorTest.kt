@@ -56,6 +56,23 @@ class JvmBytecodeExtractorTest {
         })
     }
 
+    @Test
+    fun mapsOnlyUnambiguousK2TargetsToDurableDependencySymbols() {
+        val classes = Files.createTempDirectory("kide-bytecode-k2-map-")
+        compile(classes, "fixture/Api.java", """
+            package fixture;
+            public class Api { public void unique() {} public void overload() {} public void overload(int count) {} }
+        """)
+
+        val targets = JvmBytecodeExtractor.resolvedTargetIds(
+            classpath = listOf(classes),
+            targetKeys = setOf("callable:fixture/Api.unique", "callable:fixture/Api.overload"),
+        )
+
+        assertTrue(targets.getValue("callable:fixture/Api.unique").endsWith(":fixture.Api#method:unique()V"))
+        assertTrue("callable:fixture/Api.overload" !in targets)
+    }
+
     private fun compile(output: Path, relativeSource: String, source: String) {
         val file = output.resolve(relativeSource)
         file.parent.createDirectories()

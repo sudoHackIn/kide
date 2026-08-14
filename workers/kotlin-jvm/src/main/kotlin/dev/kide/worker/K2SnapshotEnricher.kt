@@ -2,8 +2,10 @@ package dev.kide.worker
 
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -17,8 +19,10 @@ internal object K2SnapshotEnricher {
         snapshots: List<JsonElement>,
         workspaceRoot: Path,
         resolved: List<K2ResolvedReference>,
+        externalTargets: Map<String, String> = emptyMap(),
     ): List<JsonElement> {
-        val targets = targetIds(snapshots)
+        val sourceTargets = targetIds(snapshots)
+        val targets = sourceTargets + externalTargets.filterKeys { it !in sourceTargets }
         val bySource = resolved.groupBy { Path.of(it.sourcePath).toAbsolutePath().normalize() }
         return snapshots.map { snapshot -> enrichSnapshot(snapshot.jsonObject, workspaceRoot, bySource, targets) }
     }
@@ -33,9 +37,16 @@ internal object K2SnapshotEnricher {
         val path = workspaceRoot.resolve(sourceUnit.requiredString("path")).toAbsolutePath().normalize()
         val contents = Files.readString(path)
         val provenance = snapshot["provenance"]!!
+        val owners = enclosingSymbols(snapshot["symbols"]!!.jsonArray)
         val exact = bySource[path].orEmpty().mapNotNull { reference ->
             val target = targets[reference.targetKey] ?: return@mapNotNull null
-            ExactFact(reference, target, occurrence(sourceUnit.requiredString("id"), contents, reference, target, provenance))
+            val start = utf8Offset(contents, reference.startUtf16)
+            val end = utf8Offset(contents, reference.endUtf16)
+            ExactFact(
+                reference,
+                target,
+                occurrence(sourceUnit.requiredString("id"), start, end, reference, target, enclosingSymbol(owners, start, end), provenance),
+            )
         }.distinctBy { it.reference.sourcePath to it.reference.startUtf16 to it.reference.endUtf16 to it.target }
         if (exact.isEmpty()) return snapshot
 
@@ -43,7 +54,7 @@ internal object K2SnapshotEnricher {
         val remainingOccurrences = snapshot["occurrences"]!!.jsonArray.filter { rangeKey(it) !in exactRanges }
         return buildJsonObject {
             snapshot.forEach { (key, value) ->
-                if (key !in setOf("occurrences", "references", "calls")) put(key, value)
+                if (key !in setOf("occurrences", "references", "calls", "types")) put(key, value)
             }
             put("occurrences", buildJsonArray {
                 (remainingOccurrences + exact.map { it.occurrence }).forEach(::add)
@@ -62,9 +73,14 @@ internal object K2SnapshotEnricher {
                     add(buildJsonObject {
                         put("source", fact.occurrence)
                         put("target", fact.target)
-                        put("caller", null)
+                        put("caller", fact.occurrence.jsonObject["enclosing_symbol"] ?: JsonNull)
                         put("precision", "exact")
                     })
+                }
+            })
+            put("types", buildJsonArray {
+                exact.mapNotNull { it.reference.typeDisplay }.distinct().sorted().forEach { display ->
+                    add(typeRecord(display, provenance))
                 }
             })
         }
@@ -78,8 +94,9 @@ internal object K2SnapshotEnricher {
             val qualifiedName = symbol["qualified_name"]?.jsonPrimitive?.content ?: return@mapNotNull null
             when (symbol.requiredString("kind")) {
                 "class", "interface", "enum", "object" -> "class:$qualifiedName" to id
-                "constructor" -> constructorKey(qualifiedName)?.let { it to id }
-                "function", "method", "property", "field" -> callableKey(qualifiedName) to id
+                "constructor" -> constructorKey(qualifiedName, symbol["signature"]?.jsonPrimitive?.content)?.let { it to id }
+                "function", "property" -> callableKey(qualifiedName, symbol["signature"]?.jsonPrimitive?.content, member = false) to id
+                "method", "field" -> callableKey(qualifiedName, symbol["signature"]?.jsonPrimitive?.content, member = true) to id
                 else -> null
             }
         }
@@ -87,38 +104,52 @@ internal object K2SnapshotEnricher {
         .mapNotNull { (key, ids) -> ids.distinct().singleOrNull()?.let { key to it } }
         .toMap()
 
-    private fun callableKey(qualifiedName: String): String {
+    private fun callableKey(qualifiedName: String, signature: String?, member: Boolean): String {
         val owner = qualifiedName.substringBeforeLast('.', missingDelimiterValue = "")
         val name = qualifiedName.substringAfterLast('.')
-        return "callable:${owner.replace('.', '/')}.${name}"
+        val separator = if (member) "." else "/"
+        return "callable:${owner.replace('.', '/')}$separator$name#${parameterSignature(signature)}"
     }
 
-    private fun constructorKey(qualifiedName: String): String? {
+    private fun constructorKey(qualifiedName: String, signature: String?): String? {
         val owner = qualifiedName.removeSuffix(".<init>")
         if (owner == qualifiedName) return null
         val packageName = owner.substringBeforeLast('.', missingDelimiterValue = "")
         val className = owner.substringAfterLast('.')
-        return "callable:${packageName.replace('.', '/')}/${className}.${className}"
+        return "callable:${packageName.replace('.', '/')}/${className}.${className}#${parameterSignature(signature)}"
     }
+
+    private fun parameterSignature(signature: String?): String = signature
+        ?.substringBeforeLast(":", signature)
+        ?.replace(" ", "")
+        ?.replace("Int", "kotlin/Int")
+        ?.replace("String", "kotlin/String")
+        ?.replace("Boolean", "kotlin/Boolean")
+        ?.replace("Long", "kotlin/Long")
+        ?.replace("Double", "kotlin/Double")
+        ?.replace("Float", "kotlin/Float")
+        ?: "(?)"
 
     private fun occurrence(
         sourceUnit: String,
-        contents: String,
+        start: Int,
+        end: Int,
         reference: K2ResolvedReference,
         target: String,
+        enclosingSymbol: String?,
         provenance: JsonElement,
     ): JsonElement = buildJsonObject {
         put("range", buildJsonObject {
             put("source_unit", sourceUnit)
             put("bytes", buildJsonObject {
-                put("start", utf8Offset(contents, reference.startUtf16))
-                put("end", utf8Offset(contents, reference.endUtf16))
+                put("start", start)
+                put("end", end)
             })
         })
         put("kind", if (reference.isCall) "call" else "reference")
-        put("enclosing_symbol", null)
+        put("enclosing_symbol", enclosingSymbol)
         put("target", target)
-        put("type_id", null)
+        put("type_id", reference.typeDisplay?.let(::typeId))
         put("precision", "exact")
         put("freshness", "fresh")
         put("completeness", "complete")
@@ -135,5 +166,38 @@ internal object K2SnapshotEnricher {
         return contents.substring(0, utf16Offset).encodeToByteArray().size
     }
 
+    private fun typeRecord(display: String, provenance: JsonElement): JsonElement = buildJsonObject {
+        put("id", typeId(display))
+        put("language", "kotlin")
+        put("display", display)
+        put("backend_key", buildJsonObject {
+            put("backend", WORKER_NAME)
+            put("schema_version", 1)
+            put("value", display)
+        })
+        put("freshness", "fresh")
+        put("completeness", "complete")
+        put("provenance", provenance)
+    }
+
+    private fun typeId(display: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(display.encodeToByteArray())
+        return "kotlin:type:${digest.joinToString("") { "%02x".format(it) }}"
+    }
+
+    private fun enclosingSymbols(symbols: List<JsonElement>): List<EnclosingSymbol> = symbols.mapNotNull { element ->
+        val symbol = element.jsonObject
+        val declaration = symbol["declaration"]!!.jsonObject["bytes"]!!.jsonObject
+        val start = declaration.requiredString("start").toInt()
+        val end = declaration.requiredString("end").toInt()
+        symbol.requiredString("id").let { id -> EnclosingSymbol(id, start, end) }
+    }
+
+    private fun enclosingSymbol(owners: List<EnclosingSymbol>, start: Int, end: Int): String? = owners
+        .filter { owner -> owner.start <= start && end <= owner.end && (owner.start != start || owner.end != end) }
+        .minByOrNull { owner -> owner.end - owner.start }
+        ?.id
+
     private data class ExactFact(val reference: K2ResolvedReference, val target: String, val occurrence: JsonElement)
+    private data class EnclosingSymbol(val id: String, val start: Int, val end: Int)
 }

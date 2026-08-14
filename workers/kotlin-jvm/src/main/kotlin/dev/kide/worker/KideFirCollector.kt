@@ -14,9 +14,13 @@ import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirExpressionChecker
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
 import org.jetbrains.kotlin.fir.expressions.FirQualifiedAccessExpression
+import org.jetbrains.kotlin.fir.declarations.FirFunction
+import org.jetbrains.kotlin.fir.types.FirResolvedTypeRef
+import org.jetbrains.kotlin.fir.types.resolvedType
 import org.jetbrains.kotlin.fir.extensions.FirExtensionRegistrar
 import org.jetbrains.kotlin.fir.references.FirResolvedNamedReference
 import org.jetbrains.kotlin.fir.symbols.FirBasedSymbol
+import org.jetbrains.kotlin.fir.symbols.SymbolInternals
 import org.jetbrains.kotlin.fir.symbols.impl.FirCallableSymbol
 import org.jetbrains.kotlin.fir.symbols.impl.FirClassSymbol
 
@@ -25,6 +29,7 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirClassSymbol
  * records only genuine compiler-selected targets; it never performs a textual
  * lookup. The worker drains this short-lived collector after each CLI run.
  */
+@OptIn(SymbolInternals::class)
 internal object KideFirCollector {
     private val references = ConcurrentLinkedQueue<K2ResolvedReference>()
 
@@ -34,7 +39,13 @@ internal object KideFirCollector {
         compareBy({ it.sourcePath }, { it.startUtf16 }, { it.endUtf16 }, { it.targetKey }),
     )
 
-    internal fun record(sourcePath: String, source: KtSourceElement, target: FirBasedSymbol<*>, call: Boolean) {
+    internal fun record(
+        sourcePath: String,
+        source: KtSourceElement,
+        target: FirBasedSymbol<*>,
+        call: Boolean,
+        typeDisplay: String?,
+    ) {
         references.add(
             K2ResolvedReference(
                 sourcePath = sourcePath,
@@ -42,15 +53,23 @@ internal object KideFirCollector {
                 endUtf16 = source.endOffset,
                 targetKey = targetKey(target),
                 isCall = call,
+                typeDisplay = typeDisplay,
             ),
         )
     }
 
     private fun targetKey(symbol: FirBasedSymbol<*>): String = when (symbol) {
         is FirClassSymbol<*> -> "class:${symbol.classId.asSingleFqName().asString()}"
-        is FirCallableSymbol<*> -> "callable:${symbol.callableIdAsString()}"
+        is FirCallableSymbol<*> -> "callable:${symbol.callableIdAsString()}#${callableParameterTypes(symbol)}"
         else -> "fir:${symbol::class.qualifiedName}:${symbol.source?.startOffset ?: -1}"
     }
+
+    private fun callableParameterTypes(symbol: FirCallableSymbol<*>): String = (symbol.fir as? FirFunction)
+        ?.valueParameters
+        ?.joinToString(prefix = "(", postfix = ")") { parameter ->
+            (parameter.returnTypeRef as? FirResolvedTypeRef)?.coneType?.toString() ?: "?"
+        }
+        ?: "(?)"
 }
 
 internal data class K2ResolvedReference(
@@ -59,6 +78,7 @@ internal data class K2ResolvedReference(
     val endUtf16: Int,
     val targetKey: String,
     val isCall: Boolean,
+    val typeDisplay: String?,
 )
 
 /** Registered through the standard compiler-plugin service entry. */
@@ -96,6 +116,7 @@ private object KideQualifiedAccessChecker : FirExpressionChecker<FirQualifiedAcc
             source = source,
             target = target,
             call = expression::class.simpleName?.contains("FunctionCall") == true,
+            typeDisplay = expression.resolvedType.toString(),
         )
     }
 }

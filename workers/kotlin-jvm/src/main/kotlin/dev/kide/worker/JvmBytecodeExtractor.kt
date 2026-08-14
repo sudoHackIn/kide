@@ -10,6 +10,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.objectweb.asm.AnnotationVisitor
 import org.objectweb.asm.ClassReader
@@ -25,6 +28,29 @@ import org.objectweb.asm.Type
  * the same atomic snapshot path as source-backed facts.
  */
 internal object JvmBytecodeExtractor {
+    /**
+     * Resolves a bounded set of K2 target keys to the durable IDs emitted by
+     * [extract]. Only classes requested by K2 are opened; an overloaded JVM
+     * member is intentionally omitted until K2 supplies its JVM descriptor.
+     */
+    fun resolvedTargetIds(classpath: List<Path>, targetKeys: Set<String>): Map<String, String> {
+        val wanted = targetKeys.mapNotNull(::wantedTarget).groupBy { it.entry }
+        if (wanted.isEmpty()) return emptyMap()
+        val candidates = mutableMapOf<String, MutableSet<String>>()
+        classpath.filter { it.isRegularFile() || it.isDirectory() }.distinct().sortedBy(Path::toString).forEach { artifact ->
+            classEntriesFor(artifact, wanted.keys).forEach { (entry, bytes) ->
+                val artifactHash = fingerprint(artifactBytes(artifact))
+                val snapshot = snapshot(entry, bytes, artifactHash, component = "k2-external", context = "k2-external").jsonObject
+                val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
+                wanted.getValue(entry).forEach { target ->
+                    val matches = symbols.filter { symbol -> target.matches(symbol) }.map { it.requiredString("id") }.distinct()
+                    if (matches.size == 1) candidates.getOrPut(target.key, ::mutableSetOf).add(matches.single())
+                }
+            }
+        }
+        return candidates.mapNotNull { (key, ids) -> ids.singleOrNull()?.let { key to it } }.toMap()
+    }
+
     fun extract(artifact: Path, component: String, context: String): List<JsonElement> {
         require(artifact.isRegularFile() || artifact.isDirectory()) { "artifact does not exist: $artifact" }
         val artifactHash = fingerprint(artifactBytes(artifact))
@@ -46,6 +72,18 @@ internal object JvmBytecodeExtractor {
                 .sorted()
                 .map { path -> artifact.relativize(path).toString().replace('\\', '/') to Files.readAllBytes(path) }
                 .toList()
+        }
+    }
+
+    private fun classEntriesFor(artifact: Path, entries: Set<String>): List<Pair<String, ByteArray>> = when {
+        artifact.isRegularFile() -> JarFile(artifact.toFile()).use { jar ->
+            entries.sorted().mapNotNull { entry ->
+                jar.getJarEntry(entry)?.let { found -> entry to jar.getInputStream(found).use { it.readBytes() } }
+            }
+        }
+        else -> entries.sorted().mapNotNull { entry ->
+            val file = artifact.resolve(entry)
+            file.takeIf { it.isRegularFile() }?.let { entry to Files.readAllBytes(it) }
         }
     }
 
@@ -237,5 +275,39 @@ internal object JvmBytecodeExtractor {
         val digest = MessageDigest.getInstance("SHA-256")
         parts.forEach { part -> digest.update(part.size.toLong().toString().encodeToByteArray()); digest.update(0); digest.update(part) }
         return "sha256:${digest.digest().joinToString("") { "%02x".format(it) }}"
+    }
+
+    private fun wantedTarget(key: String): WantedTarget? = when {
+        key.startsWith("class:") -> {
+            val qualifiedName = key.removePrefix("class:")
+            WantedTarget(key, "${qualifiedName.replace('.', '/')}.class", qualifiedName, null, false)
+        }
+        key.startsWith("callable:") -> {
+            val callable = key.removePrefix("callable:").substringBefore('#')
+            val split = callable.lastIndexOf('.')
+            if (split <= 0) null else {
+                val owner = callable.substring(0, split).replace('/', '.')
+                val member = callable.substring(split + 1)
+                WantedTarget(key, "${owner.replace('.', '/')}.class", owner, member, member == owner.substringAfterLast('.'))
+            }
+        }
+        else -> null
+    }
+
+    private data class WantedTarget(
+        val key: String,
+        val entry: String,
+        val owner: String,
+        val member: String?,
+        val constructor: Boolean,
+    ) {
+        fun matches(symbol: kotlinx.serialization.json.JsonObject): Boolean {
+            val qualifiedName = symbol["qualified_name"]?.jsonPrimitive?.content ?: return false
+            return when {
+                member == null -> qualifiedName == owner && symbol.requiredString("kind") in setOf("class", "interface", "enum", "object")
+                constructor -> symbol.requiredString("kind") == "constructor" && qualifiedName == "$owner.<init>"
+                else -> symbol.requiredString("kind") in setOf("method", "field") && qualifiedName == "$owner.$member"
+            }
+        }
     }
 }

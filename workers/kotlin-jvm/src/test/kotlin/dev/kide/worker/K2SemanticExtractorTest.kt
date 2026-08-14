@@ -23,7 +23,7 @@ class K2SemanticExtractorTest {
         val apiReference = references.first { reference ->
             reference.sourcePath == use.toString() && reference.startUtf16 == "package fixture\nfun use() = ".length
         }
-        assertEquals("callable:fixture/Api.Api", apiReference.targetKey)
+        assertEquals("callable:fixture/Api.Api#()", apiReference.targetKey)
         assertTrue(apiReference.isCall)
     }
 }

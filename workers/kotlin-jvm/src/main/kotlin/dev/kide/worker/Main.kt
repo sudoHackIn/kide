@@ -139,8 +139,12 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
             selectedSourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
             context = context,
         )
+        val externalTargets = JvmBytecodeExtractor.resolvedTargetIds(
+            classpath = context?.classpath.orEmpty(),
+            targetKeys = resolved.mapTo(sortedSetOf()) { it.targetKey },
+        )
         put("snapshots", buildJsonArray {
-            K2SnapshotEnricher.enrich(snapshots, workspaceRoot, resolved).forEach(::add)
+            K2SnapshotEnricher.enrich(snapshots, workspaceRoot, resolved, externalTargets).forEach(::add)
         })
     }
 }
