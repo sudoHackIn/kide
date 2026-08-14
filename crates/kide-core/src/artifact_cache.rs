@@ -7,7 +7,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -61,6 +61,51 @@ pub enum ArtifactBlobCacheError {
     Io(#[from] std::io::Error),
     #[error("artifact blob has an incompatible or corrupt header")]
     InvalidHeader,
+    #[error("artifact blob stream ended before its declared {expected} byte payload")]
+    TruncatedPayload { expected: u64 },
+}
+
+/// A validated payload file. Opening it reads only the fixed-size header;
+/// callers can then fetch index sections by range without materialising the
+/// artifact in memory.
+#[derive(Debug)]
+pub struct ArtifactBlob {
+    file: File,
+    payload_len: u64,
+}
+
+impl ArtifactBlob {
+    pub fn len(&self) -> u64 {
+        self.payload_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.payload_len == 0
+    }
+
+    pub fn read_range(
+        &mut self,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, ArtifactBlobCacheError> {
+        let end = offset
+            .checked_add(length as u64)
+            .ok_or(ArtifactBlobCacheError::InvalidHeader)?;
+        if end > self.payload_len {
+            return Err(ArtifactBlobCacheError::InvalidHeader);
+        }
+        self.file
+            .seek(SeekFrom::Start(HEADER_SIZE as u64 + offset))?;
+        let mut bytes = vec![0; length];
+        self.file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn read_all(&mut self) -> Result<Vec<u8>, ArtifactBlobCacheError> {
+        let length =
+            usize::try_from(self.payload_len).map_err(|_| ArtifactBlobCacheError::InvalidHeader)?;
+        self.read_range(0, length)
+    }
 }
 
 /// A content-addressed cache rooted outside an individual project index.
@@ -81,17 +126,29 @@ impl ArtifactBlobCache {
         Ok(Self { root })
     }
 
-    pub fn load(&self, key: &ArtifactBlobKey) -> Result<Option<Vec<u8>>, ArtifactBlobCacheError> {
+    pub fn open_blob(
+        &self,
+        key: &ArtifactBlobKey,
+    ) -> Result<Option<ArtifactBlob>, ArtifactBlobCacheError> {
         let path = self.path_for(key);
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let payload = validate_blob(&bytes, key)?;
-        Ok(Some(payload.to_vec()))
+        let mut header = [0; HEADER_SIZE];
+        file.read_exact(&mut header)?;
+        let payload_len = validate_header(&header, key)?;
+        if file.metadata()?.len() != HEADER_SIZE as u64 + payload_len {
+            return Err(ArtifactBlobCacheError::InvalidHeader);
+        }
+        Ok(Some(ArtifactBlob { file, payload_len }))
+    }
+
+    pub fn load(&self, key: &ArtifactBlobKey) -> Result<Option<Vec<u8>>, ArtifactBlobCacheError> {
+        self.open_blob(key)?
+            .map(|mut blob| blob.read_all())
+            .transpose()
     }
 
     /// Publishes an opaque immutable payload. Returns `true` when this caller
@@ -101,6 +158,17 @@ impl ArtifactBlobCache {
         &self,
         key: &ArtifactBlobKey,
         payload: &[u8],
+    ) -> Result<bool, ArtifactBlobCacheError> {
+        self.publish_stream(key, payload.len() as u64, Cursor::new(payload))
+    }
+
+    /// Streams a payload directly to a temporary cache file; no SQLite
+    /// transaction and no full in-memory buffer are involved.
+    pub fn publish_stream<R: Read>(
+        &self,
+        key: &ArtifactBlobKey,
+        payload_len: u64,
+        mut payload: R,
     ) -> Result<bool, ArtifactBlobCacheError> {
         let destination = self.path_for(key);
         if destination.exists() {
@@ -118,7 +186,7 @@ impl ArtifactBlobCache {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        write_blob(&mut file, key, payload)?;
+        write_blob_stream(&mut file, key, payload_len, &mut payload)?;
         file.sync_all()?;
         drop(file);
 
@@ -154,34 +222,35 @@ impl ArtifactBlobKey {
     }
 }
 
-fn write_blob(
+fn write_blob_stream<R: Read>(
     file: &mut File,
     key: &ArtifactBlobKey,
-    payload: &[u8],
-) -> Result<(), std::io::Error> {
+    payload_len: u64,
+    payload: &mut R,
+) -> Result<(), ArtifactBlobCacheError> {
     file.write_all(&MAGIC)?;
     file.write_all(&1_u32.to_le_bytes())?;
     file.write_all(&key.digest())?;
-    file.write_all(&(payload.len() as u64).to_le_bytes())?;
-    file.write_all(payload)
+    file.write_all(&payload_len.to_le_bytes())?;
+    let copied = std::io::copy(&mut payload.take(payload_len), file)?;
+    if copied != payload_len {
+        return Err(ArtifactBlobCacheError::TruncatedPayload {
+            expected: payload_len,
+        });
+    }
+    Ok(())
 }
 
-fn validate_blob<'a>(
-    bytes: &'a [u8],
-    key: &ArtifactBlobKey,
-) -> Result<&'a [u8], ArtifactBlobCacheError> {
-    if bytes.len() < HEADER_SIZE || bytes[..8] != MAGIC || bytes[8..12] != 1_u32.to_le_bytes() {
+fn validate_header(bytes: &[u8], key: &ArtifactBlobKey) -> Result<u64, ArtifactBlobCacheError> {
+    if bytes.len() != HEADER_SIZE || bytes[..8] != MAGIC || bytes[8..12] != 1_u32.to_le_bytes() {
         return Err(ArtifactBlobCacheError::InvalidHeader);
     }
     if bytes[12..44] != key.digest() {
         return Err(ArtifactBlobCacheError::InvalidHeader);
     }
-    let length = u64::from_le_bytes(bytes[44..52].try_into().expect("fixed header slice"));
-    let payload = &bytes[HEADER_SIZE..];
-    if usize::try_from(length).ok() != Some(payload.len()) {
-        return Err(ArtifactBlobCacheError::InvalidHeader);
-    }
-    Ok(payload)
+    Ok(u64::from_le_bytes(
+        bytes[44..52].try_into().expect("fixed header slice"),
+    ))
 }
 
 #[cfg(test)]
@@ -224,6 +293,28 @@ mod tests {
         assert_eq!(
             second.load(&key).expect("loads"),
             Some(b"opaque binary facts".to_vec())
+        );
+
+        let mut blob = second.open_blob(&key).expect("opens").expect("exists");
+        assert_eq!(blob.len(), 19);
+        assert_eq!(blob.read_range(7, 6).expect("reads index range"), b"binary");
+    }
+
+    #[test]
+    fn stream_publication_does_not_require_a_payload_buffer() {
+        let directory = tempdir().expect("temporary cache directory");
+        let cache = ArtifactBlobCache::open(directory.path()).expect("opens cache");
+        let key = key();
+        let source = Cursor::new(b"streamed payload".to_vec());
+
+        assert!(
+            cache
+                .publish_stream(&key, 16, source)
+                .expect("streams blob")
+        );
+        assert_eq!(
+            cache.load(&key).expect("loads"),
+            Some(b"streamed payload".to_vec())
         );
     }
 
