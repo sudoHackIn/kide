@@ -88,6 +88,7 @@ internal object KideFirCollector {
         ?.joinToString(prefix = "(", postfix = ")") { parameter ->
             (parameter.returnTypeRef as? FirResolvedTypeRef)?.coneType?.toString() ?: "?"
         }
+        ?.replace(" ", "")
         ?: "(?)"
 }
 
