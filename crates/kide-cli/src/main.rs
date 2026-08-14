@@ -102,6 +102,8 @@ fn index(path: PathBuf) -> Result<QueryStatus> {
             "analyzed": run.analyzed,
         "removed": run.removed,
         "worker_starts": run.worker_starts,
+        "dependency_analyzed": run.dependency_analyzed,
+        "dependency_reused": run.dependency_reused,
         })
     );
     Ok(QueryStatus::Ok)

@@ -30,16 +30,13 @@ class JvmBytecodeExtractorTest {
             }
         """)
 
-        val snapshots = JvmBytecodeExtractor.extract(
+        val snapshot = JvmBytecodeExtractor.extractArtifact(
             classes,
             component = "gradle:app:main",
             context = "sha256:test-context",
-        ).map { it.jsonObject }
-        val child = snapshots.single { snapshot ->
-            snapshot["source_unit"]!!.jsonObject["path"]!!.jsonPrimitive.content.endsWith("fixture/Child.class")
-        }
-        val sourceUnit = child["source_unit"]!!.jsonObject
-        val symbols = child["symbols"]!!.jsonArray.map { it.jsonObject }
+        ).jsonObject
+        val sourceUnit = snapshot["source_unit"]!!.jsonObject
+        val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
 
         assertEquals("dependency", sourceUnit["origin"]!!.jsonPrimitive.content)
         assertTrue(sourceUnit["id"]!!.jsonPrimitive.content.startsWith("jvm:sha256:"))
@@ -48,10 +45,10 @@ class JvmBytecodeExtractorTest {
         val overloads = symbols.filter { it["kind"]!!.jsonPrimitive.content == "method" && it["name"]!!.jsonPrimitive.content == "overload" }
         assertEquals(2, overloads.size)
         assertEquals(2, overloads.map { it["signature"]!!.jsonPrimitive.content }.toSet().size)
-        assertTrue(child["hierarchy"]!!.jsonArray.any { edge ->
+        assertTrue(snapshot["hierarchy"]!!.jsonArray.any { edge ->
             edge.jsonObject["supertype"]!!.jsonPrimitive.content.endsWith(":fixture.Base")
         })
-        assertTrue(child["hierarchy"]!!.jsonArray.any { edge ->
+        assertTrue(snapshot["hierarchy"]!!.jsonArray.any { edge ->
             edge.jsonObject["supertype"]!!.jsonPrimitive.content.endsWith(":java.lang.Runnable")
         })
     }

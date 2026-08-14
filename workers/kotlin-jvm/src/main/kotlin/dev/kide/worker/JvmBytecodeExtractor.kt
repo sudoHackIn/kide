@@ -23,9 +23,9 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 
 /**
- * Extracts declarations from JVM binaries without loading their classes. Each
- * class becomes a virtual dependency source unit, so Core can persist it using
- * the same atomic snapshot path as source-backed facts.
+ * Extracts declarations from JVM binaries without loading their classes. One
+ * resolved artifact becomes one virtual dependency source unit, keeping Core's
+ * persistence transaction artifact-granular rather than class-granular.
  */
 internal object JvmBytecodeExtractor {
     /**
@@ -52,10 +52,38 @@ internal object JvmBytecodeExtractor {
     }
 
     fun extract(artifact: Path, component: String, context: String): List<JsonElement> {
+        return listOf(extractArtifact(artifact, component, context))
+    }
+
+    fun extractArtifact(artifact: Path, component: String, context: String): JsonElement {
         require(artifact.isRegularFile() || artifact.isDirectory()) { "artifact does not exist: $artifact" }
         val artifactHash = fingerprint(artifactBytes(artifact))
-        return classEntries(artifact).map { (entry, bytes) ->
-            snapshot(entry, bytes, artifactHash, component, context)
+        val unitId = "jvm:$artifactHash"
+        val facts = classEntries(artifact).flatMap { (_, bytes) ->
+            val language = if (hasKotlinMetadata(bytes)) "kotlin" else "java"
+            val classFacts = ClassFacts(unitId, artifactHash, component, language)
+            ClassReader(bytes).accept(classFacts, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+            listOf(classFacts)
+        }
+        return buildJsonObject {
+            put("source_unit", buildJsonObject {
+                put("id", unitId)
+                put("component", component)
+                put("path", ".kide/dependencies/${artifactHash.removePrefix("sha256:")}")
+                put("language", "java")
+                put("origin", "dependency")
+                put("content", artifactHash)
+                put("context", context)
+            })
+            put("symbols", buildJsonArray { facts.flatMap { it.symbols }.distinctBy { it.toString() }.sortedBy { it.toString() }.forEach(::add) })
+            put("occurrences", buildJsonArray {})
+            put("references", buildJsonArray {})
+            put("calls", buildJsonArray {})
+            put("hierarchy", buildJsonArray { facts.flatMap { it.hierarchy }.distinctBy { it.toString() }.sortedBy { it.toString() }.forEach(::add) })
+            put("types", buildJsonArray {})
+            put("diagnostics", buildJsonArray {})
+            put("completeness", "partial")
+            put("provenance", provenance(context))
         }
     }
 

@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use crate::{
-    AnalysisFact, AnalyzeBatchRequest, FileAnalysisSnapshot, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, SourceUnit, WorkerEnvelope, WorkerLaunch, WorkerMessage,
-    WorkerSupervisor, WorkerSupervisorError, plan_invalidation,
+    AnalysisFact, AnalyzeBatchRequest, ArtifactAnalysisRequest, FileAnalysisSnapshot, IndexAction,
+    IndexStore, IndexStoreError, ProjectManifest, SourceOrigin, SourceUnit, WorkerEnvelope,
+    WorkerLaunch, WorkerMessage, WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
+    plan_invalidation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,8 @@ pub struct IndexRun {
     pub analyzed: usize,
     pub removed: usize,
     pub worker_starts: u64,
+    pub dependency_analyzed: usize,
+    pub dependency_reused: usize,
 }
 
 #[derive(Debug, Error)]
@@ -40,13 +43,20 @@ pub fn index_batch(
     current: &[SourceUnit],
     launch: WorkerLaunch,
 ) -> Result<IndexRun, IndexOrchestratorError> {
-    let actions = plan_invalidation(current, &store.source_units()?);
+    let persisted_sources = store
+        .source_units()?
+        .into_iter()
+        .filter(|source| source.origin != SourceOrigin::Dependency)
+        .collect::<Vec<_>>();
+    let actions = plan_invalidation(current, &persisted_sources);
     let mut reanalyze = Vec::new();
     let mut run = IndexRun {
         reused: 0,
         analyzed: 0,
         removed: 0,
         worker_starts: 0,
+        dependency_analyzed: 0,
+        dependency_reused: 0,
     };
     for action in actions {
         match action {
@@ -96,9 +106,55 @@ pub fn index_batch(
         store.replace_snapshot(expected, snapshot)?;
         run.analyzed += 1;
     }
+    index_dependencies(store, &mut supervisor, &mut run)?;
     store.put_manifest(manifest)?;
     run.worker_starts = supervisor.start_count();
     Ok(run)
+}
+
+fn index_dependencies(
+    store: &mut IndexStore,
+    supervisor: &mut WorkerSupervisor,
+    run: &mut IndexRun,
+) -> Result<(), IndexOrchestratorError> {
+    let mut cursor = None;
+    let mut page = 0_u64;
+    loop {
+        let response = supervisor.request(WorkerEnvelope::new(
+            format!("index-artifacts-{page}"),
+            WorkerMessage::ArtifactAnalysisRequest(ArtifactAnalysisRequest {
+                workspace_root: WorkspacePath::new("."),
+                max_artifacts: 1,
+                cursor: cursor.clone(),
+            }),
+        ))?;
+        let WorkerMessage::ArtifactAnalysisResponse(response) = response.message else {
+            return Err(IndexOrchestratorError::InvalidResponse {
+                received: Box::new(response.message),
+            });
+        };
+        for snapshot in response.snapshots {
+            let unchanged = store
+                .source_unit(&snapshot.source_unit.id)?
+                .is_some_and(|previous| {
+                    previous.content == snapshot.source_unit.content
+                        && previous.context == snapshot.source_unit.context
+                });
+            if unchanged {
+                run.dependency_reused += 1;
+            } else {
+                store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
+                run.dependency_analyzed += 1;
+            }
+        }
+        match response.next_cursor {
+            Some(next) => {
+                cursor = Some(next);
+                page += 1
+            }
+            None => return Ok(()),
+        }
+    }
 }
 
 fn validate_batch(
