@@ -196,6 +196,45 @@ internal object ProtobufAnalysisSnapshotAdapter {
         put("snapshots", buildJsonArray { value.snapshotsList.forEach { add(json(it)) } })
     }
 
+    fun delta(value: JsonObject): Worker.AnalysisDelta = Worker.AnalysisDelta.newBuilder()
+        .setSourceUnitId(value["source_unit"]!!.jsonPrimitive.content)
+        .apply {
+            value["previous_content"]?.jsonPrimitive?.contentOrNull?.let(::setPreviousContentFingerprint)
+            value["snapshot"]?.takeUnless { it is JsonNull }?.jsonObject?.let { setSnapshot(snapshot(it)) }
+        }
+        .build()
+
+    fun json(value: Worker.AnalysisDelta): JsonObject = buildJsonObject {
+        put("source_unit", value.sourceUnitId)
+        put("previous_content", if (value.hasPreviousContentFingerprint()) JsonPrimitive(value.previousContentFingerprint) else JsonNull)
+        put("snapshot", if (value.hasSnapshot()) json(value.snapshot) else JsonNull)
+    }
+
+    fun artifactAnalysisRequest(value: JsonObject): Worker.ArtifactAnalysisRequest =
+        Worker.ArtifactAnalysisRequest.newBuilder()
+            .setWorkspaceRoot(value["workspace_root"]!!.jsonPrimitive.content)
+            .setMaxArtifacts(value["max_artifacts"]!!.jsonPrimitive.int)
+            .apply { value["cursor"]?.jsonPrimitive?.contentOrNull?.let(::setCursor) }
+            .build()
+
+    fun json(value: Worker.ArtifactAnalysisRequest): JsonObject = buildJsonObject {
+        require(value.maxArtifacts > 0) { "max_artifacts must be positive" }
+        put("workspace_root", value.workspaceRoot)
+        put("max_artifacts", value.maxArtifacts)
+        put("cursor", if (value.hasCursor()) JsonPrimitive(value.cursor) else JsonNull)
+    }
+
+    fun artifactAnalysisResponse(value: JsonObject): Worker.ArtifactAnalysisResponse =
+        Worker.ArtifactAnalysisResponse.newBuilder()
+            .addAllSnapshots(value["snapshots"]!!.jsonArray.map { snapshot(it.jsonObject) })
+            .apply { value["next_cursor"]?.jsonPrimitive?.contentOrNull?.let(::setNextCursor) }
+            .build()
+
+    fun json(value: Worker.ArtifactAnalysisResponse): JsonObject = buildJsonObject {
+        put("snapshots", buildJsonArray { value.snapshotsList.forEach { add(json(it)) } })
+        put("next_cursor", if (value.hasNextCursor()) JsonPrimitive(value.nextCursor) else JsonNull)
+    }
+
     fun json(value: Worker.FileAnalysisSnapshot): JsonObject {
         fun factProvenance(index: Int): Worker.Provenance {
             require(index in value.provenancesList.indices) { "provenance index out of range: $index" }

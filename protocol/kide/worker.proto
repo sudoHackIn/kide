@@ -20,6 +20,9 @@ message Envelope {
     AnalysisBatchResponse analysis_batch_response = 20;
     ArtifactMaterializationRequest artifact_materialization_request = 17;
     ArtifactMaterializationResponse artifact_materialization_response = 18;
+    AnalysisDelta analysis_delta = 21;
+    ArtifactAnalysisRequest artifact_analysis_request = 22;
+    ArtifactAnalysisResponse artifact_analysis_response = 23;
   }
 }
 
@@ -29,6 +32,7 @@ message HandshakeResponse {
   string backend_version = 2;
   uint32 protocol_version = 3;
   repeated string capabilities = 4;
+  repeated string languages = 5;
 }
 
 message ProjectManifestRequest { string workspace_root = 1; }
@@ -157,6 +161,20 @@ message Diagnostic {
   string freshness = 6;
   string completeness = 7;
   uint32 provenance_index = 8;
+}
+message AnalysisDelta {
+  string source_unit_id = 1;
+  optional string previous_content_fingerprint = 2;
+  optional FileAnalysisSnapshot snapshot = 3;
+}
+message ArtifactAnalysisRequest {
+  string workspace_root = 1;
+  uint32 max_artifacts = 2;
+  optional string cursor = 3;
+}
+message ArtifactAnalysisResponse {
+  repeated FileAnalysisSnapshot snapshots = 1;
+  optional string next_cursor = 2;
 }
 
 message ArtifactDiscoveryRequest {

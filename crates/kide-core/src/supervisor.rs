@@ -1,4 +1,4 @@
-//! On-demand lifecycle management for disposable NDJSON workers.
+//! On-demand lifecycle management for disposable framed-Protobuf workers.
 //!
 //! The supervisor owns a child only while a request needs it. The child owns
 //! compiler/build state; Core owns every committed fact independently.
@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufReader},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     HandshakeRequest, HandshakeResponse, WORKER_PROTOCOL_VERSION, WorkerEnvelope, WorkerError,
-    WorkerErrorCode, WorkerMessage,
+    WorkerErrorCode, WorkerMessage, worker_framing, worker_proto_adapter,
 };
 
 /// Command and lifetime limits for one disposable backend implementation.
@@ -51,10 +51,10 @@ impl WorkerLaunch {
 pub enum WorkerSupervisorError {
     #[error("failed to start worker {program}: {source}")]
     Start { program: PathBuf, source: io::Error },
-    #[error("worker stdin failed: {0}")]
-    Write(#[source] io::Error),
-    #[error("worker emitted invalid NDJSON: {0}")]
-    InvalidResponse(#[from] serde_json::Error),
+    #[error("worker pipe framing failed: {0}")]
+    Frame(#[from] worker_framing::FrameError),
+    #[error("worker emitted an invalid protobuf envelope: {0}")]
+    InvalidResponse(#[from] worker_proto_adapter::AdapterError),
     #[error("worker did not respond within {timeout:?}")]
     TimedOut { timeout: Duration },
     #[error("worker exited before a response was available")]
@@ -77,7 +77,7 @@ pub enum WorkerSupervisorError {
 struct RunningWorker {
     child: Child,
     stdin: ChildStdin,
-    responses: Receiver<io::Result<String>>,
+    responses: Receiver<Result<crate::worker_proto::Envelope, worker_framing::FrameError>>,
     request_ids: BTreeSet<String>,
     last_activity: Instant,
 }
@@ -159,26 +159,19 @@ impl WorkerSupervisor {
             if !running.request_ids.insert(request_id.clone()) {
                 return Err(WorkerSupervisorError::DuplicateRequestId { request_id });
             }
-            let encoded = serde_json::to_vec(&request)?;
-            running
-                .stdin
-                .write_all(&encoded)
-                .map_err(WorkerSupervisorError::Write)?;
-            running
-                .stdin
-                .write_all(b"\n")
-                .map_err(WorkerSupervisorError::Write)?;
-            running
-                .stdin
-                .flush()
-                .map_err(WorkerSupervisorError::Write)?;
+            let encoded = worker_proto_adapter::envelope(&request)?;
+            worker_framing::write_frame(&mut running.stdin, &encoded)?;
             running.last_activity = Instant::now();
             running.responses.recv_timeout(timeout)
         };
 
-        let line = match response {
-            Ok(Ok(line)) => line,
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+        let proto_envelope = match response {
+            Ok(Ok(envelope)) => envelope,
+            Ok(Err(error)) => {
+                self.stop();
+                return Err(WorkerSupervisorError::Frame(error));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 self.stop();
                 return Err(WorkerSupervisorError::Exited);
             }
@@ -187,7 +180,7 @@ impl WorkerSupervisor {
                 return Err(WorkerSupervisorError::TimedOut { timeout });
             }
         };
-        let envelope: WorkerEnvelope = serde_json::from_str(&line)?;
+        let envelope = worker_proto_adapter::decode_envelope(proto_envelope)?;
         if envelope.protocol_version != WORKER_PROTOCOL_VERSION {
             self.stop();
             return Err(WorkerSupervisorError::IncompatibleProtocol {
@@ -260,10 +253,19 @@ impl WorkerSupervisor {
         let stdout = child.stdout.take().expect("piped stdout is present");
         let (sender, responses) = mpsc::channel();
         thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if sender.send(line).is_err() {
-                    return;
+            let mut reader = BufReader::new(stdout);
+            loop {
+                match worker_framing::read_frame(&mut reader) {
+                    Ok(Some(envelope)) => {
+                        if sender.send(Ok(envelope)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
                 }
             }
         });

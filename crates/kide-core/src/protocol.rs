@@ -115,7 +115,7 @@ pub struct AnalysisBatchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactAnalysisRequest {
     pub workspace_root: WorkspacePath,
-    /// Hard cap on worker-local artifacts included in one NDJSON response.
+    /// Hard cap on worker-local artifacts included in one control-plane response.
     pub max_artifacts: u32,
     /// Opaque continuation cursor returned by the previous response.
     pub cursor: Option<String>,
@@ -214,8 +214,8 @@ impl WorkerError {
     }
 }
 
-/// One NDJSON object. `request_id` correlates an error or response with the
-/// Core request that caused it; it is unique within one worker process.
+/// Canonical control-plane message. `request_id` correlates an error or
+/// response with the Core request that caused it; it is unique per worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerEnvelope {
     pub protocol_version: u32,
@@ -259,8 +259,7 @@ pub enum WorkerMessage {
     ArtifactMaterializationResponse(Box<ArtifactMaterializationResponse>),
     /// Kept behind an indirection so one rare, full-file delta does not make
     /// every handshake and batch message as large as the delta payload.
-    /// `Box` is transparent to serde, therefore the NDJSON protocol is
-    /// unchanged.
+    /// The indirection keeps ordinary control-plane messages compact.
     AnalysisDelta(Box<AnalysisDelta>),
     Error(WorkerError),
 }

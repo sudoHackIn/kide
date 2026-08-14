@@ -1,7 +1,7 @@
-//! Deterministic NDJSON worker used only by supervisor integration tests.
+//! Deterministic framed-Protobuf worker used only by supervisor integration tests.
 
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufReader, Write},
     thread,
     time::Duration,
 };
@@ -10,6 +10,7 @@ use kide_core::{
     AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDiscoveryResponse, Completeness,
     FileAnalysisSnapshot, HandshakeResponse, Language, Provenance, WORKER_PROTOCOL_VERSION,
     WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
+    worker_framing, worker_proto_adapter,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,9 +19,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "normal".to_owned());
     let stdin = io::stdin();
     let mut stdout = io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let request: WorkerEnvelope = serde_json::from_str(&line?)?;
+    let mut stdin = BufReader::new(stdin.lock());
+    while let Some(frame) = worker_framing::read_frame(&mut stdin)? {
+        let request: WorkerEnvelope = worker_proto_adapter::decode_envelope(frame)?;
         if mode == "crash" {
+            return Ok(());
+        }
+        if mode == "malformed" {
+            stdout.write_all(&[1, 0xff])?;
+            stdout.flush()?;
             return Ok(());
         }
         if mode == "sleep" {
@@ -79,10 +86,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => continue,
         };
-        let response = WorkerEnvelope::new(request.request_id, message);
-        serde_json::to_writer(&mut stdout, &response)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
+        let response = WorkerEnvelope::new(
+            if mode == "mismatched-id" {
+                "unexpected-request-id".to_owned()
+            } else {
+                request.request_id
+            },
+            message,
+        );
+        worker_framing::write_frame(&mut stdout, &worker_proto_adapter::envelope(&response)?)?;
     }
     Ok(())
 }

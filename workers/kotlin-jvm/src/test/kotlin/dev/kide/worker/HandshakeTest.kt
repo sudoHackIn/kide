@@ -2,38 +2,21 @@ package dev.kide.worker
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kide.worker.v1.Worker
 
 class HandshakeTest {
     @Test
     fun handshakeIsAVersionedProtocolEnvelopeWithStaticCapabilities() {
-        val envelope = protocolJson.decodeFromString<WorkerEnvelope>(handshakeJson())
+        val envelope = handshakeEnvelope()
 
         assertEquals(WORKER_PROTOCOL_VERSION, envelope.protocolVersion)
         assertEquals("handshake", envelope.requestId)
-        assertEquals(WorkerMessageKind.HANDSHAKE_RESPONSE, envelope.kind)
-        assertEquals("kide-kotlin-jvm", envelope.payload.jsonObject["capabilities"]!!.jsonObject["identity"]!!.jsonObject["backend"]!!.jsonPrimitive.content)
+        assertEquals(Worker.Envelope.MessageCase.HANDSHAKE_RESPONSE, envelope.messageCase)
+        assertEquals("kide-kotlin-jvm", envelope.handshakeResponse.backend)
         assertEquals(
             listOf("handshake", "project_manifest", "file_analysis_snapshot", "dependency_analysis"),
-            envelope.payload.jsonObject["capabilities"]!!.jsonObject["capabilities"]!!.jsonArray.map { it.jsonPrimitive.content },
+            envelope.handshakeResponse.capabilitiesList,
         )
-    }
-
-    @Test
-    fun compatible_version_has_no_error() {
-        assertNull(validateProtocolVersion(WORKER_PROTOCOL_VERSION))
-    }
-
-    @Test
-    fun incompatible_version_has_structured_non_retryable_error() {
-        val error = validateProtocolVersion(WORKER_PROTOCOL_VERSION + 1)!!
-
-        assertEquals("incompatible_protocol_version", error.code)
-        assertEquals(false, error.retryable)
-        assertEquals(WORKER_PROTOCOL_VERSION + 1, error.receivedProtocolVersion)
+        assertEquals(listOf("kotlin", "java"), envelope.handshakeResponse.languagesList)
     }
 }

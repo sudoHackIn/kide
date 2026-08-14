@@ -87,4 +87,27 @@ class ProtobufAnalysisSnapshotAdapterTest {
 
         assertEquals(snapshot, ProtobufAnalysisSnapshotAdapter.json(ProtobufAnalysisSnapshotAdapter.snapshot(snapshot)))
     }
+
+    @Test
+    fun deltaFixtureRoundTripsThroughGeneratedTypes() {
+        val fixture = requireNotNull(javaClass.classLoader.getResource("analysis-delta.json")).readText()
+        val payload = Json.parseToJsonElement(fixture).jsonObject["payload"]!!.jsonObject
+
+        assertEquals(payload, ProtobufAnalysisSnapshotAdapter.json(ProtobufAnalysisSnapshotAdapter.delta(payload)))
+    }
+
+    @Test
+    fun artifactAnalysisMessagesRoundTripThroughGeneratedTypes() {
+        val request = buildJsonObject {
+            put("workspace_root", "."); put("max_artifacts", 8); put("cursor", JsonNull)
+        }
+        val fixture = requireNotNull(javaClass.classLoader.getResource("analysis-batch-response.json")).readText()
+        val snapshot = Json.parseToJsonElement(fixture).jsonObject["payload"]!!.jsonObject["snapshots"]!!.jsonArray.first()
+        val response = buildJsonObject {
+            put("snapshots", buildJsonArray { add(snapshot) }); put("next_cursor", JsonNull)
+        }
+
+        assertEquals(request, ProtobufAnalysisSnapshotAdapter.json(ProtobufAnalysisSnapshotAdapter.artifactAnalysisRequest(request)))
+        assertEquals(response, ProtobufAnalysisSnapshotAdapter.json(ProtobufAnalysisSnapshotAdapter.artifactAnalysisResponse(response)))
+    }
 }

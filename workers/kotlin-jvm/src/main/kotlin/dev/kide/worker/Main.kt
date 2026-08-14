@@ -1,8 +1,7 @@
 package dev.kide.worker
 
 import java.nio.file.Path
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
+import kide.worker.v1.Worker
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
@@ -12,107 +11,83 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 
-internal const val WORKER_NAME = "kide-kotlin-jvm"
-internal const val WORKER_VERSION = "0.1.0"
-
 fun main(args: Array<String>) {
     when {
-        args.contentEquals(arrayOf("--handshake")) -> println(handshakeJson())
+        args.contentEquals(arrayOf("--handshake")) -> ProtobufFraming.write(System.out, handshakeEnvelope())
         args.contentEquals(arrayOf("--version")) -> println("$WORKER_NAME $WORKER_VERSION")
         args.isEmpty() || args.contentEquals(arrayOf("--serve")) -> serve()
         else -> error("Usage: $WORKER_NAME [--serve | --handshake | --version]")
     }
 }
 
-/** Runs one newline-delimited request/response stream for Core's supervisor. */
+/** Runs one framed protobuf request/response stream for Core's supervisor. */
 private fun serve() {
-    System.`in`.bufferedReader().lineSequence().forEach { line ->
-        val response = try {
-            dispatch(protocolJson.decodeFromString<WorkerEnvelope>(line))
+    while (true) {
+        val request = try {
+            ProtobufFraming.read(System.`in`) ?: return
         } catch (error: Exception) {
-            WorkerEnvelope(
-                protocolVersion = WORKER_PROTOCOL_VERSION,
-                requestId = "unknown",
-                kind = WorkerMessageKind.ERROR,
-                payload = protocolErrorPayload("invalid_request", error.message ?: error::class.simpleName.orEmpty(), false),
-            )
+            ProtobufFraming.write(System.out, protocolError("unknown", "invalid_request", error.message ?: error::class.simpleName.orEmpty()))
+            return
         }
-        println(protocolJson.encodeToString(response))
+        val response = try {
+            dispatch(request)
+        } catch (error: Exception) {
+            protocolError(request.requestId, "invalid_request", error.message ?: error::class.simpleName.orEmpty())
+        }
+        ProtobufFraming.write(System.out, response)
     }
 }
 
-internal fun dispatch(request: WorkerEnvelope): WorkerEnvelope {
-    validateProtocolVersion(request.protocolVersion)?.let { error ->
-        return WorkerEnvelope(
-            protocolVersion = WORKER_PROTOCOL_VERSION,
-            requestId = request.requestId,
-            kind = WorkerMessageKind.ERROR,
-            payload = protocolJson.encodeToJsonElement(WorkerProtocolError.serializer(), error),
-        )
+internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
+    if (request.protocolVersion != WORKER_PROTOCOL_VERSION) {
+        return protocolError(request.requestId, "incompatible_protocol_version", "worker protocol version ${request.protocolVersion} is incompatible; supported version is $WORKER_PROTOCOL_VERSION", receivedVersion = request.protocolVersion)
     }
-    return when (request.kind) {
-        WorkerMessageKind.HANDSHAKE_REQUEST -> handshakeEnvelope().copy(requestId = request.requestId)
-        WorkerMessageKind.PROJECT_MANIFEST_REQUEST -> {
-            val workspaceRoot = request.payload.jsonObject["workspace_root"]?.jsonPrimitive?.content
-                ?: return unsupported(request.requestId, "project_manifest_request requires workspace_root")
+    return when (request.messageCase) {
+        Worker.Envelope.MessageCase.HANDSHAKE_REQUEST -> handshakeEnvelope(request.requestId)
+        Worker.Envelope.MessageCase.PROJECT_MANIFEST_REQUEST -> {
+            val workspaceRoot = request.projectManifestRequest.workspaceRoot
+                .takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "project_manifest_request requires workspace_root")
             try {
-                WorkerEnvelope(
-                    protocolVersion = WORKER_PROTOCOL_VERSION,
-                    requestId = request.requestId,
-                    kind = WorkerMessageKind.PROJECT_MANIFEST_RESPONSE,
-                    payload = buildJsonObject {
-                        put("manifest", GradleProjectImporter.import(resolveWorkspacePath(workspaceRoot)))
-                    },
-                )
+                Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
+                    .setProjectManifestResponse(Worker.ProjectManifestResponse.newBuilder().setManifest(ProtobufManifestAdapter.manifest(GradleProjectImporter.import(resolveWorkspacePath(workspaceRoot)).jsonObject))).build()
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "Gradle project import failed"))
             }
         }
-        WorkerMessageKind.ANALYZE_BATCH_REQUEST -> {
+        Worker.Envelope.MessageCase.ANALYZE_BATCH_REQUEST -> {
             try {
-                WorkerEnvelope(
-                    protocolVersion = WORKER_PROTOCOL_VERSION,
-                    requestId = request.requestId,
-                    kind = WorkerMessageKind.ANALYSIS_BATCH_RESPONSE,
-                    payload = structuralBatch(request.payload, workspaceRoot()),
-                )
+                Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
+                    .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot()))).build()
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
             }
         }
-        WorkerMessageKind.ARTIFACT_ANALYSIS_REQUEST -> {
-            val workspaceRoot = request.payload.jsonObject["workspace_root"]?.jsonPrimitive?.content
-                ?: return unsupported(request.requestId, "artifact_analysis_request requires workspace_root")
-            val maxArtifacts = request.payload.jsonObject["max_artifacts"]?.jsonPrimitive?.intOrNull
-                ?: return unsupported(request.requestId, "artifact_analysis_request requires max_artifacts")
+        Worker.Envelope.MessageCase.ARTIFACT_ANALYSIS_REQUEST -> {
+            val artifactRequest = request.artifactAnalysisRequest
+            val workspaceRoot = artifactRequest.workspaceRoot.takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "artifact_analysis_request requires workspace_root")
+            val maxArtifacts = artifactRequest.maxArtifacts
             if (maxArtifacts !in 1..64) return unsupported(request.requestId, "max_artifacts must be between 1 and 64")
-            val cursor = request.payload.jsonObject["cursor"]?.jsonPrimitive?.contentOrNull
             try {
-                WorkerEnvelope(
-                    protocolVersion = WORKER_PROTOCOL_VERSION,
-                    requestId = request.requestId,
-                    kind = WorkerMessageKind.ARTIFACT_ANALYSIS_RESPONSE,
-                    payload = artifactBatch(resolveWorkspacePath(workspaceRoot), maxArtifacts, cursor),
-                )
+                Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
+                    .setArtifactAnalysisResponse(ProtobufAnalysisSnapshotAdapter.artifactAnalysisResponse(artifactBatch(resolveWorkspacePath(workspaceRoot), maxArtifacts, if (artifactRequest.hasCursor()) artifactRequest.cursor else null))).build()
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "JVM dependency analysis failed"))
             }
         }
-        WorkerMessageKind.ARTIFACT_DISCOVERY_REQUEST -> {
-            val workspaceRoot = request.payload.jsonObject["workspace_root"]?.jsonPrimitive?.content
-                ?: return unsupported(request.requestId, "artifact_discovery_request requires workspace_root")
-            val maxArtifacts = request.payload.jsonObject["max_artifacts"]?.jsonPrimitive?.intOrNull
-                ?: return unsupported(request.requestId, "artifact_discovery_request requires max_artifacts")
+        Worker.Envelope.MessageCase.ARTIFACT_DISCOVERY_REQUEST -> {
+            val discoveryRequest = request.artifactDiscoveryRequest
+            val workspaceRoot = discoveryRequest.workspaceRoot.takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "artifact_discovery_request requires workspace_root")
+            val maxArtifacts = discoveryRequest.maxArtifacts
             if (maxArtifacts !in 1..64) return unsupported(request.requestId, "max_artifacts must be between 1 and 64")
-            val cursor = request.payload.jsonObject["cursor"]?.jsonPrimitive?.contentOrNull
             try {
-                WorkerEnvelope(WORKER_PROTOCOL_VERSION, request.requestId, WorkerMessageKind.ARTIFACT_DISCOVERY_RESPONSE,
-                    artifactDescriptors(resolveWorkspacePath(workspaceRoot), maxArtifacts, cursor))
+                val json = artifactDescriptors(resolveWorkspacePath(workspaceRoot), maxArtifacts, if (discoveryRequest.hasCursor()) discoveryRequest.cursor else null)
+                Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
+                    .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder().addAllArtifacts(json["artifacts"]!!.jsonArray.map { ProtobufArtifactDiscoveryAdapter.descriptor(it.jsonObject) }).apply { json["next_cursor"]?.jsonPrimitive?.contentOrNull?.let(::setNextCursor) }).build()
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "JVM dependency discovery failed"))
             }
         }
-        else -> unsupported(request.requestId, "worker does not implement ${request.kind.name.lowercase()}")
+        else -> unsupported(request.requestId, "worker does not implement ${request.messageCase.name.lowercase()}")
     }
 }
 
@@ -208,18 +183,5 @@ private fun failureMessage(error: Throwable, fallback: String): String = generat
     .joinToString("; ")
     .ifBlank { fallback }
 
-private fun unsupported(requestId: String, message: String): WorkerEnvelope =
-    WorkerEnvelope(
-        protocolVersion = WORKER_PROTOCOL_VERSION,
-        requestId = requestId,
-        kind = WorkerMessageKind.ERROR,
-        payload = protocolErrorPayload("unsupported_capability", message, false),
-    )
-
-private fun protocolErrorPayload(code: String, message: String, retryable: Boolean) = buildJsonObject {
-    put("code", code)
-    put("message", message)
-    put("retryable", retryable)
-    put("supported_protocol_version", WORKER_PROTOCOL_VERSION)
-    put("received_protocol_version", null)
-}
+private fun unsupported(requestId: String, message: String): Worker.Envelope =
+    protocolError(requestId, "unsupported_capability", message)

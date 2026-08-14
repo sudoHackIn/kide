@@ -1,14 +1,16 @@
 use thiserror::Error;
 
 use crate::{
-    AnalysisBatchResponse, AnalysisFact, AnalyzeBatchRequest, ArtifactDescriptor,
+    AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
+    ArtifactAnalysisRequest, ArtifactAnalysisResponse, ArtifactDescriptor,
     ArtifactDiscoveryRequest, ArtifactDiscoveryResponse, ArtifactMaterializationRequest,
     ArtifactMaterializationResponse, BackendKey, BuildSystem, CallEdge, Component, ComponentId,
     DependencyEdge, DependencyTarget, DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot,
     Fingerprint, HierarchyEdge, Language, OccurrenceKind, Precision, ProjectManifest, Provenance,
     ReferenceEdge, SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit,
-    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerError,
-    WorkerErrorCode, WorkspaceId, WorkspacePath, worker_proto,
+    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord,
+    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerError, WorkerErrorCode,
+    WorkerIdentity, WorkerMessage, WorkspaceId, WorkspacePath, worker_proto,
 };
 
 #[derive(Debug, Error)]
@@ -19,6 +21,201 @@ pub enum AdapterError {
     Unsupported(String),
     #[error("invalid protobuf metadata: {0}")]
     Invalid(&'static str),
+}
+
+fn worker_capability(value: &WorkerCapability) -> &'static str {
+    match value {
+        WorkerCapability::Handshake => "handshake",
+        WorkerCapability::ProjectManifest => "project_manifest",
+        WorkerCapability::FileAnalysisSnapshot => "file_analysis_snapshot",
+        WorkerCapability::DependencyAnalysis => "dependency_analysis",
+        WorkerCapability::AnalysisDelta => "analysis_delta",
+    }
+}
+
+fn decode_worker_capability(value: String) -> Result<WorkerCapability, AdapterError> {
+    match value.as_str() {
+        "handshake" => Ok(WorkerCapability::Handshake),
+        "project_manifest" => Ok(WorkerCapability::ProjectManifest),
+        "file_analysis_snapshot" => Ok(WorkerCapability::FileAnalysisSnapshot),
+        "dependency_analysis" => Ok(WorkerCapability::DependencyAnalysis),
+        "analysis_delta" => Ok(WorkerCapability::AnalysisDelta),
+        other => Err(AdapterError::Unsupported(format!(
+            "worker capability {other}"
+        ))),
+    }
+}
+
+fn handshake_response(value: &crate::HandshakeResponse) -> worker_proto::HandshakeResponse {
+    worker_proto::HandshakeResponse {
+        backend: value.capabilities.identity.backend.clone(),
+        backend_version: value.capabilities.identity.backend_version.clone(),
+        protocol_version: value.capabilities.protocol_version,
+        capabilities: value
+            .capabilities
+            .capabilities
+            .iter()
+            .map(worker_capability)
+            .map(str::to_owned)
+            .collect(),
+        languages: value
+            .capabilities
+            .languages
+            .iter()
+            .map(proto_language)
+            .collect(),
+    }
+}
+
+fn decode_handshake_response(
+    value: worker_proto::HandshakeResponse,
+) -> Result<crate::HandshakeResponse, AdapterError> {
+    Ok(crate::HandshakeResponse {
+        capabilities: WorkerCapabilities {
+            identity: WorkerIdentity {
+                backend: value.backend,
+                backend_version: value.backend_version,
+            },
+            protocol_version: value.protocol_version,
+            languages: value.languages.into_iter().map(language).collect(),
+            capabilities: value
+                .capabilities
+                .into_iter()
+                .map(decode_worker_capability)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+    })
+}
+
+/// Converts the canonical message model to the generated protobuf envelope
+/// used on a worker pipe. This is the only message-type dispatch point.
+pub fn envelope(value: &WorkerEnvelope) -> Result<worker_proto::Envelope, AdapterError> {
+    use worker_proto::envelope::Message;
+
+    let message = match &value.message {
+        WorkerMessage::HandshakeRequest(request) => {
+            Message::HandshakeRequest(worker_proto::HandshakeRequest {
+                core_version: request.core_version.clone(),
+            })
+        }
+        WorkerMessage::HandshakeResponse(response) => {
+            Message::HandshakeResponse(handshake_response(response))
+        }
+        WorkerMessage::ProjectManifestRequest(request) => {
+            Message::ProjectManifestRequest(worker_proto::ProjectManifestRequest {
+                workspace_root: request.workspace_root.as_str().to_owned(),
+            })
+        }
+        WorkerMessage::ProjectManifestResponse(response) => {
+            Message::ProjectManifestResponse(worker_proto::ProjectManifestResponse {
+                manifest: Some(manifest(&response.manifest)),
+            })
+        }
+        WorkerMessage::AnalyzeBatchRequest(request) => {
+            Message::AnalyzeBatchRequest(analyze_batch_request(request))
+        }
+        WorkerMessage::AnalysisBatchResponse(response) => {
+            Message::AnalysisBatchResponse(analysis_batch_response(response)?)
+        }
+        WorkerMessage::ArtifactAnalysisRequest(request) => {
+            Message::ArtifactAnalysisRequest(artifact_analysis_request(request))
+        }
+        WorkerMessage::ArtifactAnalysisResponse(response) => {
+            Message::ArtifactAnalysisResponse(artifact_analysis_response(response)?)
+        }
+        WorkerMessage::ArtifactDiscoveryRequest(request) => {
+            Message::ArtifactDiscoveryRequest(discovery_request(request))
+        }
+        WorkerMessage::ArtifactDiscoveryResponse(response) => {
+            Message::ArtifactDiscoveryResponse(discovery_response(response))
+        }
+        WorkerMessage::ArtifactMaterializationRequest(request) => {
+            Message::ArtifactMaterializationRequest(materialization_request(request))
+        }
+        WorkerMessage::ArtifactMaterializationResponse(response) => {
+            Message::ArtifactMaterializationResponse(materialization_response(response)?)
+        }
+        WorkerMessage::AnalysisDelta(delta) => Message::AnalysisDelta(analysis_delta(delta)?),
+        WorkerMessage::Error(error) => Message::Error(worker_error(error)),
+    };
+    Ok(worker_proto::Envelope {
+        protocol_version: value.protocol_version,
+        request_id: value.request_id.clone(),
+        message: Some(message),
+    })
+}
+
+pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, AdapterError> {
+    use worker_proto::envelope::Message;
+
+    let message = match value
+        .message
+        .ok_or(AdapterError::Missing("envelope.message"))?
+    {
+        Message::HandshakeRequest(request) => {
+            WorkerMessage::HandshakeRequest(crate::HandshakeRequest {
+                core_version: request.core_version,
+            })
+        }
+        Message::HandshakeResponse(response) => {
+            WorkerMessage::HandshakeResponse(decode_handshake_response(response)?)
+        }
+        Message::ProjectManifestRequest(request) => {
+            WorkerMessage::ProjectManifestRequest(crate::ProjectManifestRequest {
+                workspace_root: WorkspacePath::new(request.workspace_root),
+            })
+        }
+        Message::ProjectManifestResponse(response) => {
+            WorkerMessage::ProjectManifestResponse(crate::ProjectManifestResponse {
+                manifest: decode_manifest(
+                    response
+                        .manifest
+                        .ok_or(AdapterError::Missing("project_manifest_response.manifest"))?,
+                )?,
+            })
+        }
+        Message::AnalyzeBatchRequest(request) => {
+            WorkerMessage::AnalyzeBatchRequest(decode_analyze_batch_request(request)?)
+        }
+        Message::AnalysisBatchResponse(response) => {
+            WorkerMessage::AnalysisBatchResponse(decode_analysis_batch_response(response)?)
+        }
+        Message::ArtifactAnalysisRequest(request) => {
+            WorkerMessage::ArtifactAnalysisRequest(decode_artifact_analysis_request(request)?)
+        }
+        Message::ArtifactAnalysisResponse(response) => {
+            WorkerMessage::ArtifactAnalysisResponse(decode_artifact_analysis_response(response)?)
+        }
+        Message::ArtifactDiscoveryRequest(request) => {
+            WorkerMessage::ArtifactDiscoveryRequest(ArtifactDiscoveryRequest {
+                workspace_root: WorkspacePath::new(request.workspace_root),
+                max_artifacts: request.max_artifacts,
+                cursor: request.cursor,
+            })
+        }
+        Message::ArtifactDiscoveryResponse(response) => {
+            WorkerMessage::ArtifactDiscoveryResponse(decode_discovery_response(response)?)
+        }
+        Message::ArtifactMaterializationRequest(request) => {
+            WorkerMessage::ArtifactMaterializationRequest(Box::new(decode_materialization_request(
+                request,
+            )?))
+        }
+        Message::ArtifactMaterializationResponse(response) => {
+            WorkerMessage::ArtifactMaterializationResponse(Box::new(
+                decode_materialization_response(response)?,
+            ))
+        }
+        Message::AnalysisDelta(delta) => {
+            WorkerMessage::AnalysisDelta(Box::new(decode_analysis_delta(delta)?))
+        }
+        Message::Error(error) => WorkerMessage::Error(decode_worker_error(error)?),
+    };
+    Ok(WorkerEnvelope {
+        protocol_version: value.protocol_version,
+        request_id: value.request_id,
+        message,
+    })
 }
 
 fn language(value: String) -> Language {
@@ -730,6 +927,83 @@ pub fn decode_analysis_batch_response(
             .into_iter()
             .map(decode_file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+pub fn analysis_delta(value: &AnalysisDelta) -> Result<worker_proto::AnalysisDelta, AdapterError> {
+    Ok(worker_proto::AnalysisDelta {
+        source_unit_id: value.source_unit.as_str().to_owned(),
+        previous_content_fingerprint: value
+            .previous_content
+            .as_ref()
+            .map(|fingerprint| fingerprint.as_str().to_owned()),
+        snapshot: value
+            .snapshot
+            .as_ref()
+            .map(file_analysis_snapshot)
+            .transpose()?,
+    })
+}
+
+pub fn decode_analysis_delta(
+    value: worker_proto::AnalysisDelta,
+) -> Result<AnalysisDelta, AdapterError> {
+    Ok(AnalysisDelta {
+        source_unit: SourceUnitId::new(value.source_unit_id),
+        previous_content: value.previous_content_fingerprint.map(Fingerprint::new),
+        snapshot: value
+            .snapshot
+            .map(decode_file_analysis_snapshot)
+            .transpose()?,
+    })
+}
+
+pub fn artifact_analysis_request(
+    value: &ArtifactAnalysisRequest,
+) -> worker_proto::ArtifactAnalysisRequest {
+    worker_proto::ArtifactAnalysisRequest {
+        workspace_root: value.workspace_root.as_str().to_owned(),
+        max_artifacts: value.max_artifacts,
+        cursor: value.cursor.clone(),
+    }
+}
+
+pub fn decode_artifact_analysis_request(
+    value: worker_proto::ArtifactAnalysisRequest,
+) -> Result<ArtifactAnalysisRequest, AdapterError> {
+    if value.max_artifacts == 0 {
+        return Err(AdapterError::Invalid("artifact analysis max artifacts"));
+    }
+    Ok(ArtifactAnalysisRequest {
+        workspace_root: WorkspacePath::new(value.workspace_root),
+        max_artifacts: value.max_artifacts,
+        cursor: value.cursor,
+    })
+}
+
+pub fn artifact_analysis_response(
+    value: &ArtifactAnalysisResponse,
+) -> Result<worker_proto::ArtifactAnalysisResponse, AdapterError> {
+    Ok(worker_proto::ArtifactAnalysisResponse {
+        snapshots: value
+            .snapshots
+            .iter()
+            .map(file_analysis_snapshot)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_cursor: value.next_cursor.clone(),
+    })
+}
+
+pub fn decode_artifact_analysis_response(
+    value: worker_proto::ArtifactAnalysisResponse,
+) -> Result<ArtifactAnalysisResponse, AdapterError> {
+    Ok(ArtifactAnalysisResponse {
+        snapshots: value
+            .snapshots
+            .into_iter()
+            .map(decode_file_analysis_snapshot)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_cursor: value.next_cursor,
     })
 }
 

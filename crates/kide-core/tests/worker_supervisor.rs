@@ -79,6 +79,27 @@ fn duplicate_request_ids_are_rejected_without_a_second_worker_call() {
     assert_eq!(supervisor.start_count(), 1);
 }
 
+#[test]
+fn malformed_protobuf_frame_stops_the_worker() {
+    let mut supervisor = WorkerSupervisor::new(launch("malformed"));
+    assert!(matches!(
+        supervisor.handshake("malformed-1"),
+        Err(WorkerSupervisorError::Frame(_))
+    ));
+    assert!(!supervisor.is_running());
+}
+
+#[test]
+fn mismatched_protobuf_request_id_stops_the_worker() {
+    let mut supervisor = WorkerSupervisor::new(launch("mismatched-id"));
+    assert!(matches!(
+        supervisor.handshake("expected-1"),
+        Err(WorkerSupervisorError::RequestIdMismatch { expected, received })
+            if expected == "expected-1" && received == "unexpected-request-id"
+    ));
+    assert!(!supervisor.is_running());
+}
+
 fn batch(request_id: &str, count: usize) -> WorkerEnvelope {
     WorkerEnvelope::new(
         request_id,

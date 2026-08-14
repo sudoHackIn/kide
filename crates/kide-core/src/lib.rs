@@ -11,6 +11,8 @@ pub mod worker_proto {
 
 /// Length-delimited protobuf frames for future cold-worker transport.
 pub mod worker_framing {
+    use std::io::{self, Read, Write};
+
     use prost::Message;
     use thiserror::Error;
 
@@ -18,6 +20,8 @@ pub mod worker_framing {
 
     #[derive(Debug, Error)]
     pub enum FrameError {
+        #[error("protobuf frame I/O failed: {0}")]
+        Io(#[from] io::Error),
         #[error("invalid protobuf frame length")]
         InvalidLength,
         #[error("protobuf frame length does not match its payload")]
@@ -60,6 +64,42 @@ pub mod worker_framing {
             return Err(FrameError::LengthMismatch);
         }
         Ok(Envelope::decode(payload)?)
+    }
+
+    /// Reads one unsigned-varint-length-delimited protobuf envelope. `None`
+    /// is a clean EOF before the next frame begins.
+    pub fn read_frame(reader: &mut impl Read) -> Result<Option<Envelope>, FrameError> {
+        let mut first = [0_u8; 1];
+        match reader.read(&mut first)? {
+            0 => return Ok(None),
+            1 => {}
+            _ => unreachable!("single byte buffer cannot read more than one byte"),
+        }
+
+        let mut prefix = vec![first[0]];
+        while prefix.last().is_some_and(|byte| byte & 0x80 != 0) {
+            if prefix.len() == 10 {
+                return Err(FrameError::InvalidLength);
+            }
+            let mut byte = [0_u8; 1];
+            reader.read_exact(&mut byte)?;
+            prefix.push(byte[0]);
+        }
+
+        let mut length = 0_u64;
+        for (index, byte) in prefix.iter().enumerate() {
+            length |= u64::from(byte & 0x7f) << (index * 7);
+        }
+        let length = usize::try_from(length).map_err(|_| FrameError::InvalidLength)?;
+        let mut payload = vec![0_u8; length];
+        reader.read_exact(&mut payload)?;
+        Ok(Some(Envelope::decode(payload.as_slice())?))
+    }
+
+    pub fn write_frame(writer: &mut impl Write, envelope: &Envelope) -> Result<(), FrameError> {
+        writer.write_all(&encode(envelope))?;
+        writer.flush()?;
+        Ok(())
     }
 }
 
@@ -128,6 +168,63 @@ mod worker_framing_tests {
         .expect("request decodes");
 
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn analysis_delta_adapter_round_trips() {
+        let envelope: crate::WorkerEnvelope = serde_json::from_str(include_str!(
+            "../../../protocol/fixtures/analysis-delta.json"
+        ))
+        .expect("fixture parses");
+        let crate::WorkerMessage::AnalysisDelta(delta) = envelope.message else {
+            panic!("fixture is a delta")
+        };
+
+        let restored = crate::worker_proto_adapter::decode_analysis_delta(
+            crate::worker_proto_adapter::analysis_delta(&delta).expect("delta encodes"),
+        )
+        .expect("delta decodes");
+
+        assert_eq!(restored, *delta);
+    }
+
+    #[test]
+    fn artifact_analysis_adapters_round_trip_and_reject_empty_page_size() {
+        let request = crate::ArtifactAnalysisRequest {
+            workspace_root: WorkspacePath::new("."),
+            max_artifacts: 8,
+            cursor: Some("page-2".into()),
+        };
+        let response = crate::ArtifactAnalysisResponse {
+            snapshots: Vec::new(),
+            next_cursor: Some("page-3".into()),
+        };
+
+        assert_eq!(
+            crate::worker_proto_adapter::decode_artifact_analysis_request(
+                crate::worker_proto_adapter::artifact_analysis_request(&request),
+            )
+            .expect("request decodes"),
+            request
+        );
+        assert_eq!(
+            crate::worker_proto_adapter::decode_artifact_analysis_response(
+                crate::worker_proto_adapter::artifact_analysis_response(&response)
+                    .expect("response encodes"),
+            )
+            .expect("response decodes"),
+            response
+        );
+        assert!(
+            crate::worker_proto_adapter::decode_artifact_analysis_request(
+                worker_proto::ArtifactAnalysisRequest {
+                    workspace_root: ".".into(),
+                    max_artifacts: 0,
+                    cursor: None,
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

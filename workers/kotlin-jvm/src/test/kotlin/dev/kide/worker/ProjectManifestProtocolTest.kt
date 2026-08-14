@@ -4,11 +4,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import kide.worker.v1.Worker
 
 class ProjectManifestProtocolTest {
     @Test
@@ -18,18 +14,17 @@ class ProjectManifestProtocolTest {
         Files.writeString(root.resolve("build.gradle.kts"), "plugins { java }")
 
         val response = dispatch(
-            WorkerEnvelope(
-                protocolVersion = WORKER_PROTOCOL_VERSION,
-                requestId = "manifest-1",
-                kind = WorkerMessageKind.PROJECT_MANIFEST_REQUEST,
-                payload = buildJsonObject { put("workspace_root", root.toString()) },
-            ),
+            Worker.Envelope.newBuilder()
+                .setProtocolVersion(WORKER_PROTOCOL_VERSION)
+                .setRequestId("manifest-1")
+                .setProjectManifestRequest(Worker.ProjectManifestRequest.newBuilder().setWorkspaceRoot(root.toString()))
+                .build(),
         )
 
-        assertEquals(WorkerMessageKind.PROJECT_MANIFEST_RESPONSE, response.kind)
+        assertEquals(Worker.Envelope.MessageCase.PROJECT_MANIFEST_RESPONSE, response.messageCase)
         assertEquals("manifest-1", response.requestId)
-        val manifest = response.payload.jsonObject["manifest"]!!.jsonObject
-        assertEquals("gradle", manifest["components"]!!.jsonArray.single().jsonObject["build_system"]!!.jsonPrimitive.content)
-        assertTrue(manifest["fingerprint"]!!.jsonPrimitive.content.startsWith("sha256:"))
+        val manifest = response.projectManifestResponse.manifest
+        assertEquals("gradle", manifest.componentsList.single().buildSystem)
+        assertTrue(manifest.fingerprint.startsWith("sha256:"))
     }
 }
