@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 "#;
 
+const MIGRATION_2: &str = r#"
+ALTER TABLE source_snapshots ADD COLUMN provenance_blob BLOB;
+ALTER TABLE source_snapshots DROP COLUMN snapshot_json;
+"#;
+
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 1;
 
 /// Failures that Core can surface without treating a partially written index as
@@ -160,7 +165,7 @@ pub struct IndexStore {
 impl IndexStore {
     /// Standard per-workspace location selected in ADR 0002.
     pub fn default_path(workspace_root: &Path) -> PathBuf {
-        workspace_root.join(".kide/index-v3.sqlite3")
+        workspace_root.join(".kide/index-v4.sqlite3")
     }
 
     /// Opens (and, on first use, creates) the current SQLite index format.
@@ -215,6 +220,19 @@ impl IndexStore {
             "INSERT OR IGNORE INTO schema_migrations (version) VALUES (1)",
             [],
         )?;
+        let migration_2: Option<u32> = self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 2",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if migration_2.is_none() {
+            self.connection.execute_batch(MIGRATION_2)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+        }
         Ok(())
     }
 
@@ -293,17 +311,20 @@ impl IndexStore {
     pub fn analysis_inputs(&self) -> Result<Vec<AnalysisInput>, IndexStoreError> {
         let mut statement = self
             .connection
-            .prepare("SELECT snapshot_json FROM source_snapshots ORDER BY source_unit_id")?;
+            .prepare("SELECT source_unit_json, provenance_blob FROM source_snapshots ORDER BY source_unit_id")?;
         let snapshots = statement
-            .query_map([], |row| row.get::<_, String>(0))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         snapshots
             .into_iter()
-            .map(|record| {
-                let snapshot: FileAnalysisSnapshot = serde_json::from_str(&record)?;
+            .map(|(source, provenance)| {
+                let source_unit = serde_json::from_str(&source)?;
+                let provenance = bincode::deserialize(&provenance)?;
                 Ok(AnalysisInput {
-                    source_unit: snapshot.source_unit,
-                    provenance: snapshot.provenance,
+                    source_unit,
+                    provenance,
                 })
             })
             .collect()
@@ -319,7 +340,7 @@ impl IndexStore {
 
     pub fn symbols_named(&self, name: &str) -> Result<Vec<SymbolRecord>, IndexStoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.snapshot_json
+            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
              FROM symbols JOIN source_snapshots USING (source_unit_id)
              WHERE symbols.name = ?1
              ORDER BY symbols.source_unit_id, symbols.name_start_byte, symbols.symbol_id",
@@ -331,14 +352,16 @@ impl IndexStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(id, name, record, snapshot)| {
+            .map(|(id, name, record, source, provenance)| {
                 let record = decode_stored_symbol(&record)?;
-                let snapshot: FileAnalysisSnapshot = serde_json::from_str(&snapshot)?;
-                Ok(record.into_symbol(SymbolId::new(id), name, &snapshot))
+                let source_unit = serde_json::from_str(&source)?;
+                let provenance = bincode::deserialize(&provenance)?;
+                Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
             })
             .collect()
     }
@@ -583,11 +606,10 @@ fn insert_snapshot(
     snapshot: &FileAnalysisSnapshot,
 ) -> Result<(), IndexStoreError> {
     let source = &snapshot.source_unit;
-    let stored_snapshot = snapshot_record(snapshot);
     transaction.execute(
         "INSERT INTO source_snapshots
          (source_unit_id, component_id, workspace_path, content_fingerprint, context_fingerprint,
-          protocol_version, source_unit_json, snapshot_json)
+          protocol_version, source_unit_json, provenance_blob)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             source.id.as_str(),
@@ -597,7 +619,7 @@ fn insert_snapshot(
             source.context.as_str(),
             snapshot.provenance.protocol_version,
             serde_json::to_string(source)?,
-            serde_json::to_string(&stored_snapshot)?,
+            bincode::serialize(&snapshot.provenance)?,
         ],
     )?;
     for symbol in &snapshot.symbols {
@@ -724,7 +746,8 @@ impl StoredSymbolRecord {
         self,
         id: SymbolId,
         name: String,
-        snapshot: &FileAnalysisSnapshot,
+        source_unit: &SourceUnit,
+        provenance: &crate::Provenance,
     ) -> SymbolRecord {
         SymbolRecord {
             id,
@@ -734,13 +757,13 @@ impl StoredSymbolRecord {
             name,
             qualified_name: self.qualified_name,
             signature: self.signature,
-            component: ComponentId::new(snapshot.source_unit.component.as_str()),
+            component: ComponentId::new(source_unit.component.as_str()),
             declaration: crate::SourceRange {
-                source_unit: snapshot.source_unit.id.clone(),
+                source_unit: source_unit.id.clone(),
                 bytes: self.declaration,
             },
             name_range: crate::SourceRange {
-                source_unit: snapshot.source_unit.id.clone(),
+                source_unit: source_unit.id.clone(),
                 bytes: self.name_range,
             },
             owner: self.owner,
@@ -748,7 +771,7 @@ impl StoredSymbolRecord {
             annotations: self.annotations,
             freshness: self.freshness,
             completeness: self.completeness,
-            provenance: snapshot.provenance.clone(),
+            provenance: provenance.clone(),
         }
     }
 }
@@ -769,34 +792,6 @@ fn decode_stored_symbol(encoded: &[u8]) -> Result<StoredSymbolRecord, IndexStore
         return Err(IndexStoreError::IncompatibleSymbolRecordFormat { found: version });
     }
     Ok(bincode::deserialize(payload)?)
-}
-
-/// `snapshot_json` exists solely to recover an [`AnalysisInput`] for
-/// incremental planning. Dependency facts already live in the query tables,
-/// so storing their complete worker response a second time is pure overhead.
-///
-/// Keep the source and provenance envelope, but deliberately omit the facts.
-/// The external, shared artifact blob cache will own an optional full payload;
-/// it is never needed to plan a project re-index.
-fn snapshot_record(snapshot: &FileAnalysisSnapshot) -> FileAnalysisSnapshot {
-    if snapshot.source_unit.origin != crate::SourceOrigin::Dependency {
-        return snapshot.clone();
-    }
-
-    FileAnalysisSnapshot {
-        source_unit: snapshot.source_unit.clone(),
-        structural_fingerprint: snapshot.structural_fingerprint.clone(),
-        public_api_fingerprint: snapshot.public_api_fingerprint.clone(),
-        symbols: Vec::new(),
-        occurrences: Vec::new(),
-        references: Vec::new(),
-        calls: Vec::new(),
-        hierarchy: Vec::new(),
-        types: Vec::new(),
-        diagnostics: Vec::new(),
-        completeness: snapshot.completeness,
-        provenance: snapshot.provenance.clone(),
-    }
 }
 
 #[cfg(test)]
@@ -945,7 +940,7 @@ mod tests {
         let connection = Connection::open(&path).expect("opens raw index");
         connection
             .execute(
-                "UPDATE kide_metadata SET value = '4' WHERE key = 'index_format_version'",
+                "UPDATE kide_metadata SET value = '5' WHERE key = 'index_format_version'",
                 [],
             )
             .expect("changes version");
@@ -958,8 +953,8 @@ mod tests {
         assert!(matches!(
             error,
             IndexStoreError::IncompatibleIndexFormat {
-                found: 4,
-                supported: 3
+                found: 5,
+                supported: 4
             }
         ));
     }
@@ -982,26 +977,6 @@ mod tests {
                 if found == WORKER_PROTOCOL_VERSION + 1 && supported == WORKER_PROTOCOL_VERSION
         ));
         assert_eq!(store.source_unit(&source.id).expect("reads source"), None);
-    }
-
-    #[test]
-    fn dependency_snapshot_record_keeps_only_incremental_planning_envelope() {
-        let mut dependency = source_unit("sha256:artifact-v1");
-        dependency.origin = SourceOrigin::Dependency;
-        dependency.id = SourceUnitId::new("jvm:sha256:artifact-v1");
-        dependency.path = WorkspacePath::new(".kide/dependencies/sha256:artifact-v1");
-        let full = snapshot(dependency.clone());
-
-        let compact = snapshot_record(&full);
-        assert_eq!(compact.source_unit, dependency);
-        assert_eq!(compact.provenance, full.provenance);
-        assert!(compact.symbols.is_empty());
-        assert!(compact.occurrences.is_empty());
-        assert!(compact.references.is_empty());
-        assert!(compact.calls.is_empty());
-        assert!(compact.hierarchy.is_empty());
-        assert!(compact.types.is_empty());
-        assert!(compact.diagnostics.is_empty());
     }
 
     #[test]
@@ -1031,16 +1006,18 @@ mod tests {
                 provenance: full.provenance.clone(),
             }]
         );
-        let stored: String = store
+        let provenance: Vec<u8> = store
             .connection
             .query_row(
-                "SELECT snapshot_json FROM source_snapshots WHERE source_unit_id = ?1",
+                "SELECT provenance_blob FROM source_snapshots WHERE source_unit_id = ?1",
                 params![dependency.id.as_str()],
                 |row| row.get(0),
             )
-            .expect("reads compact envelope");
-        let stored: FileAnalysisSnapshot = serde_json::from_str(&stored).expect("reads envelope");
-        assert!(stored.symbols.is_empty());
+            .expect("reads compact provenance");
+        assert_eq!(
+            bincode::deserialize::<Provenance>(&provenance).expect("decodes provenance"),
+            full.provenance
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use std::process::ExitCode;
@@ -132,6 +133,13 @@ fn kotlin_worker_launch(workspace: &Path) -> WorkerLaunch {
         OsString::from("KIDE_WORKSPACE_ROOT"),
         workspace.as_os_str().to_os_string(),
     );
+    launch.environment.insert(
+        OsString::from("KIDE_WORKER_PHASE_LOG"),
+        workspace.join(".kide/worker-phases.log").into_os_string(),
+    );
+    // A cold K2 batch over a realistic multi-module workspace can exceed the
+    // control-plane default while still making progress.
+    launch.request_timeout = Duration::from_secs(5 * 60);
     launch
 }
 

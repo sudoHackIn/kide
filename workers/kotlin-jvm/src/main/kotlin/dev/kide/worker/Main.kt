@@ -49,6 +49,7 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
             val workspaceRoot = request.projectManifestRequest.workspaceRoot
                 .takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "project_manifest_request requires workspace_root")
             try {
+                workerPhase("project-manifest: Gradle import")
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setProjectManifestResponse(Worker.ProjectManifestResponse.newBuilder().setManifest(ProtobufManifestAdapter.manifest(GradleProjectImporter.import(resolveWorkspacePath(workspaceRoot)).jsonObject))).build()
             } catch (error: Exception) {
@@ -57,6 +58,7 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
         }
         Worker.Envelope.MessageCase.ANALYZE_BATCH_REQUEST -> {
             try {
+                workerPhase("analyze-batch: ${request.analyzeBatchRequest.sourceUnitsCount} source units")
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot()))).build()
             } catch (error: Exception) {
@@ -147,13 +149,16 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         "kide-kotlin-jvm structural worker accepts Kotlin source units only"
     }
     KotlinStructuralExtractor().use { extractor ->
+        workerPhase("analyze-batch: structural extraction")
         val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
+        workerPhase("analyze-batch: Gradle compilation contexts")
         val contexts = gradleContexts(workspaceRoot)
         // Compile all requested source units in one K2 session. A Gradle module
         // dependency can be represented as sources rather than a built output;
         // the union allows cross-module resolution without keeping a backend
         // alive or materialising project artifacts.
         val context = contexts.values.combinedForBatch()
+        workerPhase("analyze-batch: K2 semantic analysis")
         val facts = K2SemanticExtractor.semanticFacts(
             selectedSourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
             context = context,
@@ -162,9 +167,22 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
             classpath = context?.classpath.orEmpty(),
             targetKeys = (facts.references.map { it.targetKey } + facts.hierarchy.flatMap { listOf(it.subtypeKey, it.supertypeKey) }).toSortedSet(),
         )
+        workerPhase("analyze-batch: enrich snapshots")
         put("snapshots", buildJsonArray {
             K2SnapshotEnricher.enrich(snapshots, workspaceRoot, facts.references, externalTargets, facts.hierarchy).forEach(::add)
         })
+    }
+}
+
+private fun workerPhase(message: String) {
+    val line = "[kide-kotlin-worker] $message"
+    System.err.println(line)
+    System.getenv("KIDE_WORKER_PHASE_LOG")?.takeIf(String::isNotBlank)?.let { path ->
+        java.nio.file.Files.writeString(
+            Path.of(path), "$line\n",
+            java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.APPEND,
+        )
     }
 }
 
