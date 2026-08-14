@@ -266,6 +266,80 @@ mod worker_framing_tests {
 
         assert_eq!(restored, response);
     }
+
+    #[test]
+    fn materialization_and_error_adapters_round_trip_and_reject_bad_metadata() {
+        let descriptor = crate::ArtifactDescriptor {
+            source_unit: SourceUnit {
+                id: SourceUnitId::new("jvm:artifact"),
+                component: ComponentId::new("gradle:main"),
+                path: WorkspacePath::new(".kide/dependencies/artifact"),
+                language: Language::Java,
+                origin: SourceOrigin::Dependency,
+                content: Fingerprint::new("sha256:artifact"),
+                context: Fingerprint::new("sha256:context"),
+            },
+            provenance: Provenance {
+                backend: "kotlin".into(),
+                backend_version: "1".into(),
+                protocol_version: 3,
+                analysis_options: Fingerprint::new("sha256:options"),
+            },
+        };
+        let request = crate::ArtifactMaterializationRequest {
+            workspace_root: WorkspacePath::new("."),
+            artifact: descriptor,
+            staging_directory: "staging-7".into(),
+            blob_format_version: 1,
+        };
+        let response = crate::ArtifactMaterializationResponse {
+            staged_filename: "artifact.kide".into(),
+            byte_length: 12,
+            sha256: Fingerprint::new(format!("sha256:{}", "ab".repeat(32))),
+            blob_format_version: 1,
+        };
+        let error = crate::WorkerError {
+            code: crate::WorkerErrorCode::AnalysisFailed,
+            message: "staging failed".into(),
+            retryable: true,
+            supported_protocol_version: 3,
+            received_protocol_version: Some(3),
+        };
+
+        assert_eq!(
+            crate::worker_proto_adapter::decode_materialization_request(
+                crate::worker_proto_adapter::materialization_request(&request),
+            )
+            .expect("request decodes"),
+            request
+        );
+        assert_eq!(
+            crate::worker_proto_adapter::decode_materialization_response(
+                crate::worker_proto_adapter::materialization_response(&response)
+                    .expect("response encodes"),
+            )
+            .expect("response decodes"),
+            response
+        );
+        assert_eq!(
+            crate::worker_proto_adapter::decode_worker_error(
+                crate::worker_proto_adapter::worker_error(&error),
+            )
+            .expect("error decodes"),
+            error
+        );
+        assert!(
+            crate::worker_proto_adapter::decode_materialization_response(
+                worker_proto::ArtifactMaterializationResponse {
+                    staged_filename: "artifact.kide".into(),
+                    byte_length: 1,
+                    sha256: vec![0; 31],
+                    blob_format_version: 1,
+                }
+            )
+            .is_err()
+        );
+    }
 }
 mod canonical;
 mod discovery;

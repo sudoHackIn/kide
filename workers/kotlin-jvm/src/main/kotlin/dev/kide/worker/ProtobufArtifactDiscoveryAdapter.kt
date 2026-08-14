@@ -23,13 +23,15 @@ internal object ProtobufArtifactDiscoveryAdapter {
             .setBackendVersion(provenance["backend_version"]!!.jsonPrimitive.content)
             .setWorkerProtocolVersion(provenance["protocol_version"]!!.jsonPrimitive.int)
             .setAnalysisOptionsFingerprint(provenance["analysis_options"]!!.jsonPrimitive.content)
+            .setLanguage(unit["language"]?.jsonPrimitive?.content ?: "java")
+            .setOrigin(unit["origin"]?.jsonPrimitive?.content ?: "dependency")
             .build()
     }
 
     fun json(value: Worker.ArtifactDescriptor) = buildJsonObject {
         put("source_unit", buildJsonObject {
             put("id", value.sourceUnitId); put("component", value.componentId); put("path", value.workspacePath)
-            put("language", "java"); put("origin", "dependency"); put("content", value.contentFingerprint); put("context", value.contextFingerprint)
+            put("language", value.language); put("origin", value.origin); put("content", value.contentFingerprint); put("context", value.contextFingerprint)
         })
         put("provenance", buildJsonObject {
             put("backend", value.backend); put("backend_version", value.backendVersion)

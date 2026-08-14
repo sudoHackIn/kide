@@ -2,12 +2,13 @@ use thiserror::Error;
 
 use crate::{
     AnalysisBatchResponse, AnalysisFact, AnalyzeBatchRequest, ArtifactDescriptor,
-    ArtifactDiscoveryRequest, ArtifactDiscoveryResponse, BackendKey, BuildSystem, CallEdge,
-    Component, ComponentId, DependencyEdge, DependencyTarget, DiagnosticRecord, DiagnosticSeverity,
-    FileAnalysisSnapshot, Fingerprint, HierarchyEdge, Language, OccurrenceKind, Precision,
-    ProjectManifest, Provenance, ReferenceEdge, SourceOccurrence, SourceOrigin, SourceRange,
-    SourceSet, SourceUnit, SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId,
-    TypeRecord, WorkspaceId, WorkspacePath, worker_proto,
+    ArtifactDiscoveryRequest, ArtifactDiscoveryResponse, ArtifactMaterializationRequest,
+    ArtifactMaterializationResponse, BackendKey, BuildSystem, CallEdge, Component, ComponentId,
+    DependencyEdge, DependencyTarget, DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot,
+    Fingerprint, HierarchyEdge, Language, OccurrenceKind, Precision, ProjectManifest, Provenance,
+    ReferenceEdge, SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit,
+    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerError,
+    WorkerErrorCode, WorkspaceId, WorkspacePath, worker_proto,
 };
 
 #[derive(Debug, Error)]
@@ -16,6 +17,8 @@ pub enum AdapterError {
     Missing(&'static str),
     #[error("unsupported protobuf enum value {0}")]
     Unsupported(String),
+    #[error("invalid protobuf metadata: {0}")]
+    Invalid(&'static str),
 }
 
 fn language(value: String) -> Language {
@@ -845,17 +848,21 @@ fn descriptor(value: &ArtifactDescriptor) -> worker_proto::ArtifactDescriptor {
         backend_version: value.provenance.backend_version.clone(),
         worker_protocol_version: value.provenance.protocol_version,
         analysis_options_fingerprint: value.provenance.analysis_options.as_str().to_owned(),
+        language: proto_language(&unit.language),
+        origin: proto_source_origin(&unit.origin).to_owned(),
     }
 }
 
-pub fn decode_descriptor(value: worker_proto::ArtifactDescriptor) -> ArtifactDescriptor {
-    ArtifactDescriptor {
+pub fn decode_descriptor(
+    value: worker_proto::ArtifactDescriptor,
+) -> Result<ArtifactDescriptor, AdapterError> {
+    Ok(ArtifactDescriptor {
         source_unit: SourceUnit {
             id: SourceUnitId::new(value.source_unit_id),
             component: ComponentId::new(value.component_id),
             path: WorkspacePath::new(value.workspace_path),
-            language: Language::Java,
-            origin: SourceOrigin::Dependency,
+            language: language(value.language),
+            origin: source_origin(value.origin)?,
             content: Fingerprint::new(value.content_fingerprint),
             context: Fingerprint::new(value.context_fingerprint),
         },
@@ -865,16 +872,154 @@ pub fn decode_descriptor(value: worker_proto::ArtifactDescriptor) -> ArtifactDes
             protocol_version: value.worker_protocol_version,
             analysis_options: Fingerprint::new(value.analysis_options_fingerprint),
         },
-    }
+    })
 }
 
 pub fn decode_discovery_response(
     value: worker_proto::ArtifactDiscoveryResponse,
-) -> ArtifactDiscoveryResponse {
-    ArtifactDiscoveryResponse {
-        artifacts: value.artifacts.into_iter().map(decode_descriptor).collect(),
+) -> Result<ArtifactDiscoveryResponse, AdapterError> {
+    Ok(ArtifactDiscoveryResponse {
+        artifacts: value
+            .artifacts
+            .into_iter()
+            .map(decode_descriptor)
+            .collect::<Result<Vec<_>, _>>()?,
         next_cursor: value.next_cursor,
+    })
+}
+
+fn sha256_bytes(value: &Fingerprint) -> Result<Vec<u8>, AdapterError> {
+    let hex = value
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(AdapterError::Invalid("sha256 fingerprint prefix"))?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AdapterError::Invalid("sha256 fingerprint encoding"));
     }
+    (0..32)
+        .map(|index| {
+            u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+                .map_err(|_| AdapterError::Invalid("sha256 fingerprint encoding"))
+        })
+        .collect()
+}
+
+fn sha256_fingerprint(value: Vec<u8>) -> Result<Fingerprint, AdapterError> {
+    if value.len() != 32 {
+        return Err(AdapterError::Invalid("sha256 byte length"));
+    }
+    Ok(Fingerprint::new(format!(
+        "sha256:{}",
+        value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )))
+}
+
+pub fn materialization_request(
+    value: &ArtifactMaterializationRequest,
+) -> worker_proto::ArtifactMaterializationRequest {
+    worker_proto::ArtifactMaterializationRequest {
+        workspace_root: value.workspace_root.as_str().to_owned(),
+        artifact: Some(descriptor(&value.artifact)),
+        staging_directory: value.staging_directory.clone(),
+        blob_format_version: value.blob_format_version,
+    }
+}
+
+pub fn decode_materialization_request(
+    value: worker_proto::ArtifactMaterializationRequest,
+) -> Result<ArtifactMaterializationRequest, AdapterError> {
+    if value.staging_directory.is_empty() {
+        return Err(AdapterError::Invalid("staging directory"));
+    }
+    if value.blob_format_version == 0 {
+        return Err(AdapterError::Invalid("blob format version"));
+    }
+    Ok(ArtifactMaterializationRequest {
+        workspace_root: WorkspacePath::new(value.workspace_root),
+        artifact: decode_descriptor(
+            value
+                .artifact
+                .ok_or(AdapterError::Missing("materialization.artifact"))?,
+        )?,
+        staging_directory: value.staging_directory,
+        blob_format_version: value.blob_format_version,
+    })
+}
+
+pub fn materialization_response(
+    value: &ArtifactMaterializationResponse,
+) -> Result<worker_proto::ArtifactMaterializationResponse, AdapterError> {
+    if value.staged_filename.is_empty() || value.byte_length == 0 || value.blob_format_version == 0
+    {
+        return Err(AdapterError::Invalid("materialization completion metadata"));
+    }
+    Ok(worker_proto::ArtifactMaterializationResponse {
+        staged_filename: value.staged_filename.clone(),
+        byte_length: value.byte_length,
+        sha256: sha256_bytes(&value.sha256)?,
+        blob_format_version: value.blob_format_version,
+    })
+}
+
+pub fn decode_materialization_response(
+    value: worker_proto::ArtifactMaterializationResponse,
+) -> Result<ArtifactMaterializationResponse, AdapterError> {
+    if value.staged_filename.is_empty() || value.byte_length == 0 || value.blob_format_version == 0
+    {
+        return Err(AdapterError::Invalid("materialization completion metadata"));
+    }
+    Ok(ArtifactMaterializationResponse {
+        staged_filename: value.staged_filename,
+        byte_length: value.byte_length,
+        sha256: sha256_fingerprint(value.sha256)?,
+        blob_format_version: value.blob_format_version,
+    })
+}
+
+fn worker_error_code(value: WorkerErrorCode) -> &'static str {
+    match value {
+        WorkerErrorCode::IncompatibleProtocolVersion => "incompatible_protocol_version",
+        WorkerErrorCode::InvalidRequest => "invalid_request",
+        WorkerErrorCode::UnsupportedCapability => "unsupported_capability",
+        WorkerErrorCode::AnalysisFailed => "analysis_failed",
+        WorkerErrorCode::Internal => "internal",
+    }
+}
+
+fn decode_worker_error_code(value: String) -> Result<WorkerErrorCode, AdapterError> {
+    match value.as_str() {
+        "incompatible_protocol_version" => Ok(WorkerErrorCode::IncompatibleProtocolVersion),
+        "invalid_request" => Ok(WorkerErrorCode::InvalidRequest),
+        "unsupported_capability" => Ok(WorkerErrorCode::UnsupportedCapability),
+        "analysis_failed" => Ok(WorkerErrorCode::AnalysisFailed),
+        "internal" => Ok(WorkerErrorCode::Internal),
+        other => Err(AdapterError::Unsupported(format!(
+            "worker error code {other}"
+        ))),
+    }
+}
+
+pub fn worker_error(value: &WorkerError) -> worker_proto::Error {
+    worker_proto::Error {
+        code: worker_error_code(value.code).to_owned(),
+        message: value.message.clone(),
+        retryable: value.retryable,
+        supported_protocol_version: value.supported_protocol_version,
+        received_protocol_version: value.received_protocol_version,
+    }
+}
+
+pub fn decode_worker_error(value: worker_proto::Error) -> Result<WorkerError, AdapterError> {
+    Ok(WorkerError {
+        code: decode_worker_error_code(value.code)?,
+        message: value.message,
+        retryable: value.retryable,
+        supported_protocol_version: value.supported_protocol_version,
+        received_protocol_version: value.received_protocol_version,
+    })
 }
 
 pub fn manifest(value: &ProjectManifest) -> worker_proto::ProjectManifest {

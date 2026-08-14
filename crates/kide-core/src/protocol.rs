@@ -149,6 +149,27 @@ pub struct ArtifactDiscoveryResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Instructs a worker to materialize an artifact into a Core-provided staging
+/// location. The artifact bytes never traverse the control-plane message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMaterializationRequest {
+    pub workspace_root: WorkspacePath,
+    pub artifact: ArtifactDescriptor,
+    /// Opaque worker-local staging location supplied by Core.
+    pub staging_directory: String,
+    pub blob_format_version: u32,
+}
+
+/// Metadata for a successfully staged artifact blob. `sha256` verifies the
+/// separately materialized bytes before Core publishes them to shared cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactMaterializationResponse {
+    pub staged_filename: String,
+    pub byte_length: u64,
+    pub sha256: Fingerprint,
+    pub blob_format_version: u32,
+}
+
 /// A conservative incremental update. `snapshot: None` removes a source unit;
 /// otherwise Core replaces all persisted facts for that source-unit snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +254,9 @@ pub enum WorkerMessage {
     ArtifactAnalysisResponse(ArtifactAnalysisResponse),
     ArtifactDiscoveryRequest(ArtifactDiscoveryRequest),
     ArtifactDiscoveryResponse(ArtifactDiscoveryResponse),
+    /// Staging carries a descriptor and must not inflate every routine message.
+    ArtifactMaterializationRequest(Box<ArtifactMaterializationRequest>),
+    ArtifactMaterializationResponse(Box<ArtifactMaterializationResponse>),
     /// Kept behind an indirection so one rare, full-file delta does not make
     /// every handshake and batch message as large as the delta payload.
     /// `Box` is transparent to serde, therefore the NDJSON protocol is
