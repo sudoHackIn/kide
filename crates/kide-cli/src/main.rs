@@ -82,9 +82,9 @@ enum Command {
         short: bool,
     },
     /// Find implementations for a location or symbol query.
-    Implementations { target: String },
+    Implementations { target: Option<String> },
     /// Find resolved callers for a location or symbol query.
-    Callers { target: String },
+    Callers { target: Option<String> },
     /// Resolve the type at PATH:LINE:COLUMN.
     #[command(name = "type-at")]
     TypeAt { location: String },
@@ -143,22 +143,37 @@ fn run() -> Result<QueryStatus> {
             target_from_argument_or_stdin(target)?,
             human_output,
         ),
-        Command::Refs { target, short } => references(
-            &cli.workspace,
-            target_from_argument_or_stdin(target)?,
-            short || human_output,
-        ),
-        Command::Implementations { target } => {
-            implementations(&cli.workspace, target, human_output)
+        Command::Refs { target, short } => {
+            fan_out(targets_from_argument_or_stdin(target)?, |target| {
+                references(&cli.workspace, target, short || human_output)
+            })
         }
-        Command::Callers { target } => callers(&cli.workspace, target, human_output),
+        Command::Implementations { target } => {
+            fan_out(targets_from_argument_or_stdin(target)?, |target| {
+                implementations(&cli.workspace, target, human_output)
+            })
+        }
+        Command::Callers { target } => fan_out(targets_from_argument_or_stdin(target)?, |target| {
+            callers(&cli.workspace, target, human_output)
+        }),
         Command::TypeAt { location } => type_at(&cli.workspace, location, human_output),
     }
 }
 
 fn target_from_argument_or_stdin(target: Option<String>) -> Result<String> {
+    let targets = targets_from_argument_or_stdin(target)?;
+    match targets.as_slice() {
+        [target] => Ok(target.clone()),
+        _ => bail!(
+            "this command requires exactly one target, but the pipe contains {}",
+            targets.len()
+        ),
+    }
+}
+
+fn targets_from_argument_or_stdin(target: Option<String>) -> Result<Vec<String>> {
     if let Some(target) = target {
-        return Ok(target);
+        return Ok(vec![target]);
     }
     if std::io::stdin().is_terminal() {
         bail!(
@@ -168,7 +183,27 @@ fn target_from_argument_or_stdin(target: Option<String>) -> Result<String> {
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    target_from_pipe_text(input.trim())
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(target_from_pipe_text)
+        .collect()
+}
+
+fn fan_out(
+    mut targets: Vec<String>,
+    mut query: impl FnMut(String) -> Result<QueryStatus>,
+) -> Result<QueryStatus> {
+    targets.sort();
+    targets.dedup();
+    let mut status = QueryStatus::NoResult;
+    for target in targets {
+        let next = query(target)?;
+        if next == QueryStatus::Ok {
+            status = QueryStatus::Ok;
+        }
+    }
+    Ok(status)
 }
 
 fn target_from_pipe_text(input: &str) -> Result<String> {
@@ -859,7 +894,8 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{
-        Cli, ExitCode, byte_to_location, exit_code, target_from_pipe_text, target_from_symbols,
+        Cli, ExitCode, byte_to_location, exit_code, fan_out, target_from_pipe_text,
+        target_from_symbols,
     };
 
     #[test]
@@ -914,6 +950,20 @@ mod tests {
             target_from_pipe_text(&serde_json::to_string(&record).unwrap()).unwrap(),
             "kotlin:controller"
         );
+    }
+
+    #[test]
+    fn fan_out_deduplicates_selector_targets_and_reports_success() {
+        let mut seen = Vec::new();
+        assert_eq!(
+            fan_out(vec!["b".into(), "a".into(), "a".into()], |target| {
+                seen.push(target);
+                Ok(kide_core::QueryStatus::Ok)
+            })
+            .unwrap(),
+            kide_core::QueryStatus::Ok
+        );
+        assert_eq!(seen, vec!["a", "b"]);
     }
 
     fn test_symbol() -> kide_core::SymbolRecord {
