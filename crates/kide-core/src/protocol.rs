@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CallEdge, Completeness, DiagnosticRecord, Fingerprint, HierarchyEdge, Language,
-    ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolRecord,
-    TypeRecord, WorkspaceId, WorkspacePath,
+    ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId,
+    SymbolRecord, TypeRecord, WorkspaceId, WorkspacePath,
 };
 
 /// Third version separates dependency discovery from expensive fact extraction.
@@ -134,6 +134,15 @@ pub struct ArtifactAnalysisResponse {
 pub struct ArtifactDescriptor {
     pub source_unit: SourceUnit,
     pub provenance: crate::Provenance,
+    #[serde(default)]
+    pub symbol_locators: Vec<SymbolLocator>,
+}
+
+/// Lightweight catalog entry; it carries no graph facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolLocator {
+    pub qualified_name: String,
+    pub symbol: SymbolId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

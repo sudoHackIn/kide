@@ -194,7 +194,9 @@ message ArtifactDescriptor {
   string analysis_options_fingerprint = 9;
   string language = 10;
   string origin = 11;
+  repeated SymbolLocator symbol_locators = 12;
 }
+message SymbolLocator { string qualified_name = 1; string symbol_id = 2; }
 message ArtifactDiscoveryResponse {
   repeated ArtifactDescriptor artifacts = 1;
   optional string next_cursor = 2;

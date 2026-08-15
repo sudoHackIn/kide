@@ -1132,6 +1132,14 @@ fn descriptor(value: &ArtifactDescriptor) -> worker_proto::ArtifactDescriptor {
         analysis_options_fingerprint: value.provenance.analysis_options.as_str().to_owned(),
         language: proto_language(&unit.language),
         origin: proto_source_origin(&unit.origin).to_owned(),
+        symbol_locators: value
+            .symbol_locators
+            .iter()
+            .map(|locator| worker_proto::SymbolLocator {
+                qualified_name: locator.qualified_name.clone(),
+                symbol_id: locator.symbol.as_str().to_owned(),
+            })
+            .collect(),
     }
 }
 
@@ -1154,6 +1162,14 @@ pub fn decode_descriptor(
             protocol_version: value.worker_protocol_version,
             analysis_options: Fingerprint::new(value.analysis_options_fingerprint),
         },
+        symbol_locators: value
+            .symbol_locators
+            .into_iter()
+            .map(|locator| crate::SymbolLocator {
+                qualified_name: locator.qualified_name,
+                symbol: SymbolId::new(locator.symbol_id),
+            })
+            .collect(),
     })
 }
 

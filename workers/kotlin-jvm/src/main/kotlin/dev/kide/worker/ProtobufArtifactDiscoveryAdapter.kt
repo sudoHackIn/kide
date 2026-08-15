@@ -4,6 +4,7 @@ import kide.worker.v1.Worker
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.put
@@ -25,6 +26,12 @@ internal object ProtobufArtifactDiscoveryAdapter {
             .setAnalysisOptionsFingerprint(provenance["analysis_options"]!!.jsonPrimitive.content)
             .setLanguage(unit["language"]?.jsonPrimitive?.content ?: "java")
             .setOrigin(unit["origin"]?.jsonPrimitive?.content ?: "dependency")
+            .apply {
+                value["symbol_locators"]?.jsonArray?.forEach { locator ->
+                    val item = locator.jsonObject
+                    addSymbolLocators(Worker.SymbolLocator.newBuilder().setQualifiedName(item["qualified_name"]!!.jsonPrimitive.content).setSymbolId(item["symbol_id"]!!.jsonPrimitive.content))
+                }
+            }
             .build()
     }
 
@@ -37,5 +44,8 @@ internal object ProtobufArtifactDiscoveryAdapter {
             put("backend", value.backend); put("backend_version", value.backendVersion)
             put("protocol_version", value.workerProtocolVersion); put("analysis_options", value.analysisOptionsFingerprint)
         })
+        put("symbol_locators", kotlinx.serialization.json.buildJsonArray { value.symbolLocatorsList.forEach { locator ->
+            add(buildJsonObject { put("qualified_name", locator.qualifiedName); put("symbol_id", locator.symbolId) })
+        } })
     }
 }

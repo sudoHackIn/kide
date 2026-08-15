@@ -274,12 +274,20 @@ fn select_symbols(
         LanguageView, Selector, SelectorPredicate, SelectorState, records, select,
     };
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
+    let applied_symbol = match store.symbols_with_qualified_name(&applies)?.as_slice() {
+        [symbol] => symbol.clone(),
+        [] => SymbolId::new(applies),
+        candidates => bail!(
+            "applied symbol name is ambiguous: {} candidates",
+            candidates.len()
+        ),
+    };
     let mut selector = Selector {
         views: kotlin_class
             .then_some(LanguageView::KotlinClass)
             .into_iter()
             .collect(),
-        predicates: vec![SelectorPredicate::AppliedSymbol(SymbolId::new(applies))],
+        predicates: vec![SelectorPredicate::AppliedSymbol(applied_symbol)],
     };
     if let Some(component) = component {
         selector

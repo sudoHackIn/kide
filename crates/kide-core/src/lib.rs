@@ -401,6 +401,7 @@ mod worker_framing_tests {
                 protocol_version: 3,
                 analysis_options: Fingerprint::new("sha256:options"),
             },
+            symbol_locators: Vec::new(),
         };
         let request = crate::ArtifactMaterializationRequest {
             workspace_root: WorkspacePath::new("."),

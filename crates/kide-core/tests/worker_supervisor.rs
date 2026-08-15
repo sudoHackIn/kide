@@ -184,5 +184,6 @@ fn descriptor() -> ArtifactDescriptor {
             protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
             analysis_options: Fingerprint::new("sha256:fixture"),
         },
+        symbol_locators: Vec::new(),
     }
 }

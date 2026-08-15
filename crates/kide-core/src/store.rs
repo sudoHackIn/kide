@@ -133,6 +133,15 @@ CREATE TABLE IF NOT EXISTS artifact_catalog (
     descriptor_json TEXT NOT NULL
 );
 "#;
+const MIGRATION_5: &str = r#"
+CREATE TABLE IF NOT EXISTS symbol_locators (
+    source_unit_id TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    symbol_id TEXT NOT NULL,
+    PRIMARY KEY (source_unit_id, qualified_name, symbol_id)
+);
+CREATE INDEX IF NOT EXISTS symbol_locators_by_name ON symbol_locators(qualified_name, symbol_id);
+"#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
 
@@ -277,6 +286,20 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
         }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 5",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_5)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
+        }
         Ok(())
     }
 
@@ -304,6 +327,20 @@ impl IndexStore {
         Ok(())
     }
 
+    pub fn symbols_with_qualified_name(
+        &self,
+        qualified_name: &str,
+    ) -> Result<Vec<SymbolId>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT symbol_id FROM symbol_locators WHERE qualified_name = ?1 ORDER BY symbol_id",
+        )?;
+        statement
+            .query_map(params![qualified_name], |row| row.get::<_, String>(0))?
+            .map(|row| row.map(SymbolId::new))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IndexStoreError::from)
+    }
+
     /// Records immutable dependency identity without copying its graph facts
     /// into the live index. A demand path may materialize it later.
     pub fn put_artifact_descriptor(
@@ -318,6 +355,13 @@ impl IndexStore {
                 serde_json::to_string(descriptor)?
             ],
         )?;
+        self.connection.execute(
+            "DELETE FROM symbol_locators WHERE source_unit_id = ?1",
+            params![descriptor.source_unit.id.as_str()],
+        )?;
+        for locator in &descriptor.symbol_locators {
+            self.connection.execute("INSERT INTO symbol_locators (source_unit_id, qualified_name, symbol_id) VALUES (?1, ?2, ?3)", params![descriptor.source_unit.id.as_str(), locator.qualified_name, locator.symbol.as_str()])?;
+        }
         Ok(())
     }
 

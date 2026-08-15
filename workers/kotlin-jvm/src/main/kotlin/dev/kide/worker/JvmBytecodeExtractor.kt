@@ -38,6 +38,13 @@ internal object JvmBytecodeExtractor {
                 put("language", "java"); put("origin", "dependency"); put("content", artifactHash); put("context", context)
             })
             put("provenance", provenance(context))
+            put("symbol_locators", buildJsonArray {
+                classEntries(artifact).map { it.first.removeSuffix(".class").replace('/', '.') }
+                    .filter { it.isNotEmpty() && !it.endsWith("module-info") && !it.endsWith("package-info") }
+                    .distinct().sorted().forEach { name ->
+                        add(buildJsonObject { put("qualified_name", name); put("symbol_id", "jvm:$artifactHash:$name") })
+                    }
+            })
         }
     }
     /**
