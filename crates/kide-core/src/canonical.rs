@@ -332,6 +332,10 @@ pub struct SymbolRecord {
     pub modifiers: Vec<String>,
     #[serde(default)]
     pub annotations: Vec<String>,
+    /// Compiler-resolved annotation declaration symbols. Raw `annotations`
+    /// remain display data; selector planning uses this relation instead.
+    #[serde(default)]
+    pub annotation_targets: Vec<SymbolId>,
     pub freshness: Freshness,
     pub completeness: Completeness,
     pub provenance: Provenance,

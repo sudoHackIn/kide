@@ -41,6 +41,7 @@
             "owner": null,
             "modifiers": [],
             "annotations": [],
+            "annotation_targets": [],
             "freshness": "fresh",
             "completeness": "complete",
             "provenance": {

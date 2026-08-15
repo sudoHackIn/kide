@@ -288,6 +288,7 @@ fn probe_batch(source_unit: &SourceUnitId) -> AnalysisBatchProbe {
         owner: Some(SymbolId::new("kotlin:app:com.example.PaymentService")),
         modifiers: Vec::new(),
         annotations: Vec::new(),
+        annotation_targets: Vec::new(),
         freshness: Freshness::Fresh,
         completeness: Completeness::Complete,
         provenance: provenance(),

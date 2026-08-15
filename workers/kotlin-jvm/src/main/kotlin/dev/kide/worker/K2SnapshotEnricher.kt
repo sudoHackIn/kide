@@ -6,6 +6,7 @@ import java.security.MessageDigest
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -21,17 +22,20 @@ internal object K2SnapshotEnricher {
         resolved: List<K2ResolvedReference>,
         externalTargets: Map<String, String> = emptyMap(),
         hierarchy: List<K2HierarchyEdge> = emptyList(),
+        annotations: List<K2ResolvedAnnotation> = emptyList(),
     ): List<JsonElement> {
         val sourceTargets = targetIds(snapshots)
         val targets = sourceTargets + externalTargets.filterKeys { it !in sourceTargets }
         val bySource = resolved.groupBy { Path.of(it.sourcePath).toAbsolutePath().normalize() }
-        return snapshots.map { snapshot -> enrichSnapshot(snapshot.jsonObject, workspaceRoot, bySource, targets, hierarchy) }
+        val annotationsBySource = annotations.groupBy { Path.of(it.sourcePath).toAbsolutePath().normalize() }
+        return snapshots.map { snapshot -> enrichSnapshot(snapshot.jsonObject, workspaceRoot, bySource, annotationsBySource, targets, hierarchy) }
     }
 
     private fun enrichSnapshot(
         snapshot: JsonObject,
         workspaceRoot: Path,
         bySource: Map<Path, List<K2ResolvedReference>>,
+        annotationsBySource: Map<Path, List<K2ResolvedAnnotation>>,
         targets: Map<String, String>,
         hierarchy: List<K2HierarchyEdge>,
     ): JsonElement {
@@ -41,6 +45,11 @@ internal object K2SnapshotEnricher {
         val provenance = snapshot["provenance"]!!
         val owners = enclosingSymbols(snapshot["symbols"]!!.jsonArray)
         val snapshotSymbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject.requiredString("id") }.toSet()
+        val annotationTargets = annotationsBySource[path].orEmpty().mapNotNull { annotation ->
+            val owner = targets[annotation.ownerKey] ?: return@mapNotNull null
+            val target = targets[annotation.targetKey] ?: return@mapNotNull null
+            owner to target
+        }.groupBy({ it.first }, { it.second }).mapValues { (_, targets) -> targets.distinct().sorted() }
         val hierarchyFacts = hierarchy.mapNotNull { edge ->
             val subtype = targets[edge.subtypeKey] ?: return@mapNotNull null
             val supertype = targets[edge.supertypeKey] ?: return@mapNotNull null
@@ -62,14 +71,24 @@ internal object K2SnapshotEnricher {
                 occurrence(sourceUnit.requiredString("id"), start, end, reference, target, enclosingSymbol(owners, start, end), provenance),
             )
         }.distinctBy { it.reference.sourcePath to it.reference.startUtf16 to it.reference.endUtf16 to it.target }
-        if (exact.isEmpty() && hierarchyFacts.isEmpty()) return snapshot
+        if (exact.isEmpty() && hierarchyFacts.isEmpty() && annotationTargets.isEmpty()) return snapshot
 
         val exactRanges = exact.map { rangeKey(it.occurrence) }.toSet()
         val remainingOccurrences = snapshot["occurrences"]!!.jsonArray.filter { rangeKey(it) !in exactRanges }
         return buildJsonObject {
             snapshot.forEach { (key, value) ->
-                if (key !in setOf("occurrences", "references", "calls", "types", "hierarchy")) put(key, value)
+                if (key !in setOf("symbols", "occurrences", "references", "calls", "types", "hierarchy")) put(key, value)
             }
+            put("symbols", buildJsonArray {
+                snapshot["symbols"]!!.jsonArray.forEach { element ->
+                    val symbol = element.jsonObject
+                    val targets = annotationTargets[symbol.requiredString("id")].orEmpty()
+                    add(buildJsonObject {
+                        symbol.forEach { (key, value) -> if (key != "annotation_targets") put(key, value) }
+                        put("annotation_targets", buildJsonArray { targets.forEach { add(JsonPrimitive(it)) } })
+                    })
+                }
+            })
             put("occurrences", buildJsonArray {
                 (remainingOccurrences + exact.map { it.occurrence }).forEach(::add)
             })

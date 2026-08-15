@@ -43,18 +43,24 @@ import org.jetbrains.kotlin.fir.symbols.impl.FirClassSymbol
 internal object KideFirCollector {
     private val references = ConcurrentLinkedQueue<K2ResolvedReference>()
     private val hierarchy = ConcurrentLinkedQueue<K2HierarchyEdge>()
+    private val annotations = ConcurrentLinkedQueue<K2ResolvedAnnotation>()
 
-    fun reset() { references.clear(); hierarchy.clear() }
+    fun reset() { references.clear(); hierarchy.clear(); annotations.clear() }
 
     fun snapshot(): K2SemanticFacts = K2SemanticFacts(
         references = references.toList().sortedWith(compareBy({ it.sourcePath }, { it.startUtf16 }, { it.endUtf16 }, { it.targetKey })),
         hierarchy = hierarchy.toList().distinct().sortedWith(compareBy({ it.subtypeKey }, { it.supertypeKey })),
+        annotations = annotations.toList().distinct().sortedWith(compareBy({ it.sourcePath }, { it.ownerKey }, { it.targetKey })),
     )
 
     internal fun recordHierarchy(subtype: FirClass, supertype: ConeClassLikeType) {
         val subtypeKey = "class:${subtype.symbol.classId.asSingleFqName().asString()}"
         val supertypeKey = "class:${supertype.lookupTag.classId.asSingleFqName().asString()}"
         if (supertypeKey != "class:kotlin.Any") hierarchy.add(K2HierarchyEdge(subtypeKey, supertypeKey))
+    }
+
+    internal fun recordAnnotation(sourcePath: String, owner: FirClass, annotation: ConeClassLikeType) {
+        annotations.add(K2ResolvedAnnotation(sourcePath, "class:${owner.symbol.classId.asSingleFqName().asString()}", "class:${annotation.lookupTag.classId.asSingleFqName().asString()}"))
     }
 
     internal fun recordOverride(overriding: FirCallableSymbol<*>, overridden: FirCallableSymbol<*>) {
@@ -118,7 +124,8 @@ internal data class K2ResolvedReference(
 )
 
 internal data class K2HierarchyEdge(val subtypeKey: String, val supertypeKey: String)
-internal data class K2SemanticFacts(val references: List<K2ResolvedReference>, val hierarchy: List<K2HierarchyEdge>)
+internal data class K2ResolvedAnnotation(val sourcePath: String, val ownerKey: String, val targetKey: String)
+internal data class K2SemanticFacts(val references: List<K2ResolvedReference>, val hierarchy: List<K2HierarchyEdge>, val annotations: List<K2ResolvedAnnotation>)
 
 /** Registered through the standard compiler-plugin service entry. */
 @OptIn(ExperimentalCompilerApi::class)
@@ -157,6 +164,11 @@ private object KideClassHierarchyChecker : FirDeclarationChecker<FirClass>(MppCh
     override fun check(declaration: FirClass) {
         declaration.symbol.resolvedSuperTypes.filterIsInstance<ConeClassLikeType>().forEach { supertype ->
             KideFirCollector.recordHierarchy(declaration, supertype)
+        }
+        val sourcePath = context.containingFile?.path ?: return
+        declaration.annotations.forEach { annotation ->
+            val type = (annotation.annotationTypeRef as? FirResolvedTypeRef)?.coneType as? ConeClassLikeType ?: return@forEach
+            KideFirCollector.recordAnnotation(sourcePath, declaration, type)
         }
     }
 }

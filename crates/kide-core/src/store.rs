@@ -116,6 +116,17 @@ ALTER TABLE source_snapshots ADD COLUMN provenance_blob BLOB;
 ALTER TABLE source_snapshots DROP COLUMN snapshot_json;
 "#;
 
+const MIGRATION_3: &str = r#"
+CREATE TABLE IF NOT EXISTS annotation_edges (
+    source_unit_id TEXT NOT NULL,
+    symbol_id TEXT NOT NULL,
+    annotation_symbol_id TEXT NOT NULL,
+    PRIMARY KEY (source_unit_id, symbol_id, annotation_symbol_id)
+);
+CREATE INDEX IF NOT EXISTS annotations_by_target
+    ON annotation_edges(annotation_symbol_id, source_unit_id, symbol_id);
+"#;
+
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 1;
 
 /// Failures that Core can surface without treating a partially written index as
@@ -232,6 +243,19 @@ impl IndexStore {
             self.connection.execute_batch(MIGRATION_2)?;
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+        }
+        let migration_3: Option<u32> = self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 3",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if migration_3.is_none() {
+            self.connection.execute_batch(MIGRATION_3)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
         }
         Ok(())
     }
@@ -447,6 +471,44 @@ impl IndexStore {
                 Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
             })
             .transpose()
+    }
+
+    /// Reverse resolved-annotation lookup. SQLite narrows by the posting
+    /// index before Core decodes any compact `SymbolRecord` blobs.
+    pub fn symbols_annotated_with(
+        &self,
+        annotation: &SymbolId,
+    ) -> Result<Vec<SymbolRecord>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
+             FROM annotation_edges
+             JOIN symbols ON symbols.symbol_id = annotation_edges.symbol_id
+             JOIN source_snapshots ON source_snapshots.source_unit_id = symbols.source_unit_id
+             WHERE annotation_edges.annotation_symbol_id = ?1
+             ORDER BY symbols.source_unit_id, symbols.name_start_byte, symbols.symbol_id",
+        )?;
+        let rows = statement
+            .query_map(params![annotation.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, name, record, source, provenance)| {
+                let record = decode_stored_symbol(&record)?;
+                Ok(record.into_symbol(
+                    SymbolId::new(id),
+                    name,
+                    &serde_json::from_str(&source)?,
+                    &bincode::deserialize(&provenance)?,
+                ))
+            })
+            .collect()
     }
 
     pub fn occurrences_at(
@@ -672,6 +734,7 @@ fn delete_file_owned_facts(
         "hierarchy_edges",
         "type_records",
         "diagnostics",
+        "annotation_edges",
         "occurrences",
         "symbols",
         "source_snapshots",
@@ -717,6 +780,12 @@ fn insert_snapshot(
                 encode_stored_symbol(&StoredSymbolRecord::from(symbol))?
             ],
         )?;
+        for annotation in &symbol.annotation_targets {
+            transaction.execute(
+                "INSERT INTO annotation_edges (source_unit_id, symbol_id, annotation_symbol_id) VALUES (?1, ?2, ?3)",
+                params![source.id.as_str(), symbol.id.as_str(), annotation.as_str()],
+            )?;
+        }
     }
     for occurrence in &snapshot.occurrences {
         transaction.execute(
@@ -801,6 +870,7 @@ struct StoredSymbolRecord {
     owner: Option<SymbolId>,
     modifiers: Vec<String>,
     annotations: Vec<String>,
+    annotation_targets: Vec<SymbolId>,
     freshness: crate::Freshness,
     completeness: crate::Completeness,
 }
@@ -818,6 +888,7 @@ impl From<&SymbolRecord> for StoredSymbolRecord {
             owner: symbol.owner.clone(),
             modifiers: symbol.modifiers.clone(),
             annotations: symbol.annotations.clone(),
+            annotation_targets: symbol.annotation_targets.clone(),
             freshness: symbol.freshness,
             completeness: symbol.completeness,
         }
@@ -852,6 +923,7 @@ impl StoredSymbolRecord {
             owner: self.owner,
             modifiers: self.modifiers,
             annotations: self.annotations,
+            annotation_targets: self.annotation_targets,
             freshness: self.freshness,
             completeness: self.completeness,
             provenance: provenance.clone(),
@@ -1120,6 +1192,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolved_annotation_posting_returns_only_matching_symbols() {
+        let directory = tempdir().expect("temporary directory");
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens store");
+        let source = source_unit("sha256:annotation-v1");
+        let mut matching = snapshot(source.clone());
+        let controller =
+            SymbolId::new("jvm:org.springframework.web.bind.annotation.RestController");
+        matching.symbols[0].annotation_targets = vec![controller.clone()];
+        store
+            .replace_snapshot(&source, &matching)
+            .expect("stores matching symbol");
+
+        let mut other_source = source_unit("sha256:annotation-v2");
+        other_source.id = SourceUnitId::new("gradle:app:main:OtherService.kt");
+        let mut other = snapshot(other_source.clone());
+        other.symbols[0].id = SymbolId::new("kotlin:demo.OtherService");
+        store
+            .replace_snapshot(&other_source, &other)
+            .expect("stores non-matching symbol");
+
+        assert_eq!(
+            store
+                .symbols_annotated_with(&controller)
+                .expect("uses annotation posting"),
+            matching.symbols
+        );
+        assert!(
+            store
+                .symbols_annotated_with(&SymbolId::new("jvm:missing.Annotation"))
+                .expect("empty posting")
+                .is_empty()
+        );
+    }
+
     fn source_unit(content: &str) -> SourceUnit {
         SourceUnit {
             id: SourceUnitId::new("gradle:app:main:PaymentService.kt"),
@@ -1158,6 +1266,7 @@ mod tests {
             owner: None,
             modifiers: Vec::new(),
             annotations: Vec::new(),
+            annotation_targets: Vec::new(),
             freshness: Freshness::Fresh,
             completeness: Completeness::Complete,
             provenance: provenance.clone(),

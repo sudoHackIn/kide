@@ -96,6 +96,7 @@ message ArtifactSymbol {
   string completeness = 15;
   string component_id = 16;
   uint32 provenance_index = 17;
+  repeated string annotation_target_ids = 18;
 }
 
 message ArtifactOccurrence {

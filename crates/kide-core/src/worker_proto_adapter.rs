@@ -378,6 +378,11 @@ pub fn symbol_declaration(value: &SymbolRecord) -> worker_proto::SymbolDeclarati
         owner_id: value.owner.as_ref().map(|owner| owner.as_str().to_owned()),
         modifiers: value.modifiers.clone(),
         annotations: value.annotations.clone(),
+        annotation_target_ids: value
+            .annotation_targets
+            .iter()
+            .map(|target| target.as_str().to_owned())
+            .collect(),
         freshness: format!("{:?}", value.freshness).to_lowercase(),
         completeness: format!("{:?}", value.completeness).to_lowercase(),
         component_id: value.component.as_str().to_owned(),
@@ -464,6 +469,11 @@ pub fn decode_symbol_declaration(
         owner: value.owner_id.map(SymbolId::new),
         modifiers: value.modifiers,
         annotations: value.annotations,
+        annotation_targets: value
+            .annotation_target_ids
+            .into_iter()
+            .map(SymbolId::new)
+            .collect(),
         freshness: freshness(value.freshness)?,
         completeness: completeness(value.completeness)?,
         provenance: provenance.clone(),
