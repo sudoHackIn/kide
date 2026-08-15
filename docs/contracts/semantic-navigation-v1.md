@@ -190,6 +190,19 @@ format. This makes an interactive command readable while keeping pipelines
 such as `kide symbols Name | kide definition | kide ref` structured without
 flags. Logs and worker diagnostics go to stderr.
 
+### Selector JSONL pipelines
+
+`kide select --annotation <resolved-symbol-id>` emits one UTF-8 JSON record per
+selected declaration when stdout is piped. Each record contains the full
+canonical `SymbolRecord` and its freshness, completeness, and provenance
+metadata; consumers use `symbol.id`, never rendered declaration text. The
+optional `--kotlin-class`, `--component`, and `--qualified-prefix` filters are
+conjunctive. `refs`, `callers`, and `implementations` accept this JSONL stream,
+deduplicate SymbolIds, and process them in stable lexical ID order. A selector
+with no records exits `1`; a fan-out navigation command exits `0` if any target
+has a result and `1` if none do. One navigation response is emitted per input
+target, so a consumer can preserve attribution without reparsing text.
+
 ```json
 {
   "schema_version": 1,
