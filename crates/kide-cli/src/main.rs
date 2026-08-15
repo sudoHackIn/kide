@@ -346,17 +346,69 @@ fn print_short_references(
     references: &[kide_core::SourceOccurrence],
 ) -> Result<()> {
     for reference in references {
+        let Some(source) = store.source_unit(&reference.range.source_unit)? else {
+            bail!("reference source unit is absent from the index");
+        };
+        let path = source.path.as_str();
+        let text = std::fs::read_to_string(workspace.join(path)).ok();
+        let context = store
+            .occurrences_at(&source.id, reference.range.bytes.start)?
+            .into_iter()
+            .filter(|candidate| {
+                candidate.kind == kide_core::OccurrenceKind::TypeReference
+                    && candidate.range.bytes.start <= reference.range.bytes.start
+                    && reference.range.bytes.end <= candidate.range.bytes.end
+            })
+            .max_by_key(|candidate| candidate.range.bytes.end - candidate.range.bytes.start)
+            .map(|candidate| candidate.range.bytes)
+            .unwrap_or(reference.range.bytes);
+        let snippet = text
+            .as_deref()
+            .and_then(|text| {
+                generic_type_context(text, reference.range.bytes.start, reference.range.bytes.end)
+                    .or_else(|| source_snippet(text, context.start, context.end))
+            })
+            .unwrap_or_else(|| "<unavailable source>".to_owned());
         println!(
-            "{}",
-            short_source_location(
-                store,
-                workspace,
-                &reference.range.source_unit,
-                reference.range.bytes.start,
-            )?
+            "{snippet} {}",
+            short_source_location(store, workspace, &source.id, reference.range.bytes.start)?
         );
     }
     Ok(())
+}
+
+fn source_snippet(text: &str, start: u64, end: u64) -> Option<String> {
+    let start = usize::try_from(start).ok()?;
+    let end = usize::try_from(end).ok()?;
+    if start > end
+        || end > text.len()
+        || !text.is_char_boundary(start)
+        || !text.is_char_boundary(end)
+    {
+        return None;
+    }
+    Some(
+        text[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn generic_type_context(text: &str, start: u64, end: u64) -> Option<String> {
+    let start = usize::try_from(start).ok()?;
+    let end = usize::try_from(end).ok()?;
+    let open = text[..start].rfind('<')?;
+    let close = end + text[end..].find('>')? + 1;
+    let name_start = text[..open]
+        .char_indices()
+        .rev()
+        .take_while(|(_, character)| {
+            character.is_alphanumeric() || *character == '.' || *character == '_'
+        })
+        .last()
+        .map_or(open, |(offset, _)| offset);
+    source_snippet(text, name_start as u64, close as u64)
 }
 
 fn short_source_location(
