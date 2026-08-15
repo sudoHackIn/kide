@@ -2,15 +2,14 @@
 
 use std::{collections::BTreeSet, path::Path};
 
-use prost::Message;
 use thiserror::Error;
 
 use crate::{
-    AnalysisFact, AnalyzeBatchRequest, ArtifactAnalysisRequest, ArtifactBlobCache,
-    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
-    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, SourceOrigin, SourceUnit, WorkerEnvelope, WorkerLaunch,
-    WorkerMessage, WorkerSupervisor, WorkerSupervisorError, WorkspacePath, plan_invalidation,
+    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError, ArtifactBlobKey,
+    ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
+    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError, ProjectManifest,
+    SourceOrigin, SourceUnit, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSupervisor,
+    WorkerSupervisorError, WorkspacePath, plan_invalidation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,10 +205,8 @@ fn index_batch_with_optional_cache(
         store.replace_snapshot(expected, snapshot)?;
         run.analyzed += 1;
     }
-    match artifact_cache {
-        Some((_cache, _staging)) => index_dependency_catalog(store, &mut supervisor)?,
-        None => index_dependencies(store, &mut supervisor, &mut run)?,
-    }
+    let _ = artifact_cache;
+    index_dependency_catalog(store, &mut supervisor)?;
     store.put_manifest(manifest)?;
     run.worker_starts = supervisor.start_count();
     Ok(run)
@@ -237,130 +234,6 @@ fn index_dependency_catalog(
         };
         for descriptor in &response.artifacts {
             store.put_artifact_descriptor(descriptor)?;
-        }
-        match response.next_cursor {
-            Some(next) => {
-                cursor = Some(next);
-                page += 1
-            }
-            None => return Ok(()),
-        }
-    }
-}
-
-#[allow(dead_code)] // Retained as the demand-materialization implementation while callers move to catalog-first.
-fn index_dependencies_from_cache(
-    store: &mut IndexStore,
-    supervisor: &mut WorkerSupervisor,
-    run: &mut IndexRun,
-    cache: &ArtifactBlobCache,
-    staging_directory: &Path,
-) -> Result<(), IndexOrchestratorError> {
-    let mut cursor = None;
-    let mut page = 0_u64;
-    loop {
-        let response = supervisor.request(WorkerEnvelope::new(
-            format!("index-artifact-descriptors-{page}"),
-            WorkerMessage::ArtifactDiscoveryRequest(ArtifactDiscoveryRequest {
-                workspace_root: WorkspacePath::new("."),
-                max_artifacts: 1,
-                cursor: cursor.clone(),
-            }),
-        ))?;
-        let WorkerMessage::ArtifactDiscoveryResponse(response) = response.message else {
-            return Err(IndexOrchestratorError::InvalidResponse {
-                received: Box::new(response.message),
-            });
-        };
-        for descriptor in response.artifacts {
-            let key = ArtifactBlobKey::new(
-                descriptor.source_unit.content.clone(),
-                &descriptor.provenance,
-            );
-            let hit = cache.open_blob(&key)?.is_some();
-            if !hit {
-                materialize_artifact(
-                    supervisor,
-                    cache,
-                    WorkspacePath::new("."),
-                    descriptor.clone(),
-                    staging_directory,
-                    format!("index-artifact-materialize-{page}"),
-                )?;
-            }
-            let payload = cache
-                .load(&key)?
-                .ok_or(IndexOrchestratorError::InvalidStagedArtifact)?;
-            let layout = crate::artifact_blob_layout::ArtifactBlobLayout::validate(payload)
-                .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
-            let graph = crate::artifact_proto::GraphArtifact::decode(
-                layout
-                    .section(crate::artifact_proto::ArtifactBlobSectionKind::GraphFacts)
-                    .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?,
-            )
-            .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
-            let snapshots = crate::artifact_proto_adapter::decode_graph_artifact(graph)
-                .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
-            for snapshot in snapshots {
-                let unchanged =
-                    store
-                        .source_unit(&snapshot.source_unit.id)?
-                        .is_some_and(|previous| {
-                            previous.content == snapshot.source_unit.content
-                                && previous.context == snapshot.source_unit.context
-                        });
-                if unchanged {
-                    run.dependency_reused += 1;
-                } else {
-                    store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
-                    run.dependency_analyzed += 1;
-                }
-            }
-        }
-        match response.next_cursor {
-            Some(next) => {
-                cursor = Some(next);
-                page += 1
-            }
-            None => return Ok(()),
-        }
-    }
-}
-
-fn index_dependencies(
-    store: &mut IndexStore,
-    supervisor: &mut WorkerSupervisor,
-    run: &mut IndexRun,
-) -> Result<(), IndexOrchestratorError> {
-    let mut cursor = None;
-    let mut page = 0_u64;
-    loop {
-        let response = supervisor.request(WorkerEnvelope::new(
-            format!("index-artifacts-{page}"),
-            WorkerMessage::ArtifactAnalysisRequest(ArtifactAnalysisRequest {
-                workspace_root: WorkspacePath::new("."),
-                max_artifacts: 1,
-                cursor: cursor.clone(),
-            }),
-        ))?;
-        let WorkerMessage::ArtifactAnalysisResponse(response) = response.message else {
-            return Err(IndexOrchestratorError::InvalidResponse {
-                received: Box::new(response.message),
-            });
-        };
-        for snapshot in response.snapshots {
-            let unchanged = store
-                .source_unit(&snapshot.source_unit.id)?
-                .is_some_and(|previous| {
-                    previous.content == snapshot.source_unit.content
-                        && previous.context == snapshot.source_unit.context
-                });
-            if unchanged {
-                run.dependency_reused += 1;
-            } else {
-                store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
-                run.dependency_analyzed += 1;
-            }
         }
         match response.next_cursor {
             Some(next) => {
