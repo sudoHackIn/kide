@@ -119,6 +119,21 @@ class K2SpringCrudIntegrationTest {
         assertTrue(applied(controller, "create").any { it.contains("Transactional") }, "create applied symbols: ${applied(controller, "create")}")
     }
 
+    @Test
+    fun discoversDependencySymbolLocatorsWithoutGraphFacts() {
+        val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
+        val descriptors = artifactDescriptors(root, maxArtifacts = 256, cursor = null)
+            .jsonObject["artifacts"]!!.jsonArray
+            .flatMap { it.jsonObject["symbol_locators"]!!.jsonArray }
+            .map { it.jsonObject }
+        fun resolves(name: String) = descriptors.any { locator ->
+            locator["qualified_name"]!!.toString().contains(name) && locator["symbol_id"]!!.toString().startsWith("\"jvm:sha256:")
+        }
+        assertTrue(resolves("jakarta.persistence.Entity"))
+        assertTrue(resolves("org.springframework.web.bind.annotation.RestController"))
+        assertTrue(resolves("org.springframework.transaction.annotation.Transactional"))
+    }
+
     private fun sourceUnit(component: String, path: String) = buildJsonObject {
         put("id", "$component:$path")
         put("component", component)
