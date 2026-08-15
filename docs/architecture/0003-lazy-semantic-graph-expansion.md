@@ -45,8 +45,9 @@ not an unconditional copy of every fact in every blob.
    bytes, and time). It records its completeness so a partial result is never
    presented as a universal answer.
 
-This is a semantic depth, not a syntax-tree depth. `@RestController` is a
-direct annotation relation from a declaration to a resolved annotation symbol.
+This is a semantic depth, not a syntax-tree depth. A Kotlin/Java annotation,
+TypeScript decorator, or Python decorator is represented as a direct
+`applied_symbol` relation from a declaration to a resolved symbol.
 `callers` may require one reverse-call hop. A question such as "controllers
 that eventually invoke X" has unbounded call depth and therefore requires a
 caller-selected bound or a precomputed application rule.
@@ -57,23 +58,37 @@ Core remains framework-neutral. Workers emit language-neutral facts where they
 are exact, including:
 
 ```text
-symbol --annotated_with--> symbol
+symbol --applied_symbol--> symbol
 symbol --references/calls--> symbol
 symbol --extends/implements--> symbol
 source occurrence --has_type--> type
 ```
 
-Raw annotation spelling remains diagnostic data only. Fully-qualified,
-resolved annotation targets and other selector predicates receive relational
+Raw source spelling is not a selector fact. Fully-qualified resolved applied
+symbols and other selector predicates receive relational
 postings so the planner can start with a narrow candidate set rather than scan
 and decode every blob. Language-specific semantic objects are bounded views
 over those facts (for example `kotlin.class` and `java.class`), not
 framework-specific Core commands or persisted PSI.
 
 The first selector proof is conjunction of reusable predicates: symbol kind,
-resolved annotation, qualified-name prefix, language, component, and
-provenance. It must be able to find the Spring CRUD fixture's `BookController`
-by its `RestController` annotation without loading unrelated dependency graphs.
+resolved applied symbol, qualified-name prefix, language, component, and
+provenance. The Spring CRUD fixture is test data only: `BookController`,
+`BookEntity`, and transactional methods prove the same generic primitive.
+
+### Primitive relation coverage
+
+| Relation / predicate | Status | Use |
+| --- | --- | --- |
+| `kind`, `language`, `component`, qualified-name prefix, provenance | Implemented | Bounded declaration filtering. |
+| `applied_symbol` | Implemented | Resolved annotation/decorator-style modifiers with reverse postings. |
+| `references`, `calls`, `hierarchy`, `has_type` | Implemented | Direct semantic navigation and bounded traversal. |
+| `provides` | Planned | A framework view may expose a produced runtime capability, such as a DI binding. |
+| `requests` | Planned | A framework view may expose a dependency/injection request. |
+| `binds` | Planned | A resolved `requests -> provides` edge; it must preserve exact, ambiguous, conditional, or unresolved state. |
+
+No framework command or framework-specific persistent type belongs in Core.
+Views compile to these primitives and report their inference precision.
 
 ### Worker and cache policy
 
