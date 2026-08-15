@@ -53,6 +53,19 @@ enum Command {
         #[arg(long)]
         short: bool,
     },
+    /// Select declarations through resolved semantic predicates.
+    Select {
+        /// Resolved annotation SymbolId used as the bounded starting posting.
+        #[arg(long)]
+        annotation: String,
+        /// Apply the reusable Kotlin class view.
+        #[arg(long)]
+        kotlin_class: bool,
+        #[arg(long)]
+        component: Option<String>,
+        #[arg(long = "qualified-prefix")]
+        qualified_prefix: Option<String>,
+    },
     /// Resolve a declaration from a location, stable SymbolId, exact name, or stdin.
     Definition {
         /// A location, stable SymbolId, or exact symbol name. When omitted,
@@ -112,6 +125,19 @@ fn run() -> Result<QueryStatus> {
         Command::Index { path, force } => index(path, cli.verbose, force),
         Command::Status => pending("status", String::new()),
         Command::Symbols { query, short } => symbols(&cli.workspace, query, short || human_output),
+        Command::Select {
+            annotation,
+            kotlin_class,
+            component,
+            qualified_prefix,
+        } => select_symbols(
+            &cli.workspace,
+            annotation,
+            kotlin_class,
+            component,
+            qualified_prefix,
+            human_output,
+        ),
         Command::Definition { target } => definition(
             &cli.workspace,
             target_from_argument_or_stdin(target)?,
@@ -191,6 +217,54 @@ fn symbols(workspace: &Path, query: String, short: bool) -> Result<QueryStatus> 
     };
     print_response(&response)?;
     Ok(status)
+}
+
+fn select_symbols(
+    workspace: &Path,
+    annotation: String,
+    kotlin_class: bool,
+    component: Option<String>,
+    qualified_prefix: Option<String>,
+    human_output: bool,
+) -> Result<QueryStatus> {
+    use kide_core::selector::{
+        LanguageView, Selector, SelectorPredicate, SelectorState, records, select,
+    };
+    let store = IndexStore::open(IndexStore::default_path(workspace))?;
+    let mut selector = Selector {
+        views: kotlin_class
+            .then_some(LanguageView::KotlinClass)
+            .into_iter()
+            .collect(),
+        predicates: vec![SelectorPredicate::ResolvedAnnotation(SymbolId::new(
+            annotation,
+        ))],
+    };
+    if let Some(component) = component {
+        selector
+            .predicates
+            .push(SelectorPredicate::Component(kide_core::ComponentId::new(
+                component,
+            )));
+    }
+    if let Some(prefix) = qualified_prefix {
+        selector
+            .predicates
+            .push(SelectorPredicate::QualifiedNamePrefix(prefix));
+    }
+    let result = select(&store, &selector)?;
+    if human_output {
+        print_short_symbols(&store, workspace, &result.symbols)?;
+    } else {
+        for record in records(&result) {
+            println!("{}", serde_json::to_string(&record)?);
+        }
+    }
+    Ok(match result.state {
+        SelectorState::Complete => QueryStatus::Ok,
+        SelectorState::Partial => QueryStatus::Stale,
+        SelectorState::NoResult => QueryStatus::NoResult,
+    })
 }
 
 fn print_short_symbols(

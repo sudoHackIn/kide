@@ -3,8 +3,8 @@
 use thiserror::Error;
 
 use crate::{
-    Completeness, ComponentId, Freshness, IndexStore, IndexStoreError, Language, SymbolId,
-    SymbolKind, SymbolRecord,
+    Completeness, ComponentId, Freshness, IndexStore, IndexStoreError, Language, ResultMetadata,
+    SelectorRecord, SymbolId, SymbolKind, SymbolRecord,
 };
 
 /// A language-level convenience view. It compiles to canonical predicates;
@@ -97,6 +97,27 @@ pub fn select(store: &IndexStore, selector: &Selector) -> Result<SelectorResult,
         plan,
         symbols,
     })
+}
+
+/// Converts a selector result into independent JSONL-safe records. Each
+/// record carries the selected stable identity and its own provenance.
+pub fn records(result: &SelectorResult) -> Vec<SelectorRecord> {
+    result
+        .symbols
+        .iter()
+        .cloned()
+        .map(|symbol| SelectorRecord {
+            metadata: ResultMetadata {
+                freshness: symbol.freshness,
+                completeness: symbol.completeness,
+                precision: crate::Precision::Exact,
+                index_format_version: crate::INDEX_FORMAT_VERSION,
+                source_snapshot: None,
+                provenance: vec![symbol.provenance.clone()],
+            },
+            symbol,
+        })
+        .collect()
 }
 
 fn normalized_predicates(selector: &Selector) -> Vec<SelectorPredicate> {

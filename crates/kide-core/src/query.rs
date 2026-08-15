@@ -104,6 +104,9 @@ pub enum QueryPayload {
     Symbols {
         symbols: Vec<SymbolRecord>,
     },
+    Selector {
+        records: Vec<SelectorRecord>,
+    },
     Definition {
         symbol: SymbolRecord,
     },
@@ -120,6 +123,14 @@ pub enum QueryPayload {
         occurrence: SourceOccurrence,
         ty: TypeRecord,
     },
+}
+
+/// One stable JSONL record emitted by a semantic selector. Navigation clients
+/// consume `symbol.id`, never a rendered declaration string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectorRecord {
+    pub symbol: SymbolRecord,
+    pub metadata: ResultMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
