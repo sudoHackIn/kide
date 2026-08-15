@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    io::{IsTerminal, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -26,6 +27,10 @@ struct Cli {
     #[arg(long, global = true, default_value = ".")]
     workspace: PathBuf,
 
+    /// Emit the versioned JSON response even when stdout is a terminal.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -33,15 +38,36 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Discover a workspace and persist its semantic index.
-    Index { path: PathBuf },
+    Index {
+        path: PathBuf,
+        /// Reanalyze workspace source units even when their fingerprints match.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show persisted index health, freshness, and worker provenance.
     Status,
     /// Find symbols by name or qualified query.
-    Symbols { query: String },
-    /// Resolve the declaration at PATH:LINE:COLUMN.
-    Definition { location: String },
+    Symbols {
+        query: String,
+        /// Print compact human-readable declaration locations.
+        #[arg(long)]
+        short: bool,
+    },
+    /// Resolve a declaration from a location, stable SymbolId, exact name, or stdin.
+    Definition {
+        /// A location, stable SymbolId, or exact symbol name. When omitted,
+        /// read one `kide symbols` response from stdin.
+        target: Option<String>,
+    },
     /// Find exact semantic references for a location or symbol query.
-    Refs { target: String },
+    #[command(alias = "ref")]
+    Refs {
+        /// A location, stable SymbolId, or exact symbol name.
+        target: Option<String>,
+        /// Print source locations as one `path:line:column` record per line.
+        #[arg(long)]
+        short: bool,
+    },
     /// Find implementations for a location or symbol query.
     Implementations { target: String },
     /// Find resolved callers for a location or symbol query.
@@ -55,6 +81,10 @@ fn main() -> ExitCode {
     match run() {
         Ok(status) => exit_code(status),
         Err(error) => {
+            if std::io::stdout().is_terminal() {
+                eprintln!("error: {error}");
+                return ExitCode::from(4);
+            }
             let response = QueryResponse {
                 schema_version: CANONICAL_SCHEMA_VERSION,
                 status: QueryStatus::Failed,
@@ -76,22 +106,77 @@ fn main() -> ExitCode {
 fn run() -> Result<QueryStatus> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
+    let human_output = !cli.json && std::io::stdout().is_terminal();
 
     match cli.command {
-        Command::Index { path } => index(path, cli.verbose),
+        Command::Index { path, force } => index(path, cli.verbose, force),
         Command::Status => pending("status", String::new()),
-        Command::Symbols { query } => symbols(&cli.workspace, query),
-        Command::Definition { location } => definition(&cli.workspace, location),
-        Command::Refs { target } => references(&cli.workspace, target),
-        Command::Implementations { target } => implementations(&cli.workspace, target),
-        Command::Callers { target } => callers(&cli.workspace, target),
-        Command::TypeAt { location } => type_at(&cli.workspace, location),
+        Command::Symbols { query, short } => symbols(&cli.workspace, query, short || human_output),
+        Command::Definition { target } => definition(
+            &cli.workspace,
+            target_from_argument_or_stdin(target)?,
+            human_output,
+        ),
+        Command::Refs { target, short } => references(
+            &cli.workspace,
+            target_from_argument_or_stdin(target)?,
+            short || human_output,
+        ),
+        Command::Implementations { target } => {
+            implementations(&cli.workspace, target, human_output)
+        }
+        Command::Callers { target } => callers(&cli.workspace, target, human_output),
+        Command::TypeAt { location } => type_at(&cli.workspace, location, human_output),
     }
 }
 
-fn symbols(workspace: &Path, query: String) -> Result<QueryStatus> {
+fn target_from_argument_or_stdin(target: Option<String>) -> Result<String> {
+    if let Some(target) = target {
+        return Ok(target);
+    }
+    if std::io::stdin().is_terminal() {
+        bail!(
+            "a target is required, or pipe one `kide symbols`/`kide definition` response to stdin"
+        );
+    }
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let response: QueryResponse = serde_json::from_str(input.trim())
+        .map_err(|error| anyhow::anyhow!("--stdin expects one kide JSON response: {error}"))?;
+    target_from_pipe_response(response)
+}
+
+fn target_from_pipe_response(response: QueryResponse) -> Result<String> {
+    let result = response
+        .result
+        .ok_or_else(|| anyhow::anyhow!("--stdin response contains no result"))?;
+    match result {
+        QueryPayload::Definition { symbol } => Ok(symbol.id.as_str().to_owned()),
+        QueryPayload::Symbols { symbols } => {
+            target_from_symbols(symbols.into_iter().map(|symbol| symbol.id).collect())
+        }
+        _ => bail!("--stdin accepts only `kide symbols` or `kide definition` output"),
+    }
+}
+
+fn target_from_symbols(symbols: Vec<SymbolId>) -> Result<String> {
+    match symbols.as_slice() {
+        [symbol] => Ok(symbol.as_str().to_owned()),
+        _ => bail!(
+            "--stdin needs exactly one symbol, but the upstream query returned {}",
+            symbols.len()
+        ),
+    }
+}
+
+fn symbols(workspace: &Path, query: String, short: bool) -> Result<QueryStatus> {
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let symbols = store.symbols_named(&query)?;
+    if short && !symbols.is_empty() {
+        print_short_symbols(&store, workspace, &symbols)?;
+        return Ok(QueryStatus::Ok);
+    }
     let (status, result) = if symbols.is_empty() {
         (QueryStatus::NoResult, None)
     } else {
@@ -108,7 +193,39 @@ fn symbols(workspace: &Path, query: String) -> Result<QueryStatus> {
     Ok(status)
 }
 
-fn definition(workspace: &Path, value: String) -> Result<QueryStatus> {
+fn print_short_symbols(
+    store: &IndexStore,
+    workspace: &Path,
+    symbols: &[kide_core::SymbolRecord],
+) -> Result<()> {
+    for symbol in symbols {
+        print_short_symbol(store, workspace, symbol, None)?;
+    }
+    Ok(())
+}
+
+fn print_short_symbol(
+    store: &IndexStore,
+    workspace: &Path,
+    symbol: &kide_core::SymbolRecord,
+    label: Option<&str>,
+) -> Result<()> {
+    let name = symbol.qualified_name.as_deref().unwrap_or(&symbol.name);
+    let location = short_source_location(
+        store,
+        workspace,
+        &symbol.declaration.source_unit,
+        symbol.name_range.bytes.start,
+    )?;
+    let prefix = label.map_or(String::new(), |label| format!("{label} "));
+    println!(
+        "{prefix}{} {name} {location}",
+        format!("{:?}", symbol.kind).to_lowercase()
+    );
+    Ok(())
+}
+
+fn definition(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(id) => match store.symbol(&id)? {
@@ -138,6 +255,16 @@ fn definition(workspace: &Path, value: String) -> Result<QueryStatus> {
             }],
         ),
     };
+    if human_output {
+        match result {
+            Some(QueryPayload::Definition { symbol }) => {
+                print_short_symbol(&store, workspace, &symbol, Some("definition"))?;
+            }
+            None => println!("no definition"),
+            _ => unreachable!("definition only returns definition payloads"),
+        }
+        return Ok(status);
+    }
     print_response(&QueryResponse {
         schema_version: CANONICAL_SCHEMA_VERSION,
         status,
@@ -148,15 +275,64 @@ fn definition(workspace: &Path, value: String) -> Result<QueryStatus> {
     Ok(status)
 }
 
-fn references(workspace: &Path, value: String) -> Result<QueryStatus> {
+fn references(workspace: &Path, value: String, short: bool) -> Result<QueryStatus> {
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
-            let references = store
+            let mut references = store
                 .references_to(&symbol)?
                 .into_iter()
                 .map(|edge| edge.source)
                 .collect::<Vec<_>>();
+            if let Some(symbol_record) = store.symbol(&symbol)?
+                && matches!(
+                    symbol_record.kind,
+                    kide_core::SymbolKind::Class
+                        | kide_core::SymbolKind::Interface
+                        | kide_core::SymbolKind::Object
+                        | kide_core::SymbolKind::Enum
+                )
+            {
+                let constructors = store
+                    .symbols_for_source(&symbol_record.declaration.source_unit)?
+                    .into_iter()
+                    .filter(|candidate| {
+                        candidate.kind == kide_core::SymbolKind::Constructor
+                            && (candidate.owner.as_ref() == Some(&symbol)
+                                || candidate.name_range == symbol_record.name_range)
+                    });
+                for constructor in constructors {
+                    references.extend(
+                        store
+                            .calls_to(&constructor.id)?
+                            .into_iter()
+                            .map(|edge| edge.source),
+                    );
+                }
+            }
+            references.sort_by_key(|reference| {
+                (
+                    reference.range.source_unit.as_str().to_owned(),
+                    reference.range.bytes.start,
+                    reference.range.bytes.end,
+                    format!("{:?}", reference.kind),
+                    reference
+                        .target
+                        .as_ref()
+                        .map(SymbolId::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                )
+            });
+            references.dedup();
+            if short {
+                if references.is_empty() {
+                    println!("no references");
+                    return Ok(QueryStatus::NoResult);
+                }
+                print_short_references(&store, workspace, &references)?;
+                return Ok(QueryStatus::Ok);
+            }
             query_result(QueryPayload::Refs { references })
         }
         resolution => target_problem(resolution),
@@ -164,7 +340,57 @@ fn references(workspace: &Path, value: String) -> Result<QueryStatus> {
     print_query_response(status, result, problems)
 }
 
-fn callers(workspace: &Path, value: String) -> Result<QueryStatus> {
+fn print_short_references(
+    store: &IndexStore,
+    workspace: &Path,
+    references: &[kide_core::SourceOccurrence],
+) -> Result<()> {
+    for reference in references {
+        println!(
+            "{}",
+            short_source_location(
+                store,
+                workspace,
+                &reference.range.source_unit,
+                reference.range.bytes.start,
+            )?
+        );
+    }
+    Ok(())
+}
+
+fn short_source_location(
+    store: &IndexStore,
+    workspace: &Path,
+    source_unit: &kide_core::SourceUnitId,
+    byte_offset: u64,
+) -> Result<String> {
+    let Some(source) = store.source_unit(source_unit)? else {
+        bail!("source unit is absent from the index");
+    };
+    let path = source.path.as_str();
+    let location = std::fs::read_to_string(workspace.join(path))
+        .ok()
+        .and_then(|text| byte_to_location(&text, byte_offset));
+    Ok(match location {
+        Some((line, column)) => format!("{path}:{line}:{column}"),
+        None => format!("{path}:byte:{byte_offset}"),
+    })
+}
+
+fn byte_to_location(text: &str, byte_offset: u64) -> Option<(usize, usize)> {
+    let byte_offset = usize::try_from(byte_offset).ok()?;
+    if byte_offset > text.len() || !text.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let prefix = &text[..byte_offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |offset| offset + 1);
+    let column = text[line_start..byte_offset].chars().count() + 1;
+    Some((line, column))
+}
+
+fn callers(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
@@ -173,6 +399,14 @@ fn callers(workspace: &Path, value: String) -> Result<QueryStatus> {
                 .into_iter()
                 .map(|edge| edge.source)
                 .collect::<Vec<_>>();
+            if human_output {
+                if calls.is_empty() {
+                    println!("no callers");
+                    return Ok(QueryStatus::NoResult);
+                }
+                print_short_references(&store, workspace, &calls)?;
+                return Ok(QueryStatus::Ok);
+            }
             query_result(QueryPayload::Callers { calls })
         }
         resolution => target_problem(resolution),
@@ -180,7 +414,7 @@ fn callers(workspace: &Path, value: String) -> Result<QueryStatus> {
     print_query_response(status, result, problems)
 }
 
-fn implementations(workspace: &Path, value: String) -> Result<QueryStatus> {
+fn implementations(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
@@ -192,6 +426,14 @@ fn implementations(workspace: &Path, value: String) -> Result<QueryStatus> {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
+            if human_output {
+                if symbols.is_empty() {
+                    println!("no implementations");
+                    return Ok(QueryStatus::NoResult);
+                }
+                print_short_symbols(&store, workspace, &symbols)?;
+                return Ok(QueryStatus::Ok);
+            }
             query_result(QueryPayload::Implementations { symbols })
         }
         resolution => target_problem(resolution),
@@ -199,7 +441,7 @@ fn implementations(workspace: &Path, value: String) -> Result<QueryStatus> {
     print_query_response(status, result, problems)
 }
 
-fn type_at(workspace: &Path, value: String) -> Result<QueryStatus> {
+fn type_at(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
     let location = parse_location(&value)?;
     let source_text = std::fs::read_to_string(workspace.join(location.path.as_str()))?;
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
@@ -229,6 +471,14 @@ fn type_at(workspace: &Path, value: String) -> Result<QueryStatus> {
         },
         None => (QueryStatus::NoResult, None),
     };
+    if human_output {
+        match result {
+            Some(QueryPayload::TypeAt { ty, .. }) => println!("{}", ty.display),
+            None => println!("no type"),
+            _ => unreachable!("type-at only returns type payloads"),
+        }
+        return Ok(status);
+    }
     print_query_response(status, result, Vec::new())
 }
 
@@ -343,7 +593,7 @@ fn parse_location(value: &str) -> Result<kide_core::Location> {
     })
 }
 
-fn index(path: PathBuf, verbosity: u8) -> Result<QueryStatus> {
+fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
     tracing::debug!(target: "kide::cli", workspace = %path.display(), "discovering workspace");
     let discovery = discover_workspace(&path)?;
     tracing::debug!(target: "kide::cli", "opening index");
@@ -353,6 +603,12 @@ fn index(path: PathBuf, verbosity: u8) -> Result<QueryStatus> {
         .into_iter()
         .filter(|source| source.language == Language::Kotlin)
         .collect::<Vec<_>>();
+    if force {
+        tracing::info!(target: "kide::cli", sources = sources.len(), "forcing source reanalysis");
+        for source in &sources {
+            store.remove_snapshot(&source.id)?;
+        }
+    }
     let artifact_cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| discovery.root.join(".kide/artifact-cache"));
@@ -468,7 +724,7 @@ fn exit_code(status: QueryStatus) -> ExitCode {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, ExitCode, exit_code};
+    use super::{Cli, ExitCode, byte_to_location, exit_code, target_from_symbols};
 
     #[test]
     fn cli_definition_is_valid() {
@@ -491,5 +747,31 @@ mod tests {
             ExitCode::from(3)
         );
         assert_eq!(exit_code(kide_core::QueryStatus::Failed), ExitCode::from(4));
+    }
+
+    #[test]
+    fn pipe_input_uses_the_stable_symbol_id() {
+        assert_eq!(
+            target_from_symbols(vec![kide_core::SymbolId::new("kotlin:controller")]).unwrap(),
+            "kotlin:controller"
+        );
+    }
+
+    #[test]
+    fn pipe_input_rejects_ambiguous_symbol_results() {
+        assert!(
+            target_from_symbols(vec![
+                kide_core::SymbolId::new("kotlin:first"),
+                kide_core::SymbolId::new("kotlin:second"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn short_locations_use_one_based_unicode_scalar_coordinates() {
+        assert_eq!(byte_to_location("a😀b\nnext", 5), Some((1, 3)));
+        assert_eq!(byte_to_location("a😀b\nnext", 7), Some((2, 1)));
+        assert_eq!(byte_to_location("a😀b", 2), None);
     }
 }

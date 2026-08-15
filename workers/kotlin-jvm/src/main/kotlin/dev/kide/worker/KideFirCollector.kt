@@ -2,6 +2,7 @@ package dev.kide.worker
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import org.jetbrains.kotlin.KtSourceElement
+import org.jetbrains.kotlin.KtFakeSourceElementKind
 import org.jetbrains.kotlin.compiler.plugin.CompilerPluginRegistrar
 import org.jetbrains.kotlin.compiler.plugin.ExperimentalCompilerApi
 import org.jetbrains.kotlin.compiler.plugin.registerExtension as registerFirExtension
@@ -14,6 +15,8 @@ import org.jetbrains.kotlin.fir.analysis.checkers.overriddenFunctions
 import org.jetbrains.kotlin.fir.analysis.checkers.context.CheckerContext
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.ExpressionCheckers
 import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirExpressionChecker
+import org.jetbrains.kotlin.fir.analysis.checkers.type.FirTypeChecker
+import org.jetbrains.kotlin.fir.analysis.checkers.type.TypeCheckers
 import org.jetbrains.kotlin.fir.analysis.extensions.FirAdditionalCheckersExtension
 import org.jetbrains.kotlin.fir.expressions.FirQualifiedAccessExpression
 import org.jetbrains.kotlin.fir.declarations.FirFunction
@@ -77,6 +80,19 @@ internal object KideFirCollector {
         )
     }
 
+    internal fun recordType(sourcePath: String, source: KtSourceElement, type: ConeClassLikeType) {
+        references.add(
+            K2ResolvedReference(
+                sourcePath = sourcePath,
+                startUtf16 = source.startOffset,
+                endUtf16 = source.endOffset,
+                targetKey = "class:${type.lookupTag.classId.asSingleFqName().asString()}",
+                isCall = false,
+                typeDisplay = type.toString(),
+            ),
+        )
+    }
+
     private fun targetKey(symbol: FirBasedSymbol<*>): String = when (symbol) {
         is FirClassSymbol<*> -> "class:${symbol.classId.asSingleFqName().asString()}"
         is FirCallableSymbol<*> -> "callable:${symbol.callableIdAsString()}#${callableParameterTypes(symbol)}"
@@ -130,6 +146,10 @@ internal class KideFirCheckersExtension(session: FirSession) : FirAdditionalChec
         override val qualifiedAccessExpressionCheckers: Set<FirExpressionChecker<FirQualifiedAccessExpression>> =
             setOf(KideQualifiedAccessChecker)
     }
+    override val typeCheckers: TypeCheckers = object : TypeCheckers() {
+        override val resolvedTypeRefCheckers: Set<FirTypeChecker<FirResolvedTypeRef>> =
+            setOf(KideResolvedTypeRefChecker)
+    }
 }
 
 private object KideClassHierarchyChecker : FirDeclarationChecker<FirClass>(MppCheckerKind.Platform) {
@@ -164,5 +184,18 @@ private object KideQualifiedAccessChecker : FirExpressionChecker<FirQualifiedAcc
             call = expression::class.simpleName?.contains("FunctionCall") == true,
             typeDisplay = expression.resolvedType.toString(),
         )
+    }
+}
+
+private object KideResolvedTypeRefChecker : FirTypeChecker<FirResolvedTypeRef>(MppCheckerKind.Platform) {
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    override fun check(typeRef: FirResolvedTypeRef) {
+        val type = typeRef.coneType as? ConeClassLikeType ?: return
+        val sourcePath = context.containingFile?.path ?: return
+        val source = typeRef.source ?: return
+        // Class self types and inferred type arguments have synthetic source
+        // ranges. Only real source elements are user-visible type references.
+        if (source.kind is KtFakeSourceElementKind) return
+        KideFirCollector.recordType(sourcePath, source, type)
     }
 }

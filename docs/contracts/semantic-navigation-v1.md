@@ -181,8 +181,14 @@ call target, therefore it distinguishes overloads and extension/member calls.
 
 ## Response envelope and errors
 
-All JSON output is a `QueryResponse` and is written to stdout. Logs and worker
-diagnostics go to stderr.
+KIDE selects output based on stdout: when stdout is a terminal, navigation
+commands render concise human-readable declarations or `path:line:column`
+locations; when stdout is redirected or connected to a pipe, they emit one
+versioned JSON `QueryResponse` on stdout. `--json` forces the latter in a
+terminal. `--short` explicitly requests the compact location-oriented human
+format. This makes an interactive command readable while keeping pipelines
+such as `kide symbols Name | kide definition | kide ref` structured without
+flags. Logs and worker diagnostics go to stderr.
 
 ```json
 {

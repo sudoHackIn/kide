@@ -72,6 +72,30 @@ class K2SpringCrudIntegrationTest {
         )
     }
 
+    @Test
+    fun persistsBookEntityTypeUsagesForNavigation() {
+        val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
+        val payload = buildJsonObject {
+            put("source_units", buildJsonArray {
+                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
+                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
+            })
+        }
+
+        val snapshots = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
+        val entity = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookEntity.kt") }
+        val controller = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookController.kt") }
+        val entityId = entity["symbols"]!!.jsonArray
+            .map { it.jsonObject }
+            .single { it["kind"]!!.toString().contains("class") && it["name"]!!.toString().contains("BookEntity") }["id"]
+            .toString()
+
+        val usages = controller["references"]!!.jsonArray
+            .map { it.jsonObject }
+            .filter { it["target"]!!.toString() == entityId }
+        assertTrue(usages.size == 4, "Expected four BookEntity type usages, got $usages")
+    }
+
     private fun sourceUnit(component: String, path: String) = buildJsonObject {
         put("id", "$component:$path")
         put("component", component)
