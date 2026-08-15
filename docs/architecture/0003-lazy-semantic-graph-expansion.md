@@ -105,6 +105,12 @@ freshness/completeness instead of silently scanning all dependencies.
   all resolved dependency symbols.
 - Query latency may include a one-time segment materialization; results and
   logs must say when that happened.
+- Demand materialization must not read a complete artifact blob or decoded
+  `GraphArtifact` into memory. The cache blob remains the verified immutable
+  hand-off, but Core validates and reads the requested graph section as a
+  stream of length-delimited snapshot records and inserts them through batched
+  SQLite statements in one transaction. A failed record rolls that transaction
+  back. This is an optimization of demand loading, not source indexing.
 - Worker protocols need capability-aware segment requests, not only whole-file
   snapshots. The format remains versioned so a future protobuf descriptor/blob
   layout can evolve independently of Core's canonical facts.
@@ -119,3 +125,6 @@ freshness/completeness instead of silently scanning all dependencies.
   ([kide-ilj.18]).
 - Add lazy artifact and platform-module materialization, measured against the
   Spring CRUD fixture before replacing the current eager dependency path.
+- Make graph-fact blob sections streamable and bulk-insert their snapshots
+  during bounded demand materialization; measure peak memory and load latency
+  against the Spring CRUD fixture.
