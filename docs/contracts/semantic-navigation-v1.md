@@ -192,7 +192,7 @@ flags. Logs and worker diagnostics go to stderr.
 
 ### Selector JSONL pipelines
 
-`kide select --annotation <resolved-symbol-id>` emits one UTF-8 JSON record per
+`kide select --applies <resolved-symbol-id>` emits one UTF-8 JSON record per
 selected declaration when stdout is piped. Each record contains the full
 canonical `SymbolRecord` and its freshness, completeness, and provenance
 metadata; consumers use `symbol.id`, never rendered declaration text. The

@@ -40,7 +40,7 @@
             },
             "owner": null,
             "modifiers": [],
-            "annotation_targets": [],
+            "applied_symbols": [],
             "freshness": "fresh",
             "completeness": "complete",
             "provenance": {

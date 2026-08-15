@@ -84,8 +84,8 @@ internal object K2SnapshotEnricher {
                     val symbol = element.jsonObject
                     val targets = annotationTargets[symbol.requiredString("id")].orEmpty()
                     add(buildJsonObject {
-                        symbol.forEach { (key, value) -> if (key != "annotation_targets") put(key, value) }
-                        put("annotation_targets", buildJsonArray { targets.forEach { add(JsonPrimitive(it)) } })
+                        symbol.forEach { (key, value) -> if (key != "applied_symbols") put(key, value) }
+                        put("applied_symbols", buildJsonArray { targets.forEach { add(JsonPrimitive(it)) } })
                     })
                 }
             })

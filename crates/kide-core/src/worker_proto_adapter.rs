@@ -377,8 +377,8 @@ pub fn symbol_declaration(value: &SymbolRecord) -> worker_proto::SymbolDeclarati
         }),
         owner_id: value.owner.as_ref().map(|owner| owner.as_str().to_owned()),
         modifiers: value.modifiers.clone(),
-        annotation_target_ids: value
-            .annotation_targets
+        applied_symbol_ids: value
+            .applied_symbols
             .iter()
             .map(|target| target.as_str().to_owned())
             .collect(),
@@ -467,8 +467,8 @@ pub fn decode_symbol_declaration(
         },
         owner: value.owner_id.map(SymbolId::new),
         modifiers: value.modifiers,
-        annotation_targets: value
-            .annotation_target_ids
+        applied_symbols: value
+            .applied_symbol_ids
             .into_iter()
             .map(SymbolId::new)
             .collect(),

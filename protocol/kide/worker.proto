@@ -88,7 +88,7 @@ message SymbolDeclaration {
   string freshness = 16;
   string completeness = 17;
   string component_id = 18;
-  repeated string annotation_target_ids = 15;
+  repeated string applied_symbol_ids = 15;
 }
 message AnalysisBatchResponse {
   repeated FileAnalysisSnapshot snapshots = 1;

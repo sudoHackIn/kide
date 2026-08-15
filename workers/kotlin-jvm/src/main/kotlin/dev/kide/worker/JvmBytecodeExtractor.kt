@@ -276,7 +276,7 @@ internal object JvmBytecodeExtractor {
             put("name_range", range())
             put("owner", owner)
             put("modifiers", buildJsonArray { modifiers(access).forEach { add(JsonPrimitive(it)) } })
-            put("annotation_targets", buildJsonArray { annotationTargets.forEach { add(JsonPrimitive(it)) } })
+            put("applied_symbols", buildJsonArray { annotationTargets.forEach { add(JsonPrimitive(it)) } })
             put("freshness", "fresh")
             put("completeness", "partial")
             put("provenance", provenance(artifactHash))

@@ -55,9 +55,9 @@ enum Command {
     },
     /// Select declarations through resolved semantic predicates.
     Select {
-        /// Resolved annotation SymbolId used as the bounded starting posting.
+        /// Resolved SymbolId applied to the declarations to select.
         #[arg(long)]
-        annotation: String,
+        applies: String,
         /// Apply the reusable Kotlin class view.
         #[arg(long)]
         kotlin_class: bool,
@@ -126,13 +126,13 @@ fn run() -> Result<QueryStatus> {
         Command::Status => pending("status", String::new()),
         Command::Symbols { query, short } => symbols(&cli.workspace, query, short || human_output),
         Command::Select {
-            annotation,
+            applies,
             kotlin_class,
             component,
             qualified_prefix,
         } => select_symbols(
             &cli.workspace,
-            annotation,
+            applies,
             kotlin_class,
             component,
             qualified_prefix,
@@ -264,7 +264,7 @@ fn symbols(workspace: &Path, query: String, short: bool) -> Result<QueryStatus> 
 
 fn select_symbols(
     workspace: &Path,
-    annotation: String,
+    applies: String,
     kotlin_class: bool,
     component: Option<String>,
     qualified_prefix: Option<String>,
@@ -279,9 +279,7 @@ fn select_symbols(
             .then_some(LanguageView::KotlinClass)
             .into_iter()
             .collect(),
-        predicates: vec![SelectorPredicate::ResolvedAnnotation(SymbolId::new(
-            annotation,
-        ))],
+        predicates: vec![SelectorPredicate::AppliedSymbol(SymbolId::new(applies))],
     };
     if let Some(component) = component {
         selector
@@ -990,7 +988,7 @@ mod tests {
             },
             owner: None,
             modifiers: vec![],
-            annotation_targets: vec![],
+            applied_symbols: vec![],
             freshness: kide_core::Freshness::Fresh,
             completeness: kide_core::Completeness::Complete,
             provenance: kide_core::Provenance {

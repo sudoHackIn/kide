@@ -331,7 +331,7 @@ pub struct SymbolRecord {
     #[serde(default)]
     pub modifiers: Vec<String>,
     #[serde(default)]
-    pub annotation_targets: Vec<SymbolId>,
+    pub applied_symbols: Vec<SymbolId>,
     pub freshness: Freshness,
     pub completeness: Completeness,
     pub provenance: Provenance,

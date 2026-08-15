@@ -475,7 +475,7 @@ impl IndexStore {
 
     /// Reverse resolved-annotation lookup. SQLite narrows by the posting
     /// index before Core decodes any compact `SymbolRecord` blobs.
-    pub fn symbols_annotated_with(
+    pub fn symbols_with_applied_symbol(
         &self,
         annotation: &SymbolId,
     ) -> Result<Vec<SymbolRecord>, IndexStoreError> {
@@ -780,7 +780,7 @@ fn insert_snapshot(
                 encode_stored_symbol(&StoredSymbolRecord::from(symbol))?
             ],
         )?;
-        for annotation in &symbol.annotation_targets {
+        for annotation in &symbol.applied_symbols {
             transaction.execute(
                 "INSERT INTO annotation_edges (source_unit_id, symbol_id, annotation_symbol_id) VALUES (?1, ?2, ?3)",
                 params![source.id.as_str(), symbol.id.as_str(), annotation.as_str()],
@@ -869,7 +869,7 @@ struct StoredSymbolRecord {
     name_range: ByteRange,
     owner: Option<SymbolId>,
     modifiers: Vec<String>,
-    annotation_targets: Vec<SymbolId>,
+    applied_symbols: Vec<SymbolId>,
     freshness: crate::Freshness,
     completeness: crate::Completeness,
 }
@@ -886,7 +886,7 @@ impl From<&SymbolRecord> for StoredSymbolRecord {
             name_range: symbol.name_range.bytes,
             owner: symbol.owner.clone(),
             modifiers: symbol.modifiers.clone(),
-            annotation_targets: symbol.annotation_targets.clone(),
+            applied_symbols: symbol.applied_symbols.clone(),
             freshness: symbol.freshness,
             completeness: symbol.completeness,
         }
@@ -920,7 +920,7 @@ impl StoredSymbolRecord {
             },
             owner: self.owner,
             modifiers: self.modifiers,
-            annotation_targets: self.annotation_targets,
+            applied_symbols: self.applied_symbols,
             freshness: self.freshness,
             completeness: self.completeness,
             provenance: provenance.clone(),
@@ -1199,7 +1199,7 @@ mod tests {
         let mut matching = snapshot(source.clone());
         let controller =
             SymbolId::new("jvm:org.springframework.web.bind.annotation.RestController");
-        matching.symbols[0].annotation_targets = vec![controller.clone()];
+        matching.symbols[0].applied_symbols = vec![controller.clone()];
         store
             .replace_snapshot(&source, &matching)
             .expect("stores matching symbol");
@@ -1214,13 +1214,13 @@ mod tests {
 
         assert_eq!(
             store
-                .symbols_annotated_with(&controller)
-                .expect("uses annotation posting"),
+                .symbols_with_applied_symbol(&controller)
+                .expect("uses applied-symbol posting"),
             matching.symbols
         );
         assert!(
             store
-                .symbols_annotated_with(&SymbolId::new("jvm:missing.Annotation"))
+                .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
                 .expect("empty posting")
                 .is_empty()
         );
@@ -1229,12 +1229,12 @@ mod tests {
             &Selector {
                 views: vec![LanguageView::KotlinClass],
                 predicates: vec![
-                    SelectorPredicate::ResolvedAnnotation(controller),
+                    SelectorPredicate::AppliedSymbol(controller),
                     SelectorPredicate::QualifiedNamePrefix("demo.Payment".to_owned()),
                 ],
             },
         )
-        .expect("plans from resolved annotation posting");
+        .expect("plans from resolved applied-symbol posting");
         assert_eq!(selected.state, SelectorState::Complete);
         assert_eq!(selected.symbols, matching.symbols);
     }
@@ -1276,7 +1276,7 @@ mod tests {
             },
             owner: None,
             modifiers: Vec::new(),
-            annotation_targets: Vec::new(),
+            applied_symbols: Vec::new(),
             freshness: Freshness::Fresh,
             completeness: Completeness::Complete,
             provenance: provenance.clone(),

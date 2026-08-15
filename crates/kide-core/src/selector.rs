@@ -19,7 +19,7 @@ pub enum LanguageView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorPredicate {
     Kind(SymbolKind),
-    ResolvedAnnotation(SymbolId),
+    AppliedSymbol(SymbolId),
     QualifiedNamePrefix(String),
     Language(Language),
     Component(ComponentId),
@@ -35,7 +35,7 @@ pub struct Selector {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorPlan {
-    ResolvedAnnotationPosting { annotation: SymbolId },
+    AppliedSymbolPosting { applied_symbol: SymbolId },
 }
 
 /// Explicit answer state: a partial snapshot is never reported as complete.
@@ -61,7 +61,7 @@ pub enum SelectorError {
     Store(#[from] IndexStoreError),
 }
 
-/// Compiles and executes a bounded selector. The resolved annotation posting
+/// Compiles and executes a bounded selector. The resolved applied-symbol posting
 /// is mandatory for this MVP, so evaluation never starts by decoding every
 /// symbol blob. Remaining predicates are applied only to posting candidates.
 pub fn select(store: &IndexStore, selector: &Selector) -> Result<SelectorResult, SelectorError> {
@@ -69,15 +69,15 @@ pub fn select(store: &IndexStore, selector: &Selector) -> Result<SelectorResult,
     let annotation = predicates
         .iter()
         .filter_map(|predicate| match predicate {
-            SelectorPredicate::ResolvedAnnotation(symbol) => Some(symbol.clone()),
+            SelectorPredicate::AppliedSymbol(symbol) => Some(symbol.clone()),
             _ => None,
         })
         .min_by(|left, right| left.as_str().cmp(right.as_str()))
         .ok_or(SelectorError::Unbounded)?;
-    let plan = SelectorPlan::ResolvedAnnotationPosting {
-        annotation: annotation.clone(),
+    let plan = SelectorPlan::AppliedSymbolPosting {
+        applied_symbol: annotation.clone(),
     };
-    let mut symbols = store.symbols_annotated_with(&annotation)?;
+    let mut symbols = store.symbols_with_applied_symbol(&annotation)?;
     symbols.retain(|symbol| {
         predicates
             .iter()
@@ -140,9 +140,7 @@ fn normalized_predicates(selector: &Selector) -> Vec<SelectorPredicate> {
 fn matches(symbol: &SymbolRecord, predicate: &SelectorPredicate) -> bool {
     match predicate {
         SelectorPredicate::Kind(kind) => symbol.kind == *kind,
-        SelectorPredicate::ResolvedAnnotation(annotation) => {
-            symbol.annotation_targets.contains(annotation)
-        }
+        SelectorPredicate::AppliedSymbol(annotation) => symbol.applied_symbols.contains(annotation),
         SelectorPredicate::QualifiedNamePrefix(prefix) => symbol
             .qualified_name
             .as_deref()
