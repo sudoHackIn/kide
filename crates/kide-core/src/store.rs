@@ -1330,6 +1330,39 @@ mod tests {
         assert_eq!(selected.symbols, matching.symbols);
     }
 
+    #[test]
+    fn qualified_symbol_locator_resolves_without_materializing_graph_facts() {
+        let directory = tempdir().expect("temporary directory");
+        let store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens store");
+        let mut dependency = source_unit("sha256:entity-jar");
+        dependency.id = SourceUnitId::new("jvm:sha256:entity-jar");
+        dependency.origin = SourceOrigin::Dependency;
+        let entity = SymbolId::new("jvm:sha256:entity-jar:jakarta.persistence.Entity");
+        store
+            .put_artifact_descriptor(&ArtifactDescriptor {
+                source_unit: dependency.clone(),
+                provenance: provenance(),
+                symbol_locators: vec![crate::SymbolLocator {
+                    qualified_name: "jakarta.persistence.Entity".to_owned(),
+                    symbol: entity.clone(),
+                }],
+            })
+            .expect("stores lightweight locator");
+
+        assert_eq!(
+            store
+                .symbols_with_qualified_name("jakarta.persistence.Entity")
+                .expect("resolves locator"),
+            vec![entity]
+        );
+        assert!(
+            store
+                .source_unit(&dependency.id)
+                .expect("does not materialize graph")
+                .is_none()
+        );
+    }
+
     fn source_unit(content: &str) -> SourceUnit {
         SourceUnit {
             id: SourceUnitId::new("gradle:app:main:PaymentService.kt"),
