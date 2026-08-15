@@ -13,9 +13,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::{
-    AnalysisInput, ByteRange, CallEdge, ComponentId, DiagnosticRecord, FileAnalysisSnapshot,
-    HierarchyEdge, INDEX_FORMAT_VERSION, ProjectManifest, Provenance, ReferenceEdge,
-    SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TypeRecord,
+    AnalysisInput, ArtifactDescriptor, ByteRange, CallEdge, ComponentId, DiagnosticRecord,
+    FileAnalysisSnapshot, HierarchyEdge, INDEX_FORMAT_VERSION, ProjectManifest, Provenance,
+    ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TypeRecord,
     WORKER_PROTOCOL_VERSION, WorkspacePath,
 };
 
@@ -125,6 +125,13 @@ CREATE TABLE IF NOT EXISTS annotation_edges (
 );
 CREATE INDEX IF NOT EXISTS annotations_by_target
     ON annotation_edges(annotation_symbol_id, source_unit_id, symbol_id);
+"#;
+
+const MIGRATION_4: &str = r#"
+CREATE TABLE IF NOT EXISTS artifact_catalog (
+    source_unit_id TEXT PRIMARY KEY,
+    descriptor_json TEXT NOT NULL
+);
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -257,6 +264,19 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
         }
+        let migration_4: Option<u32> = self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 4",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if migration_4.is_none() {
+            self.connection.execute_batch(MIGRATION_4)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
+        }
         Ok(())
     }
 
@@ -279,6 +299,23 @@ impl IndexStore {
                 manifest.fingerprint.as_str(),
                 manifest.provenance.protocol_version,
                 serde_json::to_string(manifest)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records immutable dependency identity without copying its graph facts
+    /// into the live index. A demand path may materialize it later.
+    pub fn put_artifact_descriptor(
+        &self,
+        descriptor: &ArtifactDescriptor,
+    ) -> Result<(), IndexStoreError> {
+        self.connection.execute(
+            "INSERT INTO artifact_catalog (source_unit_id, descriptor_json) VALUES (?1, ?2)
+             ON CONFLICT(source_unit_id) DO UPDATE SET descriptor_json=excluded.descriptor_json",
+            params![
+                descriptor.source_unit.id.as_str(),
+                serde_json::to_string(descriptor)?
             ],
         )?;
         Ok(())

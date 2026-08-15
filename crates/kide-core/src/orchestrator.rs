@@ -207,9 +207,7 @@ fn index_batch_with_optional_cache(
         run.analyzed += 1;
     }
     match artifact_cache {
-        Some((cache, staging)) => {
-            index_dependencies_from_cache(store, &mut supervisor, &mut run, cache, staging)?
-        }
+        Some((_cache, _staging)) => index_dependency_catalog(store, &mut supervisor)?,
         None => index_dependencies(store, &mut supervisor, &mut run)?,
     }
     store.put_manifest(manifest)?;
@@ -217,6 +215,40 @@ fn index_batch_with_optional_cache(
     Ok(run)
 }
 
+fn index_dependency_catalog(
+    store: &IndexStore,
+    supervisor: &mut WorkerSupervisor,
+) -> Result<(), IndexOrchestratorError> {
+    let mut cursor = None;
+    let mut page = 0_u64;
+    loop {
+        let response = supervisor.request(WorkerEnvelope::new(
+            format!("index-artifact-descriptors-{page}"),
+            WorkerMessage::ArtifactDiscoveryRequest(ArtifactDiscoveryRequest {
+                workspace_root: WorkspacePath::new("."),
+                max_artifacts: 64,
+                cursor: cursor.clone(),
+            }),
+        ))?;
+        let WorkerMessage::ArtifactDiscoveryResponse(response) = response.message else {
+            return Err(IndexOrchestratorError::InvalidResponse {
+                received: Box::new(response.message),
+            });
+        };
+        for descriptor in &response.artifacts {
+            store.put_artifact_descriptor(descriptor)?;
+        }
+        match response.next_cursor {
+            Some(next) => {
+                cursor = Some(next);
+                page += 1
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+#[allow(dead_code)] // Retained as the demand-materialization implementation while callers move to catalog-first.
 fn index_dependencies_from_cache(
     store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
