@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, path::Path};
 
+use prost::Message;
 use thiserror::Error;
 
 use crate::{
@@ -20,6 +21,19 @@ pub struct IndexRun {
     pub worker_starts: u64,
     pub dependency_analyzed: usize,
     pub dependency_reused: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterializationBudget {
+    pub remaining_artifacts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationOutcome {
+    Materialized,
+    AlreadyMaterialized,
+    BudgetExhausted,
+    NotCataloged,
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +99,58 @@ pub fn materialize_artifact(
     // only a verified hand-off buffer and must not retain a second full copy.
     std::fs::remove_file(staged).map_err(ArtifactBlobCacheError::from)?;
     Ok(promoted)
+}
+
+/// Resolves one catalog descriptor on demand. This is deliberately bounded:
+/// callers receive `BudgetExhausted` rather than triggering a classpath scan.
+pub fn materialize_catalog_artifact(
+    store: &mut IndexStore,
+    supervisor: &mut WorkerSupervisor,
+    cache: &ArtifactBlobCache,
+    workspace_root: WorkspacePath,
+    source_unit: &crate::SourceUnitId,
+    staging_directory: &Path,
+    budget: &mut MaterializationBudget,
+) -> Result<MaterializationOutcome, IndexOrchestratorError> {
+    if store.source_unit(source_unit)?.is_some() {
+        return Ok(MaterializationOutcome::AlreadyMaterialized);
+    }
+    let Some(descriptor) = store.artifact_descriptor(source_unit)? else {
+        return Ok(MaterializationOutcome::NotCataloged);
+    };
+    if budget.remaining_artifacts == 0 {
+        return Ok(MaterializationOutcome::BudgetExhausted);
+    }
+    budget.remaining_artifacts -= 1;
+    let key = ArtifactBlobKey::new(
+        descriptor.source_unit.content.clone(),
+        &descriptor.provenance,
+    );
+    materialize_artifact(
+        supervisor,
+        cache,
+        workspace_root,
+        descriptor,
+        staging_directory,
+        format!("demand-materialize-{}", source_unit.as_str()),
+    )?;
+    let payload = cache
+        .load(&key)?
+        .ok_or(IndexOrchestratorError::InvalidStagedArtifact)?;
+    let layout = crate::artifact_blob_layout::ArtifactBlobLayout::validate(payload)
+        .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
+    let graph = crate::artifact_proto::GraphArtifact::decode(
+        layout
+            .section(crate::artifact_proto::ArtifactBlobSectionKind::GraphFacts)
+            .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?,
+    )
+    .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
+    for snapshot in crate::artifact_proto_adapter::decode_graph_artifact(graph)
+        .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?
+    {
+        store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
+    }
+    Ok(MaterializationOutcome::Materialized)
 }
 
 fn sha256_bytes(value: &Fingerprint) -> Option<[u8; 32]> {

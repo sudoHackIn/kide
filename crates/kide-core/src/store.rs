@@ -321,6 +321,16 @@ impl IndexStore {
         Ok(())
     }
 
+    pub fn artifact_descriptor(
+        &self,
+        source_unit: &SourceUnitId,
+    ) -> Result<Option<ArtifactDescriptor>, IndexStoreError> {
+        self.json_optional(
+            "SELECT descriptor_json FROM artifact_catalog WHERE source_unit_id = ?1",
+            source_unit.as_str(),
+        )
+    }
+
     pub fn manifest(
         &self,
         workspace: &crate::WorkspaceId,
