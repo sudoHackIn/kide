@@ -114,7 +114,7 @@ internal class KotlinStructuralExtractor : AutoCloseable {
                     put("name_range", sourceRange(source.requiredString("id"), contents, nameRange.startOffset, nameRange.endOffset))
                     put("owner", ownerSymbolId(source, declaration))
                     put("modifiers", stringArray(modifiers(declaration)))
-                    put("annotations", stringArray(annotations(declaration)))
+                    put("annotation_targets", stringArray(emptyList()))
                     put("freshness", "fresh")
                     put("completeness", "partial")
                     put("provenance", provenance)
@@ -168,7 +168,7 @@ internal class KotlinStructuralExtractor : AutoCloseable {
                 put("name_range", sourceRange(source.requiredString("id"), contents, keyword.startOffset, keyword.endOffset))
                 put("owner", "kotlin:${source.requiredString("component")}:${source.requiredString("path")}#class:$ownerName:$ownerOffset")
                 put("modifiers", stringArray(modifiers(constructor)))
-                put("annotations", stringArray(annotations(constructor)))
+                put("annotation_targets", stringArray(emptyList()))
                 put("freshness", "fresh")
                 put("completeness", "partial")
                 put("provenance", provenance)
@@ -208,7 +208,7 @@ internal class KotlinStructuralExtractor : AutoCloseable {
                 put("name_range", sourceRange(source.requiredString("id"), contents, nameRange.startOffset, nameRange.endOffset))
                 put("owner", ownerSymbolId(source, owner))
                 put("modifiers", stringArray(constructor?.let(::modifiers) ?: emptyList()))
-                put("annotations", stringArray(constructor?.let(::annotations) ?: emptyList()))
+                put("annotation_targets", stringArray(emptyList()))
                 put("freshness", "fresh")
                 put("completeness", "partial")
                 put("provenance", provenance)
@@ -351,9 +351,6 @@ internal class KotlinStructuralExtractor : AutoCloseable {
             ?.map { child -> child.text }
             ?.filter { text -> text.isNotBlank() }
             ?: emptyList()
-
-    private fun annotations(declaration: org.jetbrains.kotlin.psi.KtModifierListOwner): List<String> =
-        declaration.annotationEntries.map { annotation -> annotation.shortName?.asString() ?: annotation.text }
 
     private fun publicApiFingerprint(symbols: List<SymbolFact>): String = fingerprint(
         symbols.map { symbol ->

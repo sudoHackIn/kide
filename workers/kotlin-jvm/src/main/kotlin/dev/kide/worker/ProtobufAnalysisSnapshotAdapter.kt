@@ -63,7 +63,6 @@ internal object ProtobufAnalysisSnapshotAdapter {
                 value["signature"]?.jsonPrimitive?.contentOrNull?.let(::setSignature)
                 value["owner"]?.jsonPrimitive?.contentOrNull?.let(::setOwnerId)
                 addAllModifiers(value["modifiers"]!!.jsonArray.map { it.jsonPrimitive.content })
-                addAllAnnotations(value["annotations"]!!.jsonArray.map { it.jsonPrimitive.content })
                 addAllAnnotationTargetIds(value["annotation_targets"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList())
             }.build()
     }
@@ -298,7 +297,6 @@ internal object ProtobufAnalysisSnapshotAdapter {
                         })
                         put("owner", nullable(symbol.ownerId, symbol.hasOwnerId()))
                         put("modifiers", buildJsonArray { symbol.modifiersList.forEach { add(JsonPrimitive(it)) } })
-                        put("annotations", buildJsonArray { symbol.annotationsList.forEach { add(JsonPrimitive(it)) } })
                         put("annotation_targets", buildJsonArray { symbol.annotationTargetIdsList.forEach { add(JsonPrimitive(it)) } })
                         put("freshness", symbol.freshness)
                         put("completeness", symbol.completeness)

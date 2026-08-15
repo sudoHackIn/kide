@@ -286,7 +286,6 @@ mod worker_framing_tests {
             },
             owner: None,
             modifiers: vec!["public".into()],
-            annotations: vec![],
             annotation_targets: vec![],
             freshness: Freshness::Fresh,
             completeness: Completeness::Complete,

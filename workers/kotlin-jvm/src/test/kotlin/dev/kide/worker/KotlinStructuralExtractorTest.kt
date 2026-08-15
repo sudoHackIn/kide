@@ -49,7 +49,7 @@ class KotlinStructuralExtractorTest {
         assertTrue(symbols.any { it["name"]!!.jsonPrimitive.content == "Nested" && it["kind"]!!.jsonPrimitive.content == "class" })
         assertTrue(symbols.count { it["name"]!!.jsonPrimitive.content == "topLevel" } == 2)
         assertTrue(symbols.any { it["name"]!!.jsonPrimitive.content == "<init>" && it["kind"]!!.jsonPrimitive.content == "constructor" })
-        assertTrue(symbols.single { it["name"]!!.jsonPrimitive.content == "Outer" }["annotations"]!!.jsonArray.any { it.jsonPrimitive.content == "Deprecated" })
+        assertTrue(symbols.single { it["name"]!!.jsonPrimitive.content == "Outer" }["annotation_targets"]!!.jsonArray.isEmpty())
         assertTrue(first["references"]!!.jsonArray.isEmpty())
         assertTrue(first["calls"]!!.jsonArray.isEmpty())
         assertTrue(first["occurrences"]!!.jsonArray.all { occurrence -> occurrence.jsonObject["target"] == null || occurrence.jsonObject["target"]!!.toString() == "null" })

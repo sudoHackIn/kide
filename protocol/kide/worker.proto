@@ -85,13 +85,10 @@ message SymbolDeclaration {
   ByteRange name_range = 12;
   optional string owner_id = 13;
   repeated string modifiers = 14;
-  repeated string annotations = 15;
   string freshness = 16;
   string completeness = 17;
   string component_id = 18;
-  // Compiler-resolved annotation declaration symbols. `annotations` remains
-  // display/fallback spelling and must not be used for semantic selection.
-  repeated string annotation_target_ids = 19;
+  repeated string annotation_target_ids = 15;
 }
 message AnalysisBatchResponse {
   repeated FileAnalysisSnapshot snapshots = 1;

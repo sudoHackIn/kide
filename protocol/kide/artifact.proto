@@ -91,12 +91,11 @@ message ArtifactSymbol {
   ArtifactRange name_range = 10;
   optional string owner_id = 11;
   repeated string modifiers = 12;
-  repeated string annotations = 13;
   string freshness = 14;
   string completeness = 15;
   string component_id = 16;
   uint32 provenance_index = 17;
-  repeated string annotation_target_ids = 18;
+  repeated string annotation_target_ids = 13;
 }
 
 message ArtifactOccurrence {

@@ -198,7 +198,7 @@ internal object JvmBytecodeExtractor {
         private lateinit var className: String
         private var classAccess: Int = 0
         private var classSignature: String? = null
-        private val annotations = mutableListOf<String>()
+        private val annotationTargets = mutableListOf<String>()
 
         override fun visit(version: Int, access: Int, name: String, signature: String?, superName: String?, interfaces: Array<out String>) {
             classId = symbolId(name)
@@ -216,7 +216,7 @@ internal object JvmBytecodeExtractor {
         }
 
         override fun visitAnnotation(descriptor: String, visible: Boolean): AnnotationVisitor? {
-            annotations += Type.getType(descriptor).className
+            annotationTargets += symbolId(Type.getType(descriptor).internalName)
             return null
         }
 
@@ -229,7 +229,6 @@ internal object JvmBytecodeExtractor {
                 signature = signature ?: Type.getType(descriptor).className,
                 owner = classId,
                 access = access,
-                annotations = emptyList(),
             )
             return null
         }
@@ -244,7 +243,6 @@ internal object JvmBytecodeExtractor {
                 signature = signature ?: descriptor,
                 owner = classId,
                 access = access,
-                annotations = emptyList(),
             )
             return null
         }
@@ -258,13 +256,13 @@ internal object JvmBytecodeExtractor {
                 signature = classSignature,
                 owner = null,
                 access = classAccess,
-                annotations = annotations.sorted(),
+                annotationTargets = annotationTargets.sorted(),
             )
             symbols.sortBy { it.toString() }
         }
 
         private fun symbol(
-            id: String, kind: String, name: String, qualifiedName: String, signature: String?, owner: String?, access: Int, annotations: List<String>,
+            id: String, kind: String, name: String, qualifiedName: String, signature: String?, owner: String?, access: Int, annotationTargets: List<String> = emptyList(),
         ): JsonElement = buildJsonObject {
             put("id", id)
             put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", id) })
@@ -278,7 +276,7 @@ internal object JvmBytecodeExtractor {
             put("name_range", range())
             put("owner", owner)
             put("modifiers", buildJsonArray { modifiers(access).forEach { add(JsonPrimitive(it)) } })
-            put("annotations", buildJsonArray { annotations.forEach { add(JsonPrimitive(it)) } })
+            put("annotation_targets", buildJsonArray { annotationTargets.forEach { add(JsonPrimitive(it)) } })
             put("freshness", "fresh")
             put("completeness", "partial")
             put("provenance", provenance(artifactHash))
