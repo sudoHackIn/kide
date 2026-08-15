@@ -168,8 +168,16 @@ fn target_from_argument_or_stdin(target: Option<String>) -> Result<String> {
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    let response: QueryResponse = serde_json::from_str(input.trim())
-        .map_err(|error| anyhow::anyhow!("--stdin expects one kide JSON response: {error}"))?;
+    target_from_pipe_text(input.trim())
+}
+
+fn target_from_pipe_text(input: &str) -> Result<String> {
+    if let Ok(record) = serde_json::from_str::<kide_core::SelectorRecord>(input) {
+        return Ok(record.symbol.id.as_str().to_owned());
+    }
+    let response: QueryResponse = serde_json::from_str(input).map_err(|error| {
+        anyhow::anyhow!("--stdin expects one kide JSON response or selector JSONL record: {error}")
+    })?;
     target_from_pipe_response(response)
 }
 
@@ -850,7 +858,9 @@ fn exit_code(status: QueryStatus) -> ExitCode {
 mod tests {
     use clap::CommandFactory;
 
-    use super::{Cli, ExitCode, byte_to_location, exit_code, target_from_symbols};
+    use super::{
+        Cli, ExitCode, byte_to_location, exit_code, target_from_pipe_text, target_from_symbols,
+    };
 
     #[test]
     fn cli_definition_is_valid() {
@@ -892,6 +902,54 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn selector_jsonl_record_is_a_navigation_target() {
+        let record = kide_core::SelectorRecord {
+            symbol: test_symbol(),
+            metadata: kide_core::ResultMetadata::empty(),
+        };
+        assert_eq!(
+            target_from_pipe_text(&serde_json::to_string(&record).unwrap()).unwrap(),
+            "kotlin:controller"
+        );
+    }
+
+    fn test_symbol() -> kide_core::SymbolRecord {
+        kide_core::SymbolRecord {
+            id: kide_core::SymbolId::new("kotlin:controller"),
+            backend_key: kide_core::BackendKey {
+                backend: "test".into(),
+                schema_version: 1,
+                value: "key".into(),
+            },
+            language: kide_core::Language::Kotlin,
+            kind: kide_core::SymbolKind::Class,
+            name: "Controller".into(),
+            qualified_name: None,
+            signature: None,
+            component: kide_core::ComponentId::new("test"),
+            declaration: kide_core::SourceRange {
+                source_unit: kide_core::SourceUnitId::new("test"),
+                bytes: kide_core::ByteRange { start: 0, end: 0 },
+            },
+            name_range: kide_core::SourceRange {
+                source_unit: kide_core::SourceUnitId::new("test"),
+                bytes: kide_core::ByteRange { start: 0, end: 0 },
+            },
+            owner: None,
+            modifiers: vec![],
+            annotation_targets: vec![],
+            freshness: kide_core::Freshness::Fresh,
+            completeness: kide_core::Completeness::Complete,
+            provenance: kide_core::Provenance {
+                backend: "test".into(),
+                backend_version: "1".into(),
+                protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
+                analysis_options: kide_core::Fingerprint::new("test"),
+            },
+        }
     }
 
     #[test]
