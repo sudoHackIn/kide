@@ -127,7 +127,7 @@ CREATE INDEX IF NOT EXISTS annotations_by_target
     ON annotation_edges(annotation_symbol_id, source_unit_id, symbol_id);
 "#;
 
-const SYMBOL_RECORD_FORMAT_VERSION: u8 = 1;
+const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
 
 /// Failures that Core can surface without treating a partially written index as
 /// a valid one.
@@ -176,7 +176,7 @@ pub struct IndexStore {
 impl IndexStore {
     /// Standard per-workspace location selected in ADR 0002.
     pub fn default_path(workspace_root: &Path) -> PathBuf {
-        workspace_root.join(".kide/index-v4.sqlite3")
+        workspace_root.join(".kide/index-v5.sqlite3")
     }
 
     /// Opens (and, on first use, creates) the current SQLite index format.
@@ -958,6 +958,7 @@ mod tests {
         Fingerprint, Freshness, HierarchyEdge, Language, OccurrenceKind, Precision,
         ProjectManifest, Provenance, SourceOccurrence, SourceOrigin, SourceRange, SymbolKind,
         WorkspaceId, WorkspacePath,
+        selector::{LanguageView, Selector, SelectorPredicate, SelectorState, select},
     };
 
     use super::*;
@@ -1095,8 +1096,8 @@ mod tests {
         let connection = Connection::open(&path).expect("opens raw index");
         connection
             .execute(
-                "UPDATE kide_metadata SET value = '5' WHERE key = 'index_format_version'",
-                [],
+                "UPDATE kide_metadata SET value = ?1 WHERE key = 'index_format_version'",
+                params![(INDEX_FORMAT_VERSION + 1).to_string()],
             )
             .expect("changes version");
         drop(connection);
@@ -1108,9 +1109,9 @@ mod tests {
         assert!(matches!(
             error,
             IndexStoreError::IncompatibleIndexFormat {
-                found: 5,
-                supported: 4
-            }
+                found,
+                supported
+            } if found == INDEX_FORMAT_VERSION + 1 && supported == INDEX_FORMAT_VERSION
         ));
     }
 
@@ -1226,6 +1227,19 @@ mod tests {
                 .expect("empty posting")
                 .is_empty()
         );
+        let selected = select(
+            &store,
+            &Selector {
+                views: vec![LanguageView::KotlinClass],
+                predicates: vec![
+                    SelectorPredicate::ResolvedAnnotation(controller),
+                    SelectorPredicate::QualifiedNamePrefix("demo.Payment".to_owned()),
+                ],
+            },
+        )
+        .expect("plans from resolved annotation posting");
+        assert_eq!(selected.state, SelectorState::Complete);
+        assert_eq!(selected.symbols, matching.symbols);
     }
 
     fn source_unit(content: &str) -> SourceUnit {
