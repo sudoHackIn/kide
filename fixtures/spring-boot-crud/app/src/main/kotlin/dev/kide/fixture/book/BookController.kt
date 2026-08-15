@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.transaction.annotation.Transactional
 
 interface BookRepository : JpaRepository<BookEntity, Long>
 
@@ -27,6 +28,7 @@ class BookController(private val repository: BookRepository) {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @Transactional
     fun create(@Valid @RequestBody request: CreateBookRequest): BookEntity =
         repository.save(BookEntity(title = request.title, author = request.author))
 }

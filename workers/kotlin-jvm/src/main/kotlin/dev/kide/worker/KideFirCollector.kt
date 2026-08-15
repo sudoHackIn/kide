@@ -59,8 +59,8 @@ internal object KideFirCollector {
         if (supertypeKey != "class:kotlin.Any") hierarchy.add(K2HierarchyEdge(subtypeKey, supertypeKey))
     }
 
-    internal fun recordAnnotation(sourcePath: String, owner: FirClass, annotation: ConeClassLikeType) {
-        annotations.add(K2ResolvedAnnotation(sourcePath, "class:${owner.symbol.classId.asSingleFqName().asString()}", "class:${annotation.lookupTag.classId.asSingleFqName().asString()}"))
+    internal fun recordAnnotation(sourcePath: String, owner: FirBasedSymbol<*>, annotation: ConeClassLikeType) {
+        annotations.add(K2ResolvedAnnotation(sourcePath, targetKey(owner), "class:${annotation.lookupTag.classId.asSingleFqName().asString()}"))
     }
 
     internal fun recordOverride(overriding: FirCallableSymbol<*>, overridden: FirCallableSymbol<*>) {
@@ -168,7 +168,7 @@ private object KideClassHierarchyChecker : FirDeclarationChecker<FirClass>(MppCh
         val sourcePath = context.containingFile?.path ?: return
         declaration.annotations.forEach { annotation ->
             val type = (annotation.annotationTypeRef as? FirResolvedTypeRef)?.coneType as? ConeClassLikeType ?: return@forEach
-            KideFirCollector.recordAnnotation(sourcePath, declaration, type)
+            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type)
         }
     }
 }
@@ -179,6 +179,11 @@ private object KideFunctionOverrideChecker : FirDeclarationChecker<FirNamedFunct
         val owner = context.findClosestClassOrObject() ?: return
         declaration.symbol.overriddenFunctions(owner).forEach { overridden ->
             KideFirCollector.recordOverride(declaration.symbol, overridden)
+        }
+        val sourcePath = context.containingFile?.path ?: return
+        declaration.annotations.forEach { annotation ->
+            val type = (annotation.annotationTypeRef as? FirResolvedTypeRef)?.coneType as? ConeClassLikeType ?: return@forEach
+            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type)
         }
     }
 }

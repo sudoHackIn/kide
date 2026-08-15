@@ -46,7 +46,7 @@ internal object K2SnapshotEnricher {
         val owners = enclosingSymbols(snapshot["symbols"]!!.jsonArray)
         val snapshotSymbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject.requiredString("id") }.toSet()
         val annotationTargets = annotationsBySource[path].orEmpty().mapNotNull { annotation ->
-            val owner = targets[annotation.ownerKey] ?: return@mapNotNull null
+            val owner = targets[annotation.ownerKey] ?: symbolForLooseCallableKey(snapshot["symbols"]!!.jsonArray, annotation.ownerKey) ?: return@mapNotNull null
             val target = targets[annotation.targetKey] ?: return@mapNotNull null
             owner to target
         }.groupBy({ it.first }, { it.second }).mapValues { (_, targets) -> targets.distinct().sorted() }
@@ -137,6 +137,16 @@ internal object K2SnapshotEnricher {
         .groupBy({ it.first }, { it.second })
         .mapNotNull { (key, ids) -> ids.distinct().singleOrNull()?.let { key to it } }
         .toMap()
+
+    private fun symbolForLooseCallableKey(symbols: List<JsonElement>, key: String): String? {
+        if (!key.startsWith("callable:")) return null
+        val name = key.substringBefore('#').substringAfterLast('.')
+        return symbols.map { it.jsonObject }
+            .filter { it.requiredString("name") == name }
+            .map { it.requiredString("id") }
+            .distinct()
+            .singleOrNull()
+    }
 
     private fun callableKey(qualifiedName: String, signature: String?, member: Boolean): String {
         val owner = qualifiedName.substringBeforeLast('.', missingDelimiterValue = "")

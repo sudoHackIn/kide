@@ -96,6 +96,29 @@ class K2SpringCrudIntegrationTest {
         assertTrue(usages.size == 4, "Expected four BookEntity type usages, got $usages")
     }
 
+    @Test
+    fun emitsResolvedAppliedSymbolsForGenericSelectors() {
+        val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
+        val payload = buildJsonObject {
+            put("source_units", buildJsonArray {
+                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
+                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
+            })
+        }
+        val snapshots = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
+        val controller = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookController.kt") }
+        val entity = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookEntity.kt") }
+
+        fun applied(symbols: kotlinx.serialization.json.JsonObject, name: String) = symbols["symbols"]!!.jsonArray
+            .map { it.jsonObject }
+            .single { it["name"]!!.toString().contains(name) }["applied_symbols"]!!.jsonArray
+            .map { it.toString() }
+
+        assertTrue(applied(controller, "BookController").any { it.contains("RestController") })
+        assertTrue(applied(entity, "BookEntity").any { it.contains("jakarta.persistence.Entity") })
+        assertTrue(applied(controller, "create").any { it.contains("Transactional") }, "create applied symbols: ${applied(controller, "create")}")
+    }
+
     private fun sourceUnit(component: String, path: String) = buildJsonObject {
         put("id", "$component:$path")
         put("component", component)
