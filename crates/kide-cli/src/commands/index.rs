@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 use kide_core::{
     ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, Provenance, QueryStatus,
     WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry, collect_workspace_text,
-    discover_workspace, index_batch_with_artifact_cache_and_provenance, index_selected_batches,
+    discover_workspace, index_batch_with_artifact_cache_and_provenance, index_dependency_artifacts,
+    index_selected_batches,
 };
 
 pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
@@ -83,7 +84,19 @@ pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QuerySt
             },
         )?
     } else {
-        index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
+        let mut source_run =
+            index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?;
+        let dependency_run = index_dependency_artifacts(
+            &mut store,
+            &discovery.manifest,
+            selection.batches[0].worker.installation.launch.clone(),
+            &artifact_cache,
+            &staging,
+        )?;
+        source_run.dependency_analyzed = dependency_run.dependency_analyzed;
+        source_run.dependency_reused = dependency_run.dependency_reused;
+        source_run.worker_starts += dependency_run.worker_starts;
+        source_run
     };
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;

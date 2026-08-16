@@ -6,12 +6,12 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::{
-    plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
-    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
-    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
-    WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
-    WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
+    AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError,
+    ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
+    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError, ProjectManifest,
+    Provenance, SourceOrigin, SourceUnit, WorkerBatch, WorkerCapability, WorkerEnvelope,
+    WorkerLaunch, WorkerMessage, WorkerSelection, WorkerSupervisor, WorkerSupervisorError,
+    WorkspacePath, plan_invalidation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +117,30 @@ pub fn index_selected_batches(
         }
         analyze_selected_batch(store, manifest, batch, requested, index, &mut run)?;
     }
+    store.put_manifest(manifest)?;
+    Ok(run)
+}
+
+/// Indexes the immutable dependency artifact catalog independently from source
+/// batch partitioning. This keeps multi-module workspaces on the same bounded
+/// cache-aware path as a single source batch.
+pub fn index_dependency_artifacts(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    launch: WorkerLaunch,
+    cache: &ArtifactBlobCache,
+    staging_directory: &Path,
+) -> Result<IndexRun, IndexOrchestratorError> {
+    let mut supervisor = WorkerSupervisor::new(launch);
+    supervisor.handshake("index-dependency-handshake")?;
+    let mut run = index_dependency_catalog(
+        store,
+        &mut supervisor,
+        manifest.root.clone(),
+        Some(cache),
+        Some(staging_directory),
+    )?;
+    run.worker_starts = supervisor.start_count();
     store.put_manifest(manifest)?;
     Ok(run)
 }
@@ -421,7 +445,19 @@ fn index_batch_with_optional_cache(
     // Keep the same cold worker alive for its dependency catalog request;
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
-    index_dependency_catalog(store, &mut supervisor)?;
+    if let Some((cache, staging_directory)) = artifact_cache {
+        let dependencies = index_dependency_catalog(
+            store,
+            &mut supervisor,
+            manifest.root.clone(),
+            Some(cache),
+            Some(staging_directory),
+        )?;
+        run.dependency_analyzed += dependencies.dependency_analyzed;
+        run.dependency_reused += dependencies.dependency_reused;
+    } else {
+        index_dependency_catalog(store, &mut supervisor, manifest.root.clone(), None, None)?;
+    }
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
     for expected in &reanalyze {
@@ -448,23 +484,33 @@ fn index_batch_with_optional_cache(
             run.removed += 1;
         }
     }
-    let _ = artifact_cache;
     store.put_manifest(manifest)?;
     run.worker_starts = supervisor.start_count();
     Ok(run)
 }
 
 fn index_dependency_catalog(
-    store: &IndexStore,
+    store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
-) -> Result<(), IndexOrchestratorError> {
+    workspace_root: WorkspacePath,
+    cache: Option<&ArtifactBlobCache>,
+    staging_directory: Option<&Path>,
+) -> Result<IndexRun, IndexOrchestratorError> {
     let mut cursor = None;
     let mut page = 0_u64;
+    let mut run = IndexRun {
+        reused: 0,
+        analyzed: 0,
+        removed: 0,
+        worker_starts: 0,
+        dependency_analyzed: 0,
+        dependency_reused: 0,
+    };
     loop {
         let response = supervisor.request(WorkerEnvelope::new(
             format!("index-artifact-descriptors-{page}"),
             WorkerMessage::ArtifactDiscoveryRequest(ArtifactDiscoveryRequest {
-                workspace_root: WorkspacePath::new("."),
+                workspace_root: workspace_root.clone(),
                 max_artifacts: 64,
                 cursor: cursor.clone(),
             }),
@@ -476,13 +522,32 @@ fn index_dependency_catalog(
         };
         for descriptor in &response.artifacts {
             store.put_artifact_descriptor(descriptor)?;
+            let (Some(cache), Some(staging_directory)) = (cache, staging_directory) else {
+                continue;
+            };
+            let mut budget = MaterializationBudget {
+                remaining_artifacts: 1,
+            };
+            match materialize_catalog_artifact(
+                store,
+                supervisor,
+                cache,
+                workspace_root.clone(),
+                &descriptor.source_unit.id,
+                staging_directory,
+                &mut budget,
+            )? {
+                MaterializationOutcome::Materialized => run.dependency_analyzed += 1,
+                MaterializationOutcome::AlreadyMaterialized => run.dependency_reused += 1,
+                MaterializationOutcome::BudgetExhausted | MaterializationOutcome::NotCataloged => {}
+            }
         }
         match response.next_cursor {
             Some(next) => {
                 cursor = Some(next);
                 page += 1
             }
-            None => return Ok(()),
+            None => return Ok(run),
         }
     }
 }
