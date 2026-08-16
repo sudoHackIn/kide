@@ -5,6 +5,7 @@
 //! either the old snapshot or the new one, never a mixture.
 
 use std::{
+    collections::{BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
@@ -916,6 +917,27 @@ impl IndexStore {
         )
     }
 
+    /// Returns direct and (when requested by the caller) descendant hierarchy
+    /// edges in breadth-first order. The persisted direct query is already
+    /// sorted, making this traversal deterministic even in a diamond graph.
+    pub fn implementations_of_transitive(
+        &self,
+        symbol: &SymbolId,
+    ) -> Result<Vec<HierarchyEdge>, IndexStoreError> {
+        let mut pending = VecDeque::from([symbol.clone()]);
+        let mut visited = BTreeSet::from([symbol.as_str().to_owned()]);
+        let mut result = Vec::new();
+        while let Some(supertype) = pending.pop_front() {
+            for edge in self.implementations_of(&supertype)? {
+                if visited.insert(edge.subtype.as_str().to_owned()) {
+                    pending.push_back(edge.subtype.clone());
+                    result.push(edge);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Source units whose persisted facts depend on declarations in `source`.
     /// This is deliberately conservative: reference, call, and hierarchy
     /// edges all participate, and the result is deterministic.
@@ -1451,6 +1473,46 @@ mod tests {
                 .diagnostics_for(&source.id)
                 .expect("diagnostics lookup"),
             snapshot.diagnostics
+        );
+    }
+
+    #[test]
+    fn transitive_implementations_are_breadth_first_and_cycle_safe() {
+        let directory = tempdir().expect("temporary index directory");
+        let source = source_unit("sha256:content-v1");
+        let mut snapshot = snapshot(source.clone());
+        let provider = snapshot.hierarchy[0].supertype.clone();
+        let service = snapshot.hierarchy[0].subtype.clone();
+        let concrete = SymbolId::new("kotlin:demo.ConcretePaymentService");
+        snapshot.hierarchy.push(HierarchyEdge {
+            subtype: concrete.clone(),
+            supertype: service.clone(),
+            precision: Precision::Exact,
+            provenance: provenance(),
+        });
+        // A malformed cycle must not make an interactive query loop forever.
+        snapshot.hierarchy.push(HierarchyEdge {
+            subtype: provider.clone(),
+            supertype: concrete.clone(),
+            precision: Precision::Exact,
+            provenance: provenance(),
+        });
+
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        store
+            .replace_snapshot(&source, &snapshot)
+            .expect("stores hierarchy");
+
+        let descendants = store
+            .implementations_of_transitive(&provider)
+            .expect("traverses hierarchy");
+        assert_eq!(
+            descendants
+                .into_iter()
+                .map(|edge| edge.subtype)
+                .collect::<Vec<_>>(),
+            vec![service, concrete]
         );
     }
 
