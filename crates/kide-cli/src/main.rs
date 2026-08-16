@@ -13,7 +13,8 @@ use kide_core::{
     ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload,
     QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolId, WorkerCapability,
     WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkspacePath, collect_workspace_text,
-    discover_workspace, index_batch_with_artifact_cache, index_selected_batches,
+    discover_workspace, document_from_bytes, index_batch_with_artifact_cache,
+    index_selected_batches,
 };
 
 /// Headless, persistent semantic code platform.
@@ -434,6 +435,15 @@ fn definition(workspace: &Path, value: String, human_output: bool) -> Result<Que
             ),
         },
         TargetResolution::NoResult => (QueryStatus::NoResult, None, Vec::new()),
+        TargetResolution::Stale => (
+            QueryStatus::Stale,
+            None,
+            vec![QueryProblem {
+                code: "stale_source_snapshot".to_owned(),
+                message: "the source file changed after it was indexed; run kide index".to_owned(),
+                retryable: true,
+            }],
+        ),
         TargetResolution::Ambiguous(candidates) => (
             QueryStatus::Ambiguous,
             None,
@@ -727,6 +737,7 @@ fn type_at(workspace: &Path, value: String, human_output: bool) -> Result<QueryS
 enum TargetResolution {
     Symbol(SymbolId),
     NoResult,
+    Stale,
     Ambiguous(Vec<SymbolId>),
 }
 
@@ -740,6 +751,17 @@ fn resolve_target(store: &IndexStore, workspace: &Path, value: &str) -> Result<T
     }
     if let Ok(location) = parse_location(value) {
         let source_text = std::fs::read_to_string(workspace.join(location.path.as_str()))?;
+        let units = store.source_units_at_path(&location.path)?;
+        if let [unit] = units.as_slice() {
+            let current =
+                document_from_bytes(location.path.clone(), source_text.as_bytes().to_vec())
+                    .map_err(|_| {
+                        anyhow::anyhow!("location source is not an eligible UTF-8 text file")
+                    })?;
+            if current.fingerprint != unit.content {
+                return Ok(TargetResolution::Stale);
+            }
+        }
         return Ok(
             match kide_core::query_resolver::resolve_location(store, &location, &source_text)? {
                 kide_core::query_resolver::LocationResolution::Symbol(symbol) => {
@@ -786,6 +808,15 @@ fn target_problem(
 ) -> (QueryStatus, Option<QueryPayload>, Vec<QueryProblem>) {
     match resolution {
         TargetResolution::NoResult => (QueryStatus::NoResult, None, Vec::new()),
+        TargetResolution::Stale => (
+            QueryStatus::Stale,
+            None,
+            vec![QueryProblem {
+                code: "stale_source_snapshot".to_owned(),
+                message: "the source file changed after it was indexed; run kide index".to_owned(),
+                retryable: true,
+            }],
+        ),
         TargetResolution::Ambiguous(candidates) => (
             QueryStatus::Ambiguous,
             None,
