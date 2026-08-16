@@ -112,9 +112,30 @@ internal object GradleProjectImporter {
      */
     private fun connector(root: Path): GradleConnector = GradleConnector.newConnector()
         .forProjectDirectory(root.toFile())
-        .also { connector -> localWrapperInstallation(root)?.let { connector.useInstallation(it.toFile()) } }
+        .also { connector -> resolveGradleInstallation(root)?.let { connector.useInstallation(it.toFile()) } }
 
-    private fun localWrapperInstallation(root: Path): Path? {
+    /**
+     * Resolves the local distribution without asking Tooling API to fetch the
+     * wrapper URL. An explicit worker setting wins so a caller may use a
+     * managed Gradle installation even when a project has a wrapper.
+     */
+    internal fun resolveGradleInstallation(
+        root: Path,
+        environment: Map<String, String> = System.getenv(),
+    ): Path? {
+        environment["KIDE_GRADLE_INSTALLATION"]
+            ?.takeIf(String::isNotBlank)
+            ?.let(Path::of)
+            ?.takeIf(::isGradleInstallation)
+            ?.let { return it }
+        val gradleUserHome = environment["GRADLE_USER_HOME"]
+            ?.takeIf(String::isNotBlank)
+            ?.let(Path::of)
+            ?: Path.of(System.getProperty("user.home"), ".gradle")
+        return localWrapperInstallation(root, gradleUserHome)
+    }
+
+    private fun localWrapperInstallation(root: Path, gradleUserHome: Path): Path? {
         val wrapper = root.resolve("gradle/wrapper/gradle-wrapper.properties")
         if (!wrapper.isRegularFile()) return null
         val properties = Properties().also { Files.newInputStream(wrapper).use(it::load) }
@@ -122,12 +143,14 @@ internal object GradleProjectImporter {
             ?.substringAfterLast('/')
             ?.removeSuffix(".zip")
             ?: return null
-        val candidates = Path.of(System.getProperty("user.home"), ".gradle", "wrapper", "dists", distribution)
+        val candidates = gradleUserHome.resolve("wrapper/dists").resolve(distribution)
         if (!candidates.isDirectory()) return null
         return Files.walk(candidates, 3).use { paths ->
-            paths.filter { path -> path.resolve("bin/gradle").isRegularFile() }.findFirst().orElse(null)
+            paths.filter(::isGradleInstallation).findFirst().orElse(null)
         }
     }
+
+    private fun isGradleInstallation(path: Path): Boolean = path.resolve("bin/gradle").isRegularFile()
 
     private fun manifest(
         root: Path,

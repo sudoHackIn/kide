@@ -53,6 +53,38 @@ class GradleProjectImporterTest {
         assertNotEquals(before, after)
     }
 
+    @Test
+    fun resolves_explicit_installation_before_local_wrapper_cache() {
+        val root = fixtureProject()
+        val explicit = Files.createTempDirectory("kide-gradle-explicit-")
+        val cache = Files.createTempDirectory("kide-gradle-cache-")
+        gradleInstallation(explicit)
+        gradleInstallation(cache.resolve("wrapper/dists/gradle-8.14-bin/hash/gradle-8.14"))
+        write(root.resolve("gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14-bin.zip")
+
+        assertEquals(
+            explicit,
+            GradleProjectImporter.resolveGradleInstallation(
+                root,
+                mapOf("KIDE_GRADLE_INSTALLATION" to explicit.toString(), "GRADLE_USER_HOME" to cache.toString()),
+            ),
+        )
+    }
+
+    @Test
+    fun resolves_installed_wrapper_distribution_from_gradle_user_home() {
+        val root = fixtureProject()
+        val cache = Files.createTempDirectory("kide-gradle-cache-")
+        val installation = cache.resolve("wrapper/dists/gradle-8.14-bin/hash/gradle-8.14")
+        gradleInstallation(installation)
+        write(root.resolve("gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14-bin.zip")
+
+        assertEquals(
+            installation,
+            GradleProjectImporter.resolveGradleInstallation(root, mapOf("GRADLE_USER_HOME" to cache.toString())),
+        )
+    }
+
     private fun fixtureProject(): Path {
         val root = Files.createTempDirectory("kide-gradle-import-")
         write(root.resolve("settings.gradle.kts"), """
@@ -81,5 +113,10 @@ class GradleProjectImporterTest {
     private fun write(path: Path, contents: String) {
         path.parent.createDirectories()
         Files.writeString(path, "$contents\n")
+    }
+
+    private fun gradleInstallation(path: Path) {
+        path.resolve("bin").createDirectories()
+        Files.writeString(path.resolve("bin/gradle"), "#!/bin/sh\n")
     }
 }
