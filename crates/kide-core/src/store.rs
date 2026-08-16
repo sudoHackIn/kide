@@ -9,14 +9,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::{
     AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
-    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, LexicalMatch, ProjectManifest,
-    Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord,
-    TextDocument, TypeRecord, WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
+    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
+    ProjectManifest, Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId,
+    SymbolId, SymbolRecord, TextDocument, TypeRecord, WORKER_PROTOCOL_VERSION, WorkspacePath,
 };
 
 const MIGRATION_1: &str = r#"
@@ -467,6 +467,20 @@ impl IndexStore {
         )
     }
 
+    /// A workspace index owns one current manifest; this supports cold CLI
+    /// status without needing the caller to reconstruct its WorkspaceId.
+    pub fn latest_manifest(&self) -> Result<Option<ProjectManifest>, IndexStoreError> {
+        self.connection
+            .query_row(
+                "SELECT record_json FROM project_manifests ORDER BY workspace_id LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(IndexStoreError::from))
+            .transpose()
+    }
+
     /// Atomically replaces every fact owned by one source unit. `expected`
     /// comes from discovery immediately before the worker was launched.
     pub fn replace_snapshot(
@@ -660,6 +674,37 @@ impl IndexStore {
         )?;
         let rows = statement
             .query_map(params![name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, name, record, source, provenance)| {
+                let record = decode_stored_symbol(&record)?;
+                let source_unit = serde_json::from_str(&source)?;
+                let provenance = bincode::deserialize(&provenance)?;
+                Ok(record.into_symbol(SymbolId::new(id), name, &source_unit, &provenance))
+            })
+            .collect()
+    }
+
+    /// Returns symbols whose simple names contain `query`, ignoring case.
+    /// Exact and qualified lookups remain separate so callers can prefer them
+    /// before falling back to this intentionally broader search.
+    pub fn symbols_matching_name(&self, query: &str) -> Result<Vec<SymbolRecord>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT symbols.symbol_id, symbols.name, symbols.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
+             FROM symbols JOIN source_snapshots USING (source_unit_id)
+             WHERE lower(symbols.name) LIKE '%' || lower(?1) || '%'
+             ORDER BY symbols.source_unit_id, symbols.name_start_byte, symbols.symbol_id",
+        )?;
+        let rows = statement
+            .query_map(params![query], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1336,11 +1381,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        selector::{select, LanguageView, Selector, SelectorPredicate, SelectorState},
         BackendKey, ByteRange, CallEdge, Completeness, Component, ComponentId, DiagnosticSeverity,
         Fingerprint, Freshness, HierarchyEdge, Language, OccurrenceKind, Precision,
         ProjectManifest, Provenance, SourceOccurrence, SourceOrigin, SourceRange, SymbolKind,
         WorkspaceId, WorkspacePath,
+        selector::{LanguageView, Selector, SelectorPredicate, SelectorState, select},
     };
 
     use super::*;
@@ -1463,10 +1508,12 @@ mod tests {
         );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
-        assert!(store
-            .symbols_named("PaymentService")
-            .expect("reads facts")
-            .is_empty());
+        assert!(
+            store
+                .symbols_named("PaymentService")
+                .expect("reads facts")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1603,10 +1650,12 @@ mod tests {
                 .expect("uses applied-symbol posting"),
             matching.symbols
         );
-        assert!(store
-            .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
-            .expect("empty posting")
-            .is_empty());
+        assert!(
+            store
+                .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
+                .expect("empty posting")
+                .is_empty()
+        );
         let selected = select(
             &store,
             &Selector {
@@ -1706,10 +1755,12 @@ mod tests {
                 .expect("resolves locator"),
             vec![entity]
         );
-        assert!(store
-            .source_unit(&dependency.id)
-            .expect("does not materialize graph")
-            .is_none());
+        assert!(
+            store
+                .source_unit(&dependency.id)
+                .expect("does not materialize graph")
+                .is_none()
+        );
     }
 
     fn source_unit(content: &str) -> SourceUnit {
