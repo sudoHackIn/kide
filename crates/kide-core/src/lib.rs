@@ -117,9 +117,9 @@ mod worker_framing_tests {
     use prost::Message;
 
     use crate::{
-        BackendKey, ByteRange, Completeness, ComponentId, Fingerprint, Freshness, Language,
-        Provenance, SourceOrigin, SourceRange, SourceUnit, SourceUnitId, SymbolId, SymbolKind,
-        SymbolRecord, WorkspacePath, worker_framing, worker_proto,
+        worker_framing, worker_proto, BackendKey, ByteRange, Completeness, ComponentId,
+        Fingerprint, Freshness, Language, Provenance, SourceOrigin, SourceRange, SourceUnit,
+        SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WorkspacePath,
     };
 
     #[test]
@@ -581,6 +581,7 @@ mod protocol;
 mod query;
 mod store;
 mod supervisor;
+mod worker_registry;
 
 pub use artifact_cache::*;
 pub use canonical::*;
@@ -591,6 +592,7 @@ pub use protocol::*;
 pub use query::*;
 pub use store::*;
 pub use supervisor::*;
+pub use worker_registry::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
@@ -599,4 +601,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 5;
+pub const INDEX_FORMAT_VERSION: u32 = 6;

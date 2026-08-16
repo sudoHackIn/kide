@@ -6,11 +6,12 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::{
-    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError, ArtifactBlobKey,
-    ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
-    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError, ProjectManifest,
-    SourceOrigin, SourceUnit, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSupervisor,
-    WorkerSupervisorError, WorkspacePath, plan_invalidation,
+    plan_invalidation, AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache,
+    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
+    IndexStoreError, ProjectManifest, SourceOrigin, SourceUnit, WorkerBatch, WorkerCapability,
+    WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection, WorkerSupervisor,
+    WorkerSupervisorError, WorkspacePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +53,124 @@ pub enum IndexOrchestratorError {
     MissingSnapshot { source_unit: String },
     #[error("worker returned {received:?}, expected analysis_batch_response")]
     InvalidResponse { received: Box<WorkerMessage> },
+    #[error("no compatible worker for {count} source batch(es)")]
+    UnsupportedBatches { count: usize },
+    #[error("worker {worker} no longer supports batch {component} ({language:?})")]
+    WorkerNoLongerCompatible {
+        worker: String,
+        component: String,
+        language: crate::Language,
+    },
+}
+
+/// Applies one global invalidation plan, then runs each selected cold worker
+/// only for its component/language batch.  The global plan is important: a
+/// per-batch invalidation pass would incorrectly delete another language's
+/// persisted source units.
+pub fn index_selected_batches(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    current: &[SourceUnit],
+    selection: &WorkerSelection,
+) -> Result<IndexRun, IndexOrchestratorError> {
+    if !selection.unsupported.is_empty() {
+        return Err(IndexOrchestratorError::UnsupportedBatches {
+            count: selection.unsupported.len(),
+        });
+    }
+    let persisted_sources = store
+        .source_units()?
+        .into_iter()
+        .filter(|source| source.origin != SourceOrigin::Dependency)
+        .collect::<Vec<_>>();
+    let actions = plan_invalidation(current, &persisted_sources);
+    let mut reanalyze = BTreeSet::new();
+    let mut run = IndexRun {
+        reused: 0,
+        analyzed: 0,
+        removed: 0,
+        worker_starts: 0,
+        dependency_analyzed: 0,
+        dependency_reused: 0,
+    };
+    for action in actions {
+        match action {
+            IndexAction::Reuse(_) => run.reused += 1,
+            IndexAction::Reanalyze { source_unit, .. } => {
+                reanalyze.insert(source_unit.id.as_str().to_owned());
+            }
+            IndexAction::Remove { source_unit } => {
+                store.remove_snapshot(&source_unit)?;
+                run.removed += 1;
+            }
+        }
+    }
+    for (index, batch) in selection.batches.iter().enumerate() {
+        let requested = batch
+            .source_units
+            .iter()
+            .filter(|source| reanalyze.contains(source.id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if requested.is_empty() {
+            continue;
+        }
+        analyze_selected_batch(store, manifest, batch, requested, index, &mut run)?;
+    }
+    store.put_manifest(manifest)?;
+    Ok(run)
+}
+
+fn analyze_selected_batch(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    batch: &WorkerBatch,
+    requested: Vec<SourceUnit>,
+    batch_index: usize,
+    run: &mut IndexRun,
+) -> Result<(), IndexOrchestratorError> {
+    let mut supervisor = WorkerSupervisor::new(batch.worker.installation.launch.clone());
+    let handshake = supervisor.handshake(format!("index-handshake-{batch_index}"))?;
+    let compatible = handshake.capabilities.languages.contains(&batch.language)
+        && handshake
+            .capabilities
+            .capabilities
+            .contains(&WorkerCapability::FileAnalysisSnapshot);
+    if !compatible {
+        return Err(IndexOrchestratorError::WorkerNoLongerCompatible {
+            worker: batch.worker.installation.name.clone(),
+            component: batch.component.as_str().to_owned(),
+            language: batch.language.clone(),
+        });
+    }
+    let response = supervisor.request(WorkerEnvelope::new(
+        format!("index-batch-{batch_index}"),
+        WorkerMessage::AnalyzeBatchRequest(AnalyzeBatchRequest {
+            workspace: manifest.workspace.clone(),
+            project_fingerprint: manifest.fingerprint.clone(),
+            requested_facts: vec![
+                AnalysisFact::Symbols,
+                AnalysisFact::Occurrences,
+                AnalysisFact::References,
+                AnalysisFact::Calls,
+                AnalysisFact::Hierarchy,
+                AnalysisFact::Types,
+            ],
+            source_units: requested.clone(),
+        }),
+    ))?;
+    let WorkerMessage::AnalysisBatchResponse(response) = response.message else {
+        return Err(IndexOrchestratorError::InvalidResponse {
+            received: Box::new(response.message),
+        });
+    };
+    let snapshots = validate_batch(&requested, response.snapshots)?;
+    for snapshot in snapshots {
+        store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
+        run.analyzed += 1;
+    }
+    run.worker_starts += supervisor.start_count();
+    Ok(())
 }
 
 /// Materializes a cache-miss artifact through the worker and atomically

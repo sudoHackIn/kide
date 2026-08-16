@@ -10,9 +10,10 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
 use kide_core::{
-    ArtifactBlobCache, CANONICAL_SCHEMA_VERSION, IndexStore, Language, QueryPayload, QueryProblem,
-    QueryResponse, QueryStatus, ResultMetadata, SymbolId, WorkerLaunch, WorkspacePath,
-    discover_workspace, index_batch_with_artifact_cache,
+    ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload,
+    QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolId, WorkerCapability,
+    WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkspacePath, discover_workspace,
+    index_batch_with_artifact_cache, index_selected_batches,
 };
 
 /// Headless, persistent semantic code platform.
@@ -773,11 +774,7 @@ fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
     let discovery = discover_workspace(&path)?;
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
-    let sources = discovery
-        .source_units
-        .into_iter()
-        .filter(|source| source.language == Language::Kotlin)
-        .collect::<Vec<_>>();
+    let sources = discovery.source_units;
     if force {
         tracing::info!(target: "kide::cli", sources = sources.len(), "forcing source reanalysis");
         for source in &sources {
@@ -790,14 +787,46 @@ fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
     let artifact_cache = ArtifactBlobCache::open(artifact_cache_root)?;
     let staging = discovery.root.join(".kide/staging");
     std::fs::create_dir_all(&staging)?;
-    let run = index_batch_with_artifact_cache(
-        &mut store,
+    let registry = WorkerRegistry::new(vec![kotlin_worker_installation(
+        &discovery.root,
+        verbosity,
+    )?]);
+    let selection = registry.select(
         &discovery.manifest,
-        &sources,
-        kotlin_worker_launch(&discovery.root, verbosity)?,
-        &artifact_cache,
-        &staging,
+        sources.clone(),
+        &[WorkerCapability::FileAnalysisSnapshot],
     )?;
+    if !selection.unsupported.is_empty() {
+        let unsupported = selection
+            .unsupported
+            .iter()
+            .map(|batch| serde_json::json!({
+                "component": batch.component.as_str(),
+                "language": batch.language,
+                "build_system": batch.build_system,
+                "source_units": batch.source_units.iter().map(|source| source.path.as_str()).collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>();
+        bail!(
+            "unsupported_worker_batches={}",
+            serde_json::to_string(&unsupported)?
+        );
+    }
+    let run = if selection.batches.len() == 1 {
+        // Retain the cache-aware dependency catalog path for the common
+        // single-backend workspace. Mixed workspaces use the global planner so
+        // one batch cannot invalidate another language's source snapshots.
+        index_batch_with_artifact_cache(
+            &mut store,
+            &discovery.manifest,
+            &sources,
+            selection.batches[0].worker.installation.launch.clone(),
+            &artifact_cache,
+            &staging,
+        )?
+    } else {
+        index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
+    };
     tracing::info!(target: "kide::cli", analyzed = run.analyzed, dependency_analyzed = run.dependency_analyzed, "index complete");
     println!(
         "{}",
@@ -833,7 +862,7 @@ fn init_logging(verbosity: u8) {
         .init();
 }
 
-fn kotlin_worker_launch(workspace: &Path, verbosity: u8) -> Result<WorkerLaunch> {
+fn kotlin_worker_installation(workspace: &Path, verbosity: u8) -> Result<WorkerInstallation> {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let worker = repository.join("workers/kotlin-jvm");
     let executable = worker.join("build/install/kide-kotlin-jvm-worker/bin/kide-kotlin-jvm-worker");
@@ -860,7 +889,11 @@ fn kotlin_worker_launch(workspace: &Path, verbosity: u8) -> Result<WorkerLaunch>
     // A cold K2 batch over a realistic multi-module workspace can exceed the
     // control-plane default while still making progress.
     launch.request_timeout = Duration::from_secs(5 * 60);
-    Ok(launch)
+    Ok(WorkerInstallation {
+        name: "kotlin-jvm".to_owned(),
+        launch,
+        build_systems: vec![BuildSystem::Gradle, BuildSystem::Filesystem],
+    })
 }
 
 fn pending(command: &str, argument: String) -> Result<QueryStatus> {
