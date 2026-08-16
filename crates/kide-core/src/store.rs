@@ -14,9 +14,9 @@ use thiserror::Error;
 
 use crate::{
     AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
-    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, ProjectManifest, Provenance,
-    ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TypeRecord,
-    WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
+    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, LexicalMatch, ProjectManifest,
+    Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord,
+    TextDocument, TypeRecord, WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
 };
 
 const MIGRATION_1: &str = r#"
@@ -163,6 +163,21 @@ CREATE TABLE IF NOT EXISTS application_arguments (
     PRIMARY KEY(application_id, position)
 );
 CREATE INDEX IF NOT EXISTS application_arguments_by_name_value ON application_arguments(name, value_kind, value_text, application_id);
+"#;
+const MIGRATION_7: &str = r#"
+CREATE TABLE IF NOT EXISTS workspace_text_documents (
+    workspace_path TEXT PRIMARY KEY,
+    content_fingerprint TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workspace_text_documents_by_fingerprint ON workspace_text_documents(content_fingerprint);
+CREATE TABLE IF NOT EXISTS workspace_text_terms (
+    workspace_path TEXT NOT NULL REFERENCES workspace_text_documents(workspace_path) ON DELETE CASCADE,
+    term TEXT NOT NULL,
+    start_byte INTEGER NOT NULL,
+    end_byte INTEGER NOT NULL,
+    PRIMARY KEY(workspace_path, term, start_byte)
+);
+CREATE INDEX IF NOT EXISTS workspace_text_terms_by_term ON workspace_text_terms(term, workspace_path, start_byte);
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -336,6 +351,20 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
         }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 7",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_7)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
+        }
         Ok(())
     }
 
@@ -458,6 +487,95 @@ impl IndexStore {
             .into_iter()
             .map(|record| serde_json::from_str(&record).map_err(IndexStoreError::from))
             .collect()
+    }
+
+    /// Replaces the complete eligible workspace text inventory atomically.
+    /// Unchanged documents keep their rows; paths absent from `documents` are
+    /// removed in the same transaction so stale lexical matches cannot leak.
+    pub fn sync_text_documents(
+        &mut self,
+        documents: &[TextDocument],
+    ) -> Result<(), IndexStoreError> {
+        let transaction = self.connection.transaction()?;
+        let paths = documents
+            .iter()
+            .map(|document| document.path.as_str())
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            transaction.execute("DELETE FROM workspace_text_documents", [])?;
+        } else {
+            let placeholders = std::iter::repeat_n("?", paths.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            transaction.execute(&format!("DELETE FROM workspace_text_documents WHERE workspace_path NOT IN ({placeholders})"), rusqlite::params_from_iter(paths))?;
+        }
+        for document in documents {
+            let changed = transaction.query_row("SELECT content_fingerprint FROM workspace_text_documents WHERE workspace_path = ?1", params![document.path.as_str()], |row| row.get::<_, String>(0)).optional()? .is_none_or(|fingerprint| fingerprint != document.fingerprint.as_str());
+            if changed {
+                transaction.execute(
+                    "DELETE FROM workspace_text_terms WHERE workspace_path = ?1",
+                    params![document.path.as_str()],
+                )?;
+                transaction.execute("INSERT INTO workspace_text_documents(workspace_path, content_fingerprint) VALUES (?1, ?2) ON CONFLICT(workspace_path) DO UPDATE SET content_fingerprint=excluded.content_fingerprint", params![document.path.as_str(), document.fingerprint.as_str()])?;
+                for (term, start, end) in crate::text_index::lexical_terms(&document.content) {
+                    transaction.execute("INSERT INTO workspace_text_terms(workspace_path, term, start_byte, end_byte) VALUES (?1, ?2, ?3, ?4)", params![document.path.as_str(), term, start as i64, end as i64])?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Deterministic literal search. A later CLI can expose this as JSONL
+    /// without needing filesystem access or a language backend.
+    pub fn lexical_matches(
+        &self,
+        workspace_root: &Path,
+        query: &str,
+    ) -> Result<Vec<LexicalMatch>, IndexStoreError> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.connection.prepare("SELECT workspace_path, start_byte, end_byte, content_fingerprint FROM workspace_text_terms JOIN workspace_text_documents USING(workspace_path) WHERE term = ?1 ORDER BY workspace_path, start_byte")?;
+        let rows = statement
+            .query_map(params![query], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut matches = Vec::new();
+        for (path, start_byte, end_byte, fingerprint) in rows {
+            let content = match std::fs::read(workspace_root.join(&path))
+                .ok()
+                .and_then(|bytes| {
+                    crate::text_index::document_from_bytes(WorkspacePath::new(path.clone()), bytes)
+                        .ok()
+                })
+                .filter(|document| document.fingerprint.as_str() == fingerprint)
+                .map(|document| document.content)
+            {
+                Some(content) => content,
+                None => continue,
+            };
+            let start_byte = start_byte as usize;
+            let end_byte = end_byte as usize;
+            let position = crate::text_index::position_at(&content, start_byte)
+                .expect("substring boundary is valid");
+            matches.push(LexicalMatch {
+                path: WorkspacePath::new(path.clone()),
+                range: ByteRange {
+                    start: start_byte as u64,
+                    end: end_byte as u64,
+                },
+                position,
+                snippet: crate::text_index::snippet_at(&content, start_byte, end_byte),
+            });
+        }
+        Ok(matches)
     }
 
     /// Finds persisted units at one workspace-relative path. Multiple build

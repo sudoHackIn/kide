@@ -12,8 +12,8 @@ use clap::{ArgAction, Parser, Subcommand};
 use kide_core::{
     ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload,
     QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolId, WorkerCapability,
-    WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkspacePath, discover_workspace,
-    index_batch_with_artifact_cache, index_selected_batches,
+    WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkspacePath, collect_workspace_text,
+    discover_workspace, index_batch_with_artifact_cache, index_selected_batches,
 };
 
 /// Headless, persistent semantic code platform.
@@ -827,6 +827,8 @@ fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
     } else {
         index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
     };
+    let text_inventory = collect_workspace_text(&discovery.root)?;
+    store.sync_text_documents(&text_inventory.documents)?;
     tracing::info!(target: "kide::cli", analyzed = run.analyzed, dependency_analyzed = run.dependency_analyzed, "index complete");
     println!(
         "{}",
@@ -840,6 +842,8 @@ fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
         "worker_starts": run.worker_starts,
         "dependency_analyzed": run.dependency_analyzed,
         "dependency_reused": run.dependency_reused,
+        "text_documents": text_inventory.documents.len(),
+        "text_skipped": text_inventory.skipped.len(),
         })
     );
     Ok(QueryStatus::Ok)

@@ -9,6 +9,7 @@ mod artifact_cache;
 pub mod artifact_proto_adapter;
 pub mod query_resolver;
 pub mod selector;
+pub mod text_index;
 pub mod worker_proto {
     include!(concat!(env!("OUT_DIR"), "/kide.worker.v1.rs"));
 }
@@ -593,6 +594,7 @@ pub use query::*;
 pub use store::*;
 pub use supervisor::*;
 pub use worker_registry::*;
+pub use text_index::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
@@ -601,4 +603,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 6;
+pub const INDEX_FORMAT_VERSION: u32 = 7;
