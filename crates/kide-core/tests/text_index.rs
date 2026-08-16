@@ -1,4 +1,7 @@
-use kide_core::{document_from_bytes, position_at, IndexStore, TextDocumentSkip, WorkspacePath};
+use kide_core::{
+    collect_workspace_text, document_from_bytes, position_at, IndexStore, TextDocumentSkip,
+    WorkspacePath,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -51,4 +54,36 @@ fn rejects_binary_and_oversized_documents_explicitly() {
         Err(TextDocumentSkip::Oversized { .. })
     ));
     assert_eq!(position_at("😀x", 4).expect("unicode boundary").column, 2);
+}
+
+#[test]
+fn indexes_spring_fixture_code_and_configuration_deterministically() {
+    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/spring-boot-crud");
+    let inventory = collect_workspace_text(&workspace).expect("collects fixture text");
+    let directory = tempdir().expect("temporary index directory");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens store");
+    store
+        .sync_text_documents(&inventory.documents)
+        .expect("indexes fixture");
+    let controller = store
+        .lexical_matches(&workspace, "BookController")
+        .expect("finds code identifier");
+    assert_eq!(controller.len(), 1);
+    assert_eq!(
+        controller[0].path.as_str(),
+        "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"
+    );
+    let annotation = store
+        .lexical_matches(&workspace, "SpringBootApplication")
+        .expect("finds annotation");
+    assert_eq!(annotation.len(), 2); // import and annotation use
+    let configuration = store
+        .lexical_matches(&workspace, "datasource")
+        .expect("finds properties token");
+    assert_eq!(configuration.len(), 1);
+    assert_eq!(
+        configuration[0].path.as_str(),
+        "app/src/test/resources/application.properties"
+    );
 }

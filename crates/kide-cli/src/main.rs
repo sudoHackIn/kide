@@ -47,6 +47,11 @@ enum Command {
     },
     /// Show persisted index health, freshness, and worker provenance.
     Status,
+    /// Find lexical workspace-text matches without starting a language worker.
+    Text {
+        /// One indexed lexical term.
+        query: String,
+    },
     /// Find symbols by name or qualified query.
     Symbols {
         query: String,
@@ -125,6 +130,7 @@ fn run() -> Result<QueryStatus> {
     match cli.command {
         Command::Index { path, force } => index(path, cli.verbose, force),
         Command::Status => pending("status", String::new()),
+        Command::Text { query } => text_search(&cli.workspace, query, human_output),
         Command::Symbols { query, short } => symbols(&cli.workspace, query, short || human_output),
         Command::Select {
             applies,
@@ -238,6 +244,65 @@ fn target_from_symbols(symbols: Vec<SymbolId>) -> Result<String> {
             symbols.len()
         ),
     }
+}
+
+fn text_search(workspace: &Path, query: String, human_output: bool) -> Result<QueryStatus> {
+    if query.is_empty()
+        || !query
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+    {
+        let response = QueryResponse {
+            schema_version: CANONICAL_SCHEMA_VERSION,
+            status: QueryStatus::InvalidRequest,
+            result: None,
+            metadata: ResultMetadata::empty(),
+            problems: vec![QueryProblem {
+                code: "invalid_text_query".to_owned(),
+                message: "text query must be one non-empty lexical term".to_owned(),
+                retryable: false,
+            }],
+        };
+        print_response(&response)?;
+        return Ok(QueryStatus::InvalidRequest);
+    }
+    let store = IndexStore::open(IndexStore::default_path(workspace))?;
+    let matches = store.lexical_matches(workspace, &query)?;
+    if human_output {
+        if matches.is_empty() {
+            println!("no text matches");
+            return Ok(QueryStatus::NoResult);
+        }
+        for matched in &matches {
+            println!(
+                "{} {}:{}:{}",
+                matched.snippet,
+                matched.path.as_str(),
+                matched.position.line,
+                matched.position.column,
+            );
+        }
+    } else {
+        for matched in &matches {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": CANONICAL_SCHEMA_VERSION,
+                    "match_kind": "lexical",
+                    "path": matched.path,
+                    "range": matched.range,
+                    "position": matched.position,
+                    "snippet": matched.snippet,
+                    "freshness": "fresh",
+                })
+            );
+        }
+    }
+    Ok(if matches.is_empty() {
+        QueryStatus::NoResult
+    } else {
+        QueryStatus::Ok
+    })
 }
 
 fn symbols(workspace: &Path, query: String, short: bool) -> Result<QueryStatus> {
