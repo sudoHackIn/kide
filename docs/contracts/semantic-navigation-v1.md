@@ -175,8 +175,9 @@ an ambiguous query returns candidates and does not arbitrarily select one.
 | `kide callers <target>` | `callers` | resolved call occurrences |
 | `kide type-at <location>` | `type_at` | narrowest occurrence and `TypeRecord` |
 
-`implementations` is direct-only in v1. A future transitive option must declare
-its traversal semantics explicitly. `callers` reports the selected semantic
+`implementations` is direct-only by default. `--transitive` additionally
+follows descendant hierarchy edges in deterministic breadth-first order, with
+each discovered subtype returned once. `callers` reports the selected semantic
 call target, therefore it distinguishes overloads and extension/member calls.
 
 ## Response envelope and errors
