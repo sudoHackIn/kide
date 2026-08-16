@@ -1049,8 +1049,8 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{
-        Cli, ExitCode, byte_to_location, exit_code, fan_out, target_from_pipe_text,
-        target_from_symbols,
+        Cli, ExitCode, TargetResolution, byte_to_location, exit_code, fan_out,
+        target_from_pipe_text, target_from_symbols, target_problem,
     };
 
     #[test]
@@ -1119,6 +1119,20 @@ mod tests {
             kide_core::QueryStatus::Ok
         );
         assert_eq!(seen, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn ambiguous_and_stale_targets_are_machine_readable_states() {
+        let (status, _, problems) = target_problem(TargetResolution::Ambiguous(vec![
+            kide_core::SymbolId::new("kotlin:first"),
+            kide_core::SymbolId::new("kotlin:second"),
+        ]));
+        assert_eq!(status, kide_core::QueryStatus::Ambiguous);
+        assert_eq!(problems[0].code, "ambiguous_target");
+        let (status, _, problems) = target_problem(TargetResolution::Stale);
+        assert_eq!(status, kide_core::QueryStatus::Stale);
+        assert_eq!(problems[0].code, "stale_source_snapshot");
+        assert!(problems[0].retryable);
     }
 
     fn test_symbol() -> kide_core::SymbolRecord {
