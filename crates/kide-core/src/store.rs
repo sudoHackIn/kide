@@ -179,6 +179,9 @@ CREATE TABLE IF NOT EXISTS workspace_text_terms (
 );
 CREATE INDEX IF NOT EXISTS workspace_text_terms_by_term ON workspace_text_terms(term, workspace_path, start_byte);
 "#;
+const MIGRATION_8: &str = r#"
+ALTER TABLE source_snapshots ADD COLUMN public_api_fingerprint TEXT;
+"#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
 
@@ -364,6 +367,20 @@ impl IndexStore {
             self.connection.execute_batch(MIGRATION_7)?;
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 8",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_8)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (8)", [])?;
         }
         Ok(())
     }
@@ -602,20 +619,25 @@ impl IndexStore {
     pub fn analysis_inputs(&self) -> Result<Vec<AnalysisInput>, IndexStoreError> {
         let mut statement = self
             .connection
-            .prepare("SELECT source_unit_json, provenance_blob FROM source_snapshots ORDER BY source_unit_id")?;
+            .prepare("SELECT source_unit_json, provenance_blob, public_api_fingerprint FROM source_snapshots ORDER BY source_unit_id")?;
         let snapshots = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         snapshots
             .into_iter()
-            .map(|(source, provenance)| {
+            .map(|(source, provenance, public_api_fingerprint)| {
                 let source_unit = serde_json::from_str(&source)?;
                 let provenance = bincode::deserialize(&provenance)?;
                 Ok(AnalysisInput {
                     source_unit,
                     provenance,
+                    public_api_fingerprint: public_api_fingerprint.map(crate::Fingerprint::new),
                 })
             })
             .collect()
@@ -849,6 +871,33 @@ impl IndexStore {
         )
     }
 
+    /// Source units whose persisted facts depend on declarations in `source`.
+    /// This is deliberately conservative: reference, call, and hierarchy
+    /// edges all participate, and the result is deterministic.
+    pub fn dependent_source_units(
+        &self,
+        source: &SourceUnitId,
+    ) -> Result<Vec<SourceUnitId>, IndexStoreError> {
+        let mut ids = Vec::new();
+        for symbol in self.symbols_for_source(source)? {
+            for edge in self.references_to(&symbol.id)? {
+                ids.push(edge.source.range.source_unit);
+            }
+            for edge in self.calls_to(&symbol.id)? {
+                ids.push(edge.source.range.source_unit);
+            }
+            for edge in self.implementations_of(&symbol.id)? {
+                if let Some(subtype) = self.symbol(&edge.subtype)? {
+                    ids.push(subtype.declaration.source_unit);
+                }
+            }
+        }
+        ids.retain(|id| id != source);
+        ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        ids.dedup_by(|left, right| left.as_str() == right.as_str());
+        Ok(ids)
+    }
+
     pub fn types_for(
         &self,
         source_unit: &SourceUnitId,
@@ -1074,8 +1123,8 @@ fn insert_snapshot(
     transaction.execute(
         "INSERT INTO source_snapshots
          (source_unit_id, component_id, workspace_path, content_fingerprint, context_fingerprint,
-          protocol_version, source_unit_json, provenance_blob)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+          protocol_version, source_unit_json, provenance_blob, public_api_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             source.id.as_str(),
             source.component.as_str(),
@@ -1085,6 +1134,10 @@ fn insert_snapshot(
             snapshot.provenance.protocol_version,
             serde_json::to_string(source)?,
             bincode::serialize(&snapshot.provenance)?,
+            snapshot
+                .public_api_fingerprint
+                .as_ref()
+                .map(crate::Fingerprint::as_str),
         ],
     )?;
     for symbol in &snapshot.symbols {
@@ -1405,6 +1458,7 @@ mod tests {
             vec![AnalysisInput {
                 source_unit: source.clone(),
                 provenance: provenance(),
+                public_api_fingerprint: None,
             }]
         );
         store.remove_snapshot(&source.id).expect("removes source");
@@ -1487,6 +1541,7 @@ mod tests {
             vec![AnalysisInput {
                 source_unit: dependency.clone(),
                 provenance: full.provenance.clone(),
+                public_api_fingerprint: None,
             }]
         );
         let provenance: Vec<u8> = store

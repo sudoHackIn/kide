@@ -14,6 +14,24 @@ pub enum InvalidationReason {
     ContextChanged,
     BackendChanged,
     AnalysisOptionsChanged,
+    PublicApiChanged,
+}
+
+/// Returns the source units that must be conservatively reanalyzed after a
+/// completed snapshot changed its public API. Body-only changes deliberately
+/// return no dependents, preserving the narrow incremental fast path.
+pub fn api_dependent_invalidations(
+    previous_api: Option<&crate::Fingerprint>,
+    current_api: Option<&crate::Fingerprint>,
+    dependents: impl IntoIterator<Item = SourceUnitId>,
+) -> Vec<SourceUnitId> {
+    if previous_api == current_api {
+        return Vec::new();
+    }
+    let mut dependents = dependents.into_iter().collect::<Vec<_>>();
+    dependents.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    dependents.dedup_by(|left, right| left.as_str() == right.as_str());
+    dependents
 }
 
 /// Inputs that can additionally detect a worker implementation or option drift.
@@ -21,6 +39,7 @@ pub enum InvalidationReason {
 pub struct AnalysisInput {
     pub source_unit: SourceUnit,
     pub provenance: Provenance,
+    pub public_api_fingerprint: Option<crate::Fingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,14 +207,17 @@ mod tests {
         let current = AnalysisInput {
             source_unit: source.clone(),
             provenance: provenance("1", "sha256:options"),
+            public_api_fingerprint: None,
         };
         let old_backend = AnalysisInput {
             source_unit: source.clone(),
             provenance: provenance("0", "sha256:options"),
+            public_api_fingerprint: None,
         };
         let old_options = AnalysisInput {
             source_unit: source.clone(),
             provenance: provenance("1", "sha256:old-options"),
+            public_api_fingerprint: None,
         };
         assert!(matches!(
             plan_analysis_invalidation(std::slice::from_ref(&current), &[old_backend])[..],
@@ -211,6 +233,28 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn api_change_invalidates_sorted_dependents_but_body_only_does_not() {
+        let old = Fingerprint::new("sha256:old-api");
+        let new = Fingerprint::new("sha256:new-api");
+        assert!(
+            api_dependent_invalidations(Some(&old), Some(&old), [SourceUnitId::new("b")])
+                .is_empty()
+        );
+        assert_eq!(
+            api_dependent_invalidations(
+                Some(&old),
+                Some(&new),
+                [
+                    SourceUnitId::new("b"),
+                    SourceUnitId::new("a"),
+                    SourceUnitId::new("b")
+                ]
+            ),
+            vec![SourceUnitId::new("a"), SourceUnitId::new("b")],
+        );
     }
 
     fn provenance(version: &str, options: &str) -> Provenance {

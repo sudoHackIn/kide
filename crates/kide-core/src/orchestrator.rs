@@ -382,16 +382,37 @@ fn index_batch_with_optional_cache(
         });
     };
     let snapshots = validate_batch(&reanalyze, response.snapshots)?;
+    // Keep the same cold worker alive for its dependency catalog request;
+    // API-impact persistence below may perform SQLite work beyond its idle
+    // timeout but requires no worker state.
+    index_dependency_catalog(store, &mut supervisor)?;
+    let previous_inputs = store.analysis_inputs()?;
+    let mut api_dependents = Vec::new();
     for expected in &reanalyze {
         let snapshot = snapshots
             .iter()
             .find(|snapshot| snapshot.source_unit.id == expected.id)
             .expect("validated batch contains every requested unit");
+        let previous_api = previous_inputs
+            .iter()
+            .find(|input| input.source_unit.id == expected.id)
+            .and_then(|input| input.public_api_fingerprint.as_ref());
+        let dependents = store.dependent_source_units(&expected.id)?;
         store.replace_snapshot(expected, snapshot)?;
+        api_dependents.extend(crate::api_dependent_invalidations(
+            previous_api,
+            snapshot.public_api_fingerprint.as_ref(),
+            dependents,
+        ));
         run.analyzed += 1;
     }
+    for dependent in api_dependents {
+        if !reanalyze.iter().any(|source| source.id == dependent) {
+            store.remove_snapshot(&dependent)?;
+            run.removed += 1;
+        }
+    }
     let _ = artifact_cache;
-    index_dependency_catalog(store, &mut supervisor)?;
     store.put_manifest(manifest)?;
     run.worker_starts = supervisor.start_count();
     Ok(run)
