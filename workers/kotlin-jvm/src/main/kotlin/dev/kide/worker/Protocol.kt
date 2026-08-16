@@ -15,7 +15,9 @@ internal fun handshakeEnvelope(requestId: String = "handshake"): Worker.Envelope
                 .setBackend(WORKER_NAME)
                 .setBackendVersion(WORKER_VERSION)
                 .setProtocolVersion(WORKER_PROTOCOL_VERSION)
-                .addAllLanguages(listOf("kotlin", "java"))
+                // Dependency descriptors may be Java bytecode, but this
+                // worker accepts Kotlin source units only for analysis.
+                .addLanguages("kotlin")
                 .addAllCapabilities(listOf("handshake", "project_manifest", "file_analysis_snapshot", "dependency_analysis")),
         )
         .build()
