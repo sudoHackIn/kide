@@ -10,10 +10,10 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::{ArgAction, Parser, Subcommand};
 use kide_core::{
-    ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload,
+    ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, Provenance, QueryPayload,
     QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolId, WorkerCapability,
     WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkspacePath, collect_workspace_text,
-    discover_workspace, document_from_bytes, index_batch_with_artifact_cache,
+    discover_workspace, document_from_bytes, index_batch_with_artifact_cache_and_provenance,
     index_selected_batches,
 };
 
@@ -912,13 +912,29 @@ fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
         // Retain the cache-aware dependency catalog path for the common
         // single-backend workspace. Mixed workspaces use the global planner so
         // one batch cannot invalidate another language's source snapshots.
-        index_batch_with_artifact_cache(
+        index_batch_with_artifact_cache_and_provenance(
             &mut store,
             &discovery.manifest,
             &sources,
             selection.batches[0].worker.installation.launch.clone(),
             &artifact_cache,
             &staging,
+            Provenance {
+                backend: selection.batches[0]
+                    .worker
+                    .capabilities
+                    .identity
+                    .backend
+                    .clone(),
+                backend_version: selection.batches[0]
+                    .worker
+                    .capabilities
+                    .identity
+                    .backend_version
+                    .clone(),
+                protocol_version: selection.batches[0].worker.capabilities.protocol_version,
+                analysis_options: discovery.manifest.fingerprint.clone(),
+            },
         )?
     } else {
         index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?

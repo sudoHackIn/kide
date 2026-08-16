@@ -6,12 +6,12 @@ use prost::Message;
 use thiserror::Error;
 
 use crate::{
-    plan_invalidation, AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache,
+    plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
     ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
     ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, SourceOrigin, SourceUnit, WorkerBatch, WorkerCapability,
-    WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection, WorkerSupervisor,
-    WorkerSupervisorError, WorkspacePath,
+    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
+    WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
+    WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,7 +292,7 @@ pub fn index_batch(
     current: &[SourceUnit],
     launch: WorkerLaunch,
 ) -> Result<IndexRun, IndexOrchestratorError> {
-    index_batch_with_optional_cache(store, manifest, current, launch, None)
+    index_batch_with_optional_cache(store, manifest, current, launch, None, None)
 }
 
 /// Cache-aware dependency indexing. A hit loads stored graph sections without
@@ -312,6 +312,26 @@ pub fn index_batch_with_artifact_cache(
         current,
         launch,
         Some((cache, staging_directory)),
+        None,
+    )
+}
+
+pub fn index_batch_with_artifact_cache_and_provenance(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    current: &[SourceUnit],
+    launch: WorkerLaunch,
+    cache: &ArtifactBlobCache,
+    staging_directory: &Path,
+    provenance: Provenance,
+) -> Result<IndexRun, IndexOrchestratorError> {
+    index_batch_with_optional_cache(
+        store,
+        manifest,
+        current,
+        launch,
+        Some((cache, staging_directory)),
+        Some(provenance),
     )
 }
 
@@ -321,13 +341,29 @@ fn index_batch_with_optional_cache(
     current: &[SourceUnit],
     launch: WorkerLaunch,
     artifact_cache: Option<(&ArtifactBlobCache, &Path)>,
+    current_provenance: Option<Provenance>,
 ) -> Result<IndexRun, IndexOrchestratorError> {
     let persisted_sources = store
         .source_units()?
         .into_iter()
         .filter(|source| source.origin != SourceOrigin::Dependency)
         .collect::<Vec<_>>();
-    let actions = plan_invalidation(current, &persisted_sources);
+    let actions = if let Some(provenance) = current_provenance {
+        crate::plan_analysis_invalidation(
+            &current
+                .iter()
+                .cloned()
+                .map(|source_unit| AnalysisInput {
+                    source_unit,
+                    provenance: provenance.clone(),
+                    public_api_fingerprint: None,
+                })
+                .collect::<Vec<_>>(),
+            &store.analysis_inputs()?,
+        )
+    } else {
+        plan_invalidation(current, &persisted_sources)
+    };
     let _span = tracing::info_span!(target: "kide::index", "index_batch", sources = current.len())
         .entered();
     tracing::debug!(target: "kide::index", actions = actions.len(), "planned source actions");

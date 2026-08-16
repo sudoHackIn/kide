@@ -1,10 +1,11 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
+    index_batch, index_batch_with_artifact_cache_and_provenance, materialize_catalog_artifact,
     ArtifactBlobCache, ArtifactDescriptor, BuildSystem, Component, ComponentId, Fingerprint,
     IndexStore, Language, MaterializationBudget, MaterializationOutcome, ProjectManifest,
     Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerLaunch, WorkerSupervisor,
-    WorkspaceId, WorkspacePath, index_batch, materialize_catalog_artifact,
+    WorkspaceId, WorkspacePath,
 };
 use tempfile::tempdir;
 
@@ -31,39 +32,118 @@ fn indexes_a_cold_batch_then_reuses_unchanged_snapshots() {
 }
 
 #[test]
+fn backend_version_drift_reanalyzes_unchanged_sources() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let manifest = manifest();
+    let sources = vec![source("One.kt", "sha256:one")];
+    let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+    let staging = directory.path().join("staging");
+    std::fs::create_dir_all(&staging).expect("creates staging");
+    let first = index_batch_with_artifact_cache_and_provenance(
+        &mut store,
+        &manifest,
+        &sources,
+        launch(),
+        &cache,
+        &staging,
+        worker_provenance(),
+    )
+    .expect("first index");
+    assert_eq!(first.analyzed, 1);
+    let mut changed_backend = worker_provenance();
+    changed_backend.backend_version = "0.2.0".to_owned();
+    let second = index_batch_with_artifact_cache_and_provenance(
+        &mut store,
+        &manifest,
+        &sources,
+        launch(),
+        &cache,
+        &staging,
+        changed_backend,
+    )
+    .expect("backend drift reindexes");
+    assert_eq!(second.analyzed, 1);
+    assert_eq!(second.reused, 0);
+}
+
+#[test]
 fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
     let artifact = artifact_descriptor();
-    store.put_artifact_descriptor(&artifact).expect("catalogs artifact");
-    assert!(store.source_unit(&artifact.source_unit.id).expect("reads store").is_none());
+    store
+        .put_artifact_descriptor(&artifact)
+        .expect("catalogs artifact");
+    assert!(store
+        .source_unit(&artifact.source_unit.id)
+        .expect("reads store")
+        .is_none());
 
     let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
     let staging = directory.path().join("staging");
     std::fs::create_dir_all(&staging).expect("creates staging");
     let mut worker = WorkerSupervisor::new(materializing_launch());
     worker.handshake("fixture-handshake").expect("handshakes");
-    let mut budget = MaterializationBudget { remaining_artifacts: 1 };
+    let mut budget = MaterializationBudget {
+        remaining_artifacts: 1,
+    };
     assert_eq!(
         materialize_catalog_artifact(
-            &mut store, &mut worker, &cache, WorkspacePath::new("."), &artifact.source_unit.id,
-            &staging, &mut budget,
-        ).expect("materializes catalog artifact"),
+            &mut store,
+            &mut worker,
+            &cache,
+            WorkspacePath::new("."),
+            &artifact.source_unit.id,
+            &staging,
+            &mut budget,
+        )
+        .expect("materializes catalog artifact"),
         MaterializationOutcome::Materialized,
     );
     assert_eq!(budget.remaining_artifacts, 0);
-    assert_eq!(store.source_unit(&artifact.source_unit.id).expect("reads store"), Some(artifact.source_unit.clone()));
-
-    let mut bounded_store = IndexStore::open(directory.path().join("bounded.sqlite3")).expect("opens bounded index");
-    bounded_store.put_artifact_descriptor(&artifact_descriptor()).expect("catalogs artifact");
-    let mut never_started = WorkerSupervisor::new(materializing_launch());
-    let mut no_budget = MaterializationBudget { remaining_artifacts: 0 };
     assert_eq!(
-        materialize_catalog_artifact(&mut bounded_store, &mut never_started, &cache, WorkspacePath::new("."), &artifact.source_unit.id, &staging, &mut no_budget).expect("reports exhausted budget"),
+        store
+            .source_unit(&artifact.source_unit.id)
+            .expect("reads store"),
+        Some(artifact.source_unit.clone())
+    );
+
+    let mut bounded_store =
+        IndexStore::open(directory.path().join("bounded.sqlite3")).expect("opens bounded index");
+    bounded_store
+        .put_artifact_descriptor(&artifact_descriptor())
+        .expect("catalogs artifact");
+    let mut never_started = WorkerSupervisor::new(materializing_launch());
+    let mut no_budget = MaterializationBudget {
+        remaining_artifacts: 0,
+    };
+    assert_eq!(
+        materialize_catalog_artifact(
+            &mut bounded_store,
+            &mut never_started,
+            &cache,
+            WorkspacePath::new("."),
+            &artifact.source_unit.id,
+            &staging,
+            &mut no_budget
+        )
+        .expect("reports exhausted budget"),
         MaterializationOutcome::BudgetExhausted,
     );
     assert_eq!(
-        materialize_catalog_artifact(&mut bounded_store, &mut never_started, &cache, WorkspacePath::new("."), &SourceUnitId::new("jvm:missing"), &staging, &mut MaterializationBudget { remaining_artifacts: 1 }).expect("reports absent catalog entry"),
+        materialize_catalog_artifact(
+            &mut bounded_store,
+            &mut never_started,
+            &cache,
+            WorkspacePath::new("."),
+            &SourceUnitId::new("jvm:missing"),
+            &staging,
+            &mut MaterializationBudget {
+                remaining_artifacts: 1
+            }
+        )
+        .expect("reports absent catalog entry"),
         MaterializationOutcome::NotCataloged,
     );
 }
@@ -143,5 +223,14 @@ fn provenance() -> Provenance {
         backend_version: "0.1.0".to_owned(),
         protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
         analysis_options: Fingerprint::new("sha256:project"),
+    }
+}
+
+fn worker_provenance() -> Provenance {
+    Provenance {
+        backend: "kide-fixture-worker".to_owned(),
+        backend_version: "0.1.0".to_owned(),
+        protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
+        analysis_options: Fingerprint::new("sha256:fixture"),
     }
 }
