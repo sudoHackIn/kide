@@ -9,14 +9,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
 use crate::{
-    AnalysisInput, ArtifactDescriptor, ByteRange, CallEdge, ComponentId, DiagnosticRecord,
-    FileAnalysisSnapshot, HierarchyEdge, INDEX_FORMAT_VERSION, ProjectManifest, Provenance,
+    AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
+    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, ProjectManifest, Provenance,
     ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TypeRecord,
-    WORKER_PROTOCOL_VERSION, WorkspacePath,
+    WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
 };
 
 const MIGRATION_1: &str = r#"
@@ -141,6 +141,28 @@ CREATE TABLE IF NOT EXISTS symbol_locators (
     PRIMARY KEY (source_unit_id, qualified_name, symbol_id)
 );
 CREATE INDEX IF NOT EXISTS symbol_locators_by_name ON symbol_locators(qualified_name, symbol_id);
+"#;
+const MIGRATION_6: &str = r#"
+CREATE TABLE IF NOT EXISTS applications (
+    application_id TEXT PRIMARY KEY,
+    source_unit_id TEXT NOT NULL,
+    subject_symbol_id TEXT NOT NULL,
+    target_symbol_id TEXT NOT NULL,
+    start_byte INTEGER NOT NULL,
+    end_byte INTEGER NOT NULL,
+    record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS applications_by_target ON applications(target_symbol_id, subject_symbol_id, source_unit_id);
+CREATE INDEX IF NOT EXISTS applications_by_subject ON applications(subject_symbol_id, target_symbol_id, source_unit_id);
+CREATE TABLE IF NOT EXISTS application_arguments (
+    application_id TEXT NOT NULL,
+    name TEXT,
+    position INTEGER NOT NULL,
+    value_kind TEXT NOT NULL,
+    value_text TEXT NOT NULL,
+    PRIMARY KEY(application_id, position)
+);
+CREATE INDEX IF NOT EXISTS application_arguments_by_name_value ON application_arguments(name, value_kind, value_text, application_id);
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -299,6 +321,20 @@ impl IndexStore {
             self.connection.execute_batch(MIGRATION_5)?;
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 6",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_6)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
         }
         Ok(())
     }
@@ -602,6 +638,58 @@ impl IndexStore {
             .collect()
     }
 
+    /// Returns the bounded nested-owner application pattern. All symbols and
+    /// targets are caller-supplied resolved identities; Core has no framework
+    /// vocabulary in this plan.
+    pub fn symbols_with_nested_application_argument(
+        &self,
+        nested_target: &SymbolId,
+        outer_target: &SymbolId,
+        argument_name: &str,
+        argument_value: &ApplicationValue,
+    ) -> Result<Vec<SymbolRecord>, IndexStoreError> {
+        let (kind, value) = application_value_columns(argument_value);
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT s.symbol_id, s.name, s.record_blob, source_snapshots.source_unit_json, source_snapshots.provenance_blob
+             FROM applications nested
+             JOIN symbols s ON s.symbol_id = nested.subject_symbol_id
+             JOIN source_snapshots ON source_snapshots.source_unit_id = s.source_unit_id
+             WHERE nested.target_symbol_id = ?1
+             ORDER BY s.source_unit_id, s.name_start_byte, s.symbol_id"
+        )?;
+        let rows = statement
+            .query_map(params![nested_target.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut result = Vec::new();
+        for (id, name, blob, source, provenance) in rows {
+            let record = decode_stored_symbol(&blob)?.into_symbol(
+                SymbolId::new(id),
+                name,
+                &serde_json::from_str(&source)?,
+                &bincode::deserialize(&provenance)?,
+            );
+            let Some(owner) = record.owner.as_ref() else {
+                continue;
+            };
+            let matches = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM applications a JOIN application_arguments arg ON arg.application_id = a.application_id WHERE a.subject_symbol_id = ?1 AND a.target_symbol_id = ?2 AND arg.name = ?3 AND arg.value_kind = ?4 AND arg.value_text = ?5)",
+                params![owner.as_str(), outer_target.as_str(), argument_name, kind, value], |row| row.get::<_, bool>(0)
+            )?;
+            if matches {
+                result.push(record);
+            }
+        }
+        Ok(result)
+    }
+
     pub fn occurrences_at(
         &self,
         source_unit: &SourceUnitId,
@@ -739,6 +827,11 @@ fn validate_snapshot(
         validate_range("symbol declaration", &symbol.declaration.bytes)?;
         validate_range("symbol name range", &symbol.name_range.bytes)?;
     }
+    for application in &snapshot.applications {
+        validate_provenance(&application.provenance)?;
+        ensure_fact_source("application", source_id, &application.range.source_unit)?;
+        validate_range("application", &application.range.bytes)?;
+    }
     for occurrence in &snapshot.occurrences {
         validate_occurrence(source_id, occurrence)?;
     }
@@ -819,7 +912,12 @@ fn delete_file_owned_facts(
     transaction: &Transaction<'_>,
     source_unit: &SourceUnitId,
 ) -> Result<(), IndexStoreError> {
+    transaction.execute(
+        "DELETE FROM application_arguments WHERE application_id IN (SELECT application_id FROM applications WHERE source_unit_id = ?1)",
+        params![source_unit.as_str()],
+    )?;
     for table in [
+        "applications",
         "reference_edges",
         "call_edges",
         "hierarchy_edges",
@@ -836,6 +934,18 @@ fn delete_file_owned_facts(
         )?;
     }
     Ok(())
+}
+
+fn application_value_columns(value: &ApplicationValue) -> (&'static str, String) {
+    match value {
+        ApplicationValue::String(value) => ("string", value.clone()),
+        ApplicationValue::StringList(value) => (
+            "string_list",
+            serde_json::to_string(value).expect("string list serializes"),
+        ),
+        ApplicationValue::Boolean(value) => ("boolean", value.to_string()),
+        ApplicationValue::Integer(value) => ("integer", value.to_string()),
+    }
 }
 
 fn insert_snapshot(
@@ -875,6 +985,19 @@ fn insert_snapshot(
             transaction.execute(
                 "INSERT INTO annotation_edges (source_unit_id, symbol_id, annotation_symbol_id) VALUES (?1, ?2, ?3)",
                 params![source.id.as_str(), symbol.id.as_str(), annotation.as_str()],
+            )?;
+        }
+    }
+    for application in &snapshot.applications {
+        transaction.execute(
+            "INSERT INTO applications (application_id, source_unit_id, subject_symbol_id, target_symbol_id, start_byte, end_byte, record_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![application.id.as_str(), source.id.as_str(), application.subject.as_str(), application.target.as_str(), sqlite_offset(application.range.bytes.start)?, sqlite_offset(application.range.bytes.end)?, serde_json::to_string(application)?],
+        )?;
+        for argument in &application.arguments {
+            let (kind, value) = application_value_columns(&argument.value);
+            transaction.execute(
+                "INSERT INTO application_arguments (application_id, name, position, value_kind, value_text) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![application.id.as_str(), argument.name, argument.position, kind, value],
             )?;
         }
     }
@@ -1042,11 +1165,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
+        selector::{select, LanguageView, Selector, SelectorPredicate, SelectorState},
         BackendKey, ByteRange, CallEdge, Completeness, Component, ComponentId, DiagnosticSeverity,
         Fingerprint, Freshness, HierarchyEdge, Language, OccurrenceKind, Precision,
         ProjectManifest, Provenance, SourceOccurrence, SourceOrigin, SourceRange, SymbolKind,
         WorkspaceId, WorkspacePath,
-        selector::{LanguageView, Selector, SelectorPredicate, SelectorState, select},
     };
 
     use super::*;
@@ -1168,12 +1291,10 @@ mod tests {
         );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
-        assert!(
-            store
-                .symbols_named("PaymentService")
-                .expect("reads facts")
-                .is_empty()
-        );
+        assert!(store
+            .symbols_named("PaymentService")
+            .expect("reads facts")
+            .is_empty());
     }
 
     #[test]
@@ -1309,12 +1430,10 @@ mod tests {
                 .expect("uses applied-symbol posting"),
             matching.symbols
         );
-        assert!(
-            store
-                .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
-                .expect("empty posting")
-                .is_empty()
-        );
+        assert!(store
+            .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
+            .expect("empty posting")
+            .is_empty());
         let selected = select(
             &store,
             &Selector {
@@ -1328,6 +1447,65 @@ mod tests {
         .expect("plans from resolved applied-symbol posting");
         assert_eq!(selected.state, SelectorState::Complete);
         assert_eq!(selected.symbols, matching.symbols);
+    }
+
+    #[test]
+    fn composes_nested_application_owner_and_named_argument_without_framework_terms() {
+        let directory = tempdir().expect("temporary index directory");
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        let source = source_unit("sha256:applications-v1");
+        let mut facts = snapshot(source.clone());
+        let mut outer = facts.symbols[0].clone();
+        outer.id = SymbolId::new("kotlin:demo.FeatureConfiguration");
+        outer.name = "FeatureConfiguration".to_owned();
+        let mut nested = outer.clone();
+        nested.id = SymbolId::new("kotlin:demo.FeatureConfiguration.NestedConfiguration");
+        nested.name = "NestedConfiguration".to_owned();
+        nested.owner = Some(outer.id.clone());
+        facts.symbols = vec![outer.clone(), nested.clone()];
+        let configuration = SymbolId::new("jvm:Configuration");
+        let conditional = SymbolId::new("jvm:ConditionalOnProperty");
+        facts.applications = vec![
+            crate::ApplicationFact {
+                id: crate::ApplicationId::new("app:nested"),
+                subject: nested.id.clone(),
+                target: configuration.clone(),
+                range: nested.declaration.clone(),
+                arguments: vec![],
+                precision: Precision::Exact,
+                freshness: Freshness::Fresh,
+                completeness: Completeness::Complete,
+                provenance: facts.provenance.clone(),
+            },
+            crate::ApplicationFact {
+                id: crate::ApplicationId::new("app:outer"),
+                subject: outer.id.clone(),
+                target: conditional.clone(),
+                range: outer.declaration.clone(),
+                arguments: vec![crate::ApplicationArgument {
+                    name: Some("name".to_owned()),
+                    position: 0,
+                    value: ApplicationValue::String("feature.books".to_owned()),
+                }],
+                precision: Precision::Exact,
+                freshness: Freshness::Fresh,
+                completeness: Completeness::Complete,
+                provenance: facts.provenance.clone(),
+            },
+        ];
+        store
+            .replace_snapshot(&source, &facts)
+            .expect("stores facts");
+        let selected = store
+            .symbols_with_nested_application_argument(
+                &configuration,
+                &conditional,
+                "name",
+                &ApplicationValue::String("feature.books".to_owned()),
+            )
+            .expect("composes application facts");
+        assert_eq!(selected, vec![nested]);
     }
 
     #[test]
@@ -1355,12 +1533,10 @@ mod tests {
                 .expect("resolves locator"),
             vec![entity]
         );
-        assert!(
-            store
-                .source_unit(&dependency.id)
-                .expect("does not materialize graph")
-                .is_none()
-        );
+        assert!(store
+            .source_unit(&dependency.id)
+            .expect("does not materialize graph")
+            .is_none());
     }
 
     fn source_unit(content: &str) -> SourceUnit {
@@ -1425,6 +1601,7 @@ mod tests {
             structural_fingerprint: None,
             public_api_fingerprint: None,
             symbols: vec![symbol.clone()],
+            applications: vec![],
             occurrences: vec![occurrence.clone()],
             references: vec![ReferenceEdge {
                 source: occurrence.clone(),

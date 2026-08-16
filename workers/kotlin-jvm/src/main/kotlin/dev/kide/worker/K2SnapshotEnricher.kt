@@ -45,11 +45,13 @@ internal object K2SnapshotEnricher {
         val provenance = snapshot["provenance"]!!
         val owners = enclosingSymbols(snapshot["symbols"]!!.jsonArray)
         val snapshotSymbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject.requiredString("id") }.toSet()
-        val annotationTargets = annotationsBySource[path].orEmpty().mapNotNull { annotation ->
+        val resolvedAnnotations = annotationsBySource[path].orEmpty().mapNotNull { annotation ->
             val owner = targets[annotation.ownerKey] ?: symbolForLooseCallableKey(snapshot["symbols"]!!.jsonArray, annotation.ownerKey) ?: return@mapNotNull null
             val target = targets[annotation.targetKey] ?: return@mapNotNull null
-            owner to target
-        }.groupBy({ it.first }, { it.second }).mapValues { (_, targets) -> targets.distinct().sorted() }
+            ResolvedAnnotation(annotation, owner, target)
+        }
+        val annotationTargets = resolvedAnnotations.map { it.owner to it.target }.groupBy({ it.first }, { it.second }).mapValues { (_, targets) -> targets.distinct().sorted() }
+        val applications = resolvedAnnotations.mapNotNull { application(it, sourceUnit.requiredString("id"), contents, provenance) }
         val hierarchyFacts = hierarchy.mapNotNull { edge ->
             val subtype = targets[edge.subtypeKey] ?: return@mapNotNull null
             val supertype = targets[edge.supertypeKey] ?: return@mapNotNull null
@@ -77,7 +79,7 @@ internal object K2SnapshotEnricher {
         val remainingOccurrences = snapshot["occurrences"]!!.jsonArray.filter { rangeKey(it) !in exactRanges }
         return buildJsonObject {
             snapshot.forEach { (key, value) ->
-                if (key !in setOf("symbols", "occurrences", "references", "calls", "types", "hierarchy")) put(key, value)
+                if (key !in setOf("symbols", "occurrences", "references", "calls", "types", "hierarchy", "applications")) put(key, value)
             }
             put("symbols", buildJsonArray {
                 snapshot["symbols"]!!.jsonArray.forEach { element ->
@@ -117,6 +119,7 @@ internal object K2SnapshotEnricher {
                 }
             })
             put("hierarchy", buildJsonArray { hierarchyFacts.forEach(::add) })
+            put("applications", buildJsonArray { applications.forEach(::add) })
         }
     }
 
@@ -229,6 +232,23 @@ internal object K2SnapshotEnricher {
         return "kotlin:type:${digest.joinToString("") { "%02x".format(it) }}"
     }
 
+    private fun application(value: ResolvedAnnotation, sourceUnit: String, contents: String, provenance: JsonElement): JsonElement? {
+        val startUtf16 = value.annotation.startUtf16 ?: return null
+        val endUtf16 = value.annotation.endUtf16 ?: return null
+        val start = utf8Offset(contents, startUtf16)
+        val end = utf8Offset(contents, endUtf16)
+        val source = contents.substring(startUtf16, endUtf16)
+        val arguments = Regex("""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\[\s*"([^"]*)"\s*\]""").findAll(source).mapIndexed { index, match ->
+            buildJsonObject { put("name", match.groupValues[1]); put("position", index); put("value", buildJsonObject { put("kind", "string_list"); put("value", buildJsonArray { add(JsonPrimitive(match.groupValues[2])) }) }) }
+        }.toList()
+        val id = "kotlin:application:${sourceUnit}:${start}:${end}:${value.target}"
+        return buildJsonObject {
+            put("id", id); put("subject", value.owner); put("target", value.target)
+            put("range", buildJsonObject { put("source_unit", sourceUnit); put("bytes", buildJsonObject { put("start", start); put("end", end) }) })
+            put("arguments", buildJsonArray { arguments.forEach(::add) }); put("precision", "exact"); put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
+        }
+    }
+
     private fun enclosingSymbols(symbols: List<JsonElement>): List<EnclosingSymbol> = symbols.mapNotNull { element ->
         val symbol = element.jsonObject
         val declaration = symbol["declaration"]!!.jsonObject["bytes"]!!.jsonObject
@@ -243,5 +263,6 @@ internal object K2SnapshotEnricher {
         ?.id
 
     private data class ExactFact(val reference: K2ResolvedReference, val target: String, val occurrence: JsonElement)
+    private data class ResolvedAnnotation(val annotation: K2ResolvedAnnotation, val owner: String, val target: String)
     private data class EnclosingSymbol(val id: String, val start: Int, val end: Int)
 }

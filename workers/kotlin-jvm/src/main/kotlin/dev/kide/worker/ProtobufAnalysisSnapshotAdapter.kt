@@ -100,6 +100,22 @@ internal object ProtobufAnalysisSnapshotAdapter {
         .setPrecision(value["precision"]!!.jsonPrimitive.content)
         .setProvenanceIndex(0).build()
 
+    private fun application(value: JsonObject): Worker.ApplicationFact {
+        val range = value["range"]!!.jsonObject["bytes"]!!.jsonObject
+        return Worker.ApplicationFact.newBuilder().setId(value["id"]!!.jsonPrimitive.content)
+            .setSubjectSymbolId(value["subject"]!!.jsonPrimitive.content).setTargetSymbolId(value["target"]!!.jsonPrimitive.content)
+            .setRange(range(range)).setPrecision(value["precision"]!!.jsonPrimitive.content).setFreshness(value["freshness"]!!.jsonPrimitive.content)
+            .setCompleteness(value["completeness"]!!.jsonPrimitive.content).setProvenanceIndex(0).apply {
+                value["arguments"]!!.jsonArray.forEach { argument ->
+                    val record = argument.jsonObject; val literal = record["value"]!!.jsonObject
+                    addArguments(Worker.ApplicationArgument.newBuilder().setPosition(record["position"]!!.jsonPrimitive.int).apply {
+                        record["name"]?.jsonPrimitive?.contentOrNull?.let(::setName)
+                        when (literal["kind"]!!.jsonPrimitive.content) { "string" -> setStringValue(literal["value"]!!.jsonPrimitive.content); "string_list" -> { setStringValue(""); addAllStringListValue(literal["value"]!!.jsonArray.map { it.jsonPrimitive.content }) }; "boolean" -> setBooleanValue(literal["value"]!!.jsonPrimitive.content.toBoolean()); "integer" -> setIntegerValue(literal["value"]!!.jsonPrimitive.long) }
+                    })
+                }
+            }.build()
+    }
+
     private fun type(value: JsonObject): Worker.TypeRecord = Worker.TypeRecord.newBuilder()
         .setId(value["id"]!!.jsonPrimitive.content)
         .setLanguage(value["language"]!!.jsonPrimitive.content)
@@ -167,6 +183,10 @@ internal object ProtobufAnalysisSnapshotAdapter {
             val record = it.jsonObject
             diagnostic(record).toBuilder().setProvenanceIndex(provenanceIndex(record)).build()
         }
+        val applications = value["applications"]?.jsonArray?.map {
+            val record = it.jsonObject
+            application(record).toBuilder().setProvenanceIndex(provenanceIndex(record)).build()
+        } ?: emptyList()
 
         return Worker.FileAnalysisSnapshot.newBuilder()
             .setSourceUnit(ProtobufManifestAdapter.sourceUnit(value["source_unit"]!!.jsonObject))
@@ -176,6 +196,7 @@ internal object ProtobufAnalysisSnapshotAdapter {
             }
             .addAllProvenances(provenanceValues.map(::provenance))
             .addAllSymbols(symbols)
+            .addAllApplications(applications)
             .addAllOccurrences(occurrences)
             .addAllReferences(references)
             .addAllCalls(calls)
@@ -301,6 +322,36 @@ internal object ProtobufAnalysisSnapshotAdapter {
                         put("freshness", symbol.freshness)
                         put("completeness", symbol.completeness)
                         put("provenance", json(factProvenance))
+                    })
+                }
+            })
+            put("applications", buildJsonArray {
+                value.applicationsList.forEach { application ->
+                    require(application.hasRange()) { "application range is required" }
+                    val provenance = factProvenance(application.provenanceIndex)
+                    add(buildJsonObject {
+                        put("id", application.id); put("subject", application.subjectSymbolId); put("target", application.targetSymbolId)
+                        put("range", buildJsonObject { put("source_unit", value.sourceUnit.id); put("bytes", json(application.range)) })
+                        put("arguments", buildJsonArray {
+                            application.argumentsList.forEach { argument ->
+                                add(buildJsonObject {
+                                    put("name", nullable(argument.name, argument.hasName()))
+                                    put("position", argument.position)
+                                    put("value", buildJsonObject {
+                                        when {
+                                            argument.stringListValueCount > 0 -> { put("kind", "string_list"); put("value", buildJsonArray { argument.stringListValueList.forEach { add(JsonPrimitive(it)) } }) }
+                                            else -> when (argument.valueCase) {
+                                            Worker.ApplicationArgument.ValueCase.STRING_VALUE -> { put("kind", "string"); put("value", argument.stringValue) }
+                                            Worker.ApplicationArgument.ValueCase.BOOLEAN_VALUE -> { put("kind", "boolean"); put("value", argument.booleanValue) }
+                                            Worker.ApplicationArgument.ValueCase.INTEGER_VALUE -> { put("kind", "integer"); put("value", argument.integerValue) }
+                                            else -> error("application argument value is required")
+                                        }
+                                        }
+                                    })
+                                })
+                            }
+                        })
+                        put("precision", application.precision); put("freshness", application.freshness); put("completeness", application.completeness); put("provenance", json(provenance))
                     })
                 }
             })

@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CallEdge, Completeness, DiagnosticRecord, Fingerprint, HierarchyEdge, Language,
-    ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId,
+    ApplicationFact, CallEdge, Completeness, DiagnosticRecord, Fingerprint, HierarchyEdge,
+    Language, ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId,
     SymbolRecord, TypeRecord, WorkspaceId, WorkspacePath,
 };
 
@@ -94,6 +94,8 @@ pub struct FileAnalysisSnapshot {
     #[serde(default)]
     pub public_api_fingerprint: Option<Fingerprint>,
     pub symbols: Vec<SymbolRecord>,
+    #[serde(default)]
+    pub applications: Vec<ApplicationFact>,
     pub occurrences: Vec<SourceOccurrence>,
     pub references: Vec<ReferenceEdge>,
     pub calls: Vec<CallEdge>,

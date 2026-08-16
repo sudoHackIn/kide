@@ -61,6 +61,20 @@ impl SymbolId {
     }
 }
 
+/// Stable source-snapshot scoped identity of one declarative application.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApplicationId(String);
+
+impl ApplicationId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// An opaque identity for a normalized type record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -376,6 +390,41 @@ pub struct CallEdge {
     pub target: SymbolId,
     pub caller: Option<SymbolId>,
     pub precision: Precision,
+}
+
+/// A normalized literal argument. Values which the worker cannot prove are
+/// omitted rather than represented as guessed text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ApplicationValue {
+    String(String),
+    StringList(Vec<String>),
+    Boolean(bool),
+    Integer(i64),
+}
+
+/// One named or positional argument on a declarative application.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationArgument {
+    pub name: Option<String>,
+    pub position: u32,
+    pub value: ApplicationValue,
+}
+
+/// A resolved annotation/decorator/attribute use. This remains separate from
+/// `SymbolRecord`: several uses of one target can carry different arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationFact {
+    pub id: ApplicationId,
+    pub subject: SymbolId,
+    pub target: SymbolId,
+    pub range: SourceRange,
+    #[serde(default)]
+    pub arguments: Vec<ApplicationArgument>,
+    pub precision: Precision,
+    pub freshness: Freshness,
+    pub completeness: Completeness,
+    pub provenance: Provenance,
 }
 
 /// An exact subtype/supertype or implementation relation.

@@ -1,16 +1,17 @@
 use thiserror::Error;
 
 use crate::{
-    AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
-    ArtifactAnalysisRequest, ArtifactAnalysisResponse, ArtifactDescriptor,
-    ArtifactDiscoveryRequest, ArtifactDiscoveryResponse, ArtifactMaterializationRequest,
-    ArtifactMaterializationResponse, BackendKey, BuildSystem, CallEdge, Component, ComponentId,
-    DependencyEdge, DependencyTarget, DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot,
-    Fingerprint, HierarchyEdge, Language, OccurrenceKind, Precision, ProjectManifest, Provenance,
-    ReferenceEdge, SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit,
-    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord,
-    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerError, WorkerErrorCode,
-    WorkerIdentity, WorkerMessage, WorkspaceId, WorkspacePath, worker_proto,
+    worker_proto, AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
+    ApplicationArgument, ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
+    ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
+    BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
+    DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
+    Language, OccurrenceKind, Precision, ProjectManifest, Provenance, ReferenceEdge,
+    SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
+    SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
+    WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
+    WorkspacePath,
 };
 
 #[derive(Debug, Error)]
@@ -717,6 +718,97 @@ pub fn decode_hierarchy_edge(
     })
 }
 
+fn application_argument(value: &ApplicationArgument) -> worker_proto::ApplicationArgument {
+    use worker_proto::application_argument::Value;
+    worker_proto::ApplicationArgument {
+        name: value.name.clone(),
+        position: value.position,
+        value: Some(match &value.value {
+            ApplicationValue::String(v) => Value::StringValue(v.clone()),
+            ApplicationValue::StringList(_) => Value::StringValue(String::new()),
+            ApplicationValue::Boolean(v) => Value::BooleanValue(*v),
+            ApplicationValue::Integer(v) => Value::IntegerValue(*v),
+        }),
+        string_list_value: match &value.value {
+            ApplicationValue::StringList(values) => values.clone(),
+            _ => vec![],
+        },
+    }
+}
+
+fn decode_application_argument(
+    value: worker_proto::ApplicationArgument,
+) -> Result<ApplicationArgument, AdapterError> {
+    use worker_proto::application_argument::Value;
+    let name = value.name;
+    let position = value.position;
+    let value = if !value.string_list_value.is_empty() {
+        ApplicationValue::StringList(value.string_list_value)
+    } else {
+        match value
+            .value
+            .ok_or(AdapterError::Missing("application.argument.value"))?
+        {
+            Value::StringValue(v) => ApplicationValue::String(v),
+            Value::BooleanValue(v) => ApplicationValue::Boolean(v),
+            Value::IntegerValue(v) => ApplicationValue::Integer(v),
+        }
+    };
+    Ok(ApplicationArgument {
+        name,
+        position,
+        value,
+    })
+}
+
+fn application_fact(value: &ApplicationFact) -> worker_proto::ApplicationFact {
+    worker_proto::ApplicationFact {
+        id: value.id.as_str().to_owned(),
+        subject_symbol_id: value.subject.as_str().to_owned(),
+        target_symbol_id: value.target.as_str().to_owned(),
+        range: Some(worker_proto::ByteRange {
+            start: value.range.bytes.start,
+            end: value.range.bytes.end,
+        }),
+        arguments: value.arguments.iter().map(application_argument).collect(),
+        precision: format!("{:?}", value.precision).to_lowercase(),
+        freshness: format!("{:?}", value.freshness).to_lowercase(),
+        completeness: format!("{:?}", value.completeness).to_lowercase(),
+        provenance_index: 0,
+    }
+}
+
+fn decode_application_fact(
+    value: worker_proto::ApplicationFact,
+    source: &SourceUnit,
+    provenance: &Provenance,
+) -> Result<ApplicationFact, AdapterError> {
+    let range = value
+        .range
+        .ok_or(AdapterError::Missing("application.range"))?;
+    Ok(ApplicationFact {
+        id: ApplicationId::new(value.id),
+        subject: SymbolId::new(value.subject_symbol_id),
+        target: SymbolId::new(value.target_symbol_id),
+        range: SourceRange {
+            source_unit: source.id.clone(),
+            bytes: crate::ByteRange {
+                start: range.start,
+                end: range.end,
+            },
+        },
+        arguments: value
+            .arguments
+            .into_iter()
+            .map(decode_application_argument)
+            .collect::<Result<_, _>>()?,
+        precision: precision(value.precision)?,
+        freshness: freshness(value.freshness)?,
+        completeness: completeness(value.completeness)?,
+        provenance: provenance.clone(),
+    })
+}
+
 fn indexed_provenance<'a>(
     values: &'a [Provenance],
     index: u32,
@@ -746,6 +838,14 @@ pub fn file_analysis_snapshot(
         .map(symbol_declaration)
         .collect::<Vec<_>>();
     for (proto, canonical) in symbols.iter_mut().zip(&value.symbols) {
+        proto.provenance_index = provenance_index(&mut provenances, &canonical.provenance);
+    }
+    let mut applications = value
+        .applications
+        .iter()
+        .map(application_fact)
+        .collect::<Vec<_>>();
+    for (proto, canonical) in applications.iter_mut().zip(&value.applications) {
         proto.provenance_index = provenance_index(&mut provenances, &canonical.provenance);
     }
     let mut occurrences = value.occurrences.iter().map(occurrence).collect::<Vec<_>>();
@@ -798,6 +898,7 @@ pub fn file_analysis_snapshot(
             .map(|value| value.as_str().to_owned()),
         provenances: provenances.iter().map(proto_provenance).collect(),
         symbols,
+        applications,
         occurrences,
         references,
         calls,
@@ -838,6 +939,18 @@ pub fn decode_file_analysis_snapshot(
                 "symbol.provenance_index",
             )?;
             decode_symbol_declaration(symbol, &source_unit, p)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let applications = value
+        .applications
+        .into_iter()
+        .map(|application| {
+            let p = indexed_provenance(
+                &provenances,
+                application.provenance_index,
+                "application.provenance_index",
+            )?;
+            decode_application_fact(application, &source_unit, p)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let occurrences = value
@@ -903,6 +1016,7 @@ pub fn decode_file_analysis_snapshot(
         structural_fingerprint: value.structural_fingerprint.map(Fingerprint::new),
         public_api_fingerprint: value.public_api_fingerprint.map(Fingerprint::new),
         symbols,
+        applications,
         occurrences,
         references,
         calls,

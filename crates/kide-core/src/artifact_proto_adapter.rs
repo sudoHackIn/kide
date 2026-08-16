@@ -8,7 +8,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{FileAnalysisSnapshot, artifact_proto, worker_proto, worker_proto_adapter};
+use crate::{artifact_proto, worker_proto, worker_proto_adapter, FileAnalysisSnapshot};
 
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
@@ -107,6 +107,7 @@ fn decode_snapshot(
             .map(decode_provenance)
             .collect(),
         symbols: value.symbols.into_iter().map(decode_symbol).collect(),
+        applications: vec![],
         occurrences: value
             .occurrences
             .into_iter()

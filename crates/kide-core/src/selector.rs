@@ -3,8 +3,8 @@
 use thiserror::Error;
 
 use crate::{
-    Completeness, ComponentId, Freshness, IndexStore, IndexStoreError, Language, ResultMetadata,
-    SelectorRecord, SymbolId, SymbolKind, SymbolRecord,
+    ApplicationValue, Completeness, ComponentId, Freshness, IndexStore, IndexStoreError, Language,
+    ResultMetadata, SelectorRecord, SymbolId, SymbolKind, SymbolRecord,
 };
 
 /// A language-level convenience view. It compiles to canonical predicates;
@@ -36,6 +36,16 @@ pub struct Selector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorPlan {
     AppliedSymbolPosting { applied_symbol: SymbolId },
+}
+
+/// A bounded composed application pattern. The names are relations, not
+/// framework concepts: callers supply resolved target identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedApplicationArgumentPattern {
+    pub nested_target: SymbolId,
+    pub outer_target: SymbolId,
+    pub argument_name: String,
+    pub argument_value: ApplicationValue,
 }
 
 /// Explicit answer state: a partial snapshot is never reported as complete.
@@ -95,6 +105,37 @@ pub fn select(store: &IndexStore, selector: &Selector) -> Result<SelectorResult,
     Ok(SelectorResult {
         state,
         plan,
+        symbols,
+    })
+}
+
+/// Executes `nested symbol -[applies]-> target`, `nested -[owns]-> outer`,
+/// and an outer application argument match. The indexed nested-target posting
+/// is always the starting set; owner and argument joins are bounded to it.
+pub fn select_nested_application_argument(
+    store: &IndexStore,
+    pattern: &NestedApplicationArgumentPattern,
+) -> Result<SelectorResult, SelectorError> {
+    let symbols = store.symbols_with_nested_application_argument(
+        &pattern.nested_target,
+        &pattern.outer_target,
+        &pattern.argument_name,
+        &pattern.argument_value,
+    )?;
+    let state = if symbols.is_empty() {
+        SelectorState::NoResult
+    } else if symbols.iter().all(|symbol| {
+        symbol.freshness == Freshness::Fresh && symbol.completeness == Completeness::Complete
+    }) {
+        SelectorState::Complete
+    } else {
+        SelectorState::Partial
+    };
+    Ok(SelectorResult {
+        state,
+        plan: SelectorPlan::AppliedSymbolPosting {
+            applied_symbol: pattern.nested_target.clone(),
+        },
         symbols,
     })
 }

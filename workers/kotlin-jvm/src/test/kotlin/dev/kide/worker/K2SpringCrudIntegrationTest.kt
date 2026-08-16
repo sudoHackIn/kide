@@ -120,6 +120,23 @@ class K2SpringCrudIntegrationTest {
     }
 
     @Test
+    fun emitsResolvedApplicationArgumentsForNestedConfigurationPattern() {
+        val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
+        val payload = buildJsonObject {
+            put("source_units", buildJsonArray {
+                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/FeatureConfiguration.kt"))
+            })
+        }
+        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val applications = snapshot["applications"]!!.jsonArray.map { it.jsonObject }
+        val outer = applications.single { it["target"]!!.toString().contains("ConditionalOnProperty") }
+        assertTrue(outer["arguments"]!!.jsonArray.any { argument ->
+            argument.jsonObject["name"]!!.toString().contains("name") && argument.jsonObject["value"]!!.toString().contains("feature.books")
+        }, "ConditionalOnProperty application: $outer")
+        assertTrue(applications.any { it["target"]!!.toString().contains("Configuration") && it["subject"]!!.toString().contains("NestedBookConfiguration") })
+    }
+
+    @Test
     fun discoversDependencySymbolLocatorsWithoutGraphFacts() {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val descriptors = artifactDescriptors(root, maxArtifacts = 256, cursor = null)

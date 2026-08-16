@@ -7,11 +7,11 @@ use std::{
 };
 
 use kide_core::{
+    artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
     AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryResponse,
     ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, HandshakeResponse,
-    Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WORKER_PROTOCOL_VERSION,
-    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
-    artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
+    Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerCapabilities,
+    WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage, WORKER_PROTOCOL_VERSION,
 };
 use sha2::{Digest, Sha256};
 
@@ -62,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             structural_fingerprint: None,
                             public_api_fingerprint: None,
                             symbols: Vec::new(),
+                            applications: Vec::new(),
                             occurrences: Vec::new(),
                             references: Vec::new(),
                             calls: Vec::new(),

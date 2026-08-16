@@ -51,6 +51,7 @@
             }
           }
         ],
+        "applications": [],
         "occurrences": [],
         "references": [],
         "calls": [],
@@ -78,6 +79,7 @@
         "structural_fingerprint": null,
         "public_api_fingerprint": null,
         "symbols": [],
+        "applications": [],
         "occurrences": [],
         "references": [],
         "calls": [],

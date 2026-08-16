@@ -109,6 +109,24 @@ message FileAnalysisSnapshot {
   repeated Diagnostic diagnostics = 11;
   string completeness = 12;
   uint32 provenance_index = 13;
+  repeated ApplicationFact applications = 14;
+}
+message ApplicationArgument {
+  optional string name = 1;
+  uint32 position = 2;
+  oneof value { string string_value = 3; bool boolean_value = 4; sint64 integer_value = 5; }
+  repeated string string_list_value = 6;
+}
+message ApplicationFact {
+  string id = 1;
+  string subject_symbol_id = 2;
+  string target_symbol_id = 3;
+  ByteRange range = 4;
+  repeated ApplicationArgument arguments = 5;
+  string precision = 6;
+  string freshness = 7;
+  string completeness = 8;
+  uint32 provenance_index = 9;
 }
 message SourceLocation {
   uint32 source_unit_index = 1;

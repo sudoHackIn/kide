@@ -59,8 +59,8 @@ internal object KideFirCollector {
         if (supertypeKey != "class:kotlin.Any") hierarchy.add(K2HierarchyEdge(subtypeKey, supertypeKey))
     }
 
-    internal fun recordAnnotation(sourcePath: String, owner: FirBasedSymbol<*>, annotation: ConeClassLikeType) {
-        annotations.add(K2ResolvedAnnotation(sourcePath, targetKey(owner), "class:${annotation.lookupTag.classId.asSingleFqName().asString()}"))
+    internal fun recordAnnotation(sourcePath: String, owner: FirBasedSymbol<*>, annotation: ConeClassLikeType, source: KtSourceElement?) {
+        annotations.add(K2ResolvedAnnotation(sourcePath, targetKey(owner), "class:${annotation.lookupTag.classId.asSingleFqName().asString()}", source?.startOffset, source?.endOffset))
     }
 
     internal fun recordOverride(overriding: FirCallableSymbol<*>, overridden: FirCallableSymbol<*>) {
@@ -124,7 +124,7 @@ internal data class K2ResolvedReference(
 )
 
 internal data class K2HierarchyEdge(val subtypeKey: String, val supertypeKey: String)
-internal data class K2ResolvedAnnotation(val sourcePath: String, val ownerKey: String, val targetKey: String)
+internal data class K2ResolvedAnnotation(val sourcePath: String, val ownerKey: String, val targetKey: String, val startUtf16: Int?, val endUtf16: Int?)
 internal data class K2SemanticFacts(val references: List<K2ResolvedReference>, val hierarchy: List<K2HierarchyEdge>, val annotations: List<K2ResolvedAnnotation>)
 
 /** Registered through the standard compiler-plugin service entry. */
@@ -168,7 +168,7 @@ private object KideClassHierarchyChecker : FirDeclarationChecker<FirClass>(MppCh
         val sourcePath = context.containingFile?.path ?: return
         declaration.annotations.forEach { annotation ->
             val type = (annotation.annotationTypeRef as? FirResolvedTypeRef)?.coneType as? ConeClassLikeType ?: return@forEach
-            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type)
+            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type, annotation.source)
         }
     }
 }
@@ -183,7 +183,7 @@ private object KideFunctionOverrideChecker : FirDeclarationChecker<FirNamedFunct
         val sourcePath = context.containingFile?.path ?: return
         declaration.annotations.forEach { annotation ->
             val type = (annotation.annotationTypeRef as? FirResolvedTypeRef)?.coneType as? ConeClassLikeType ?: return@forEach
-            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type)
+            KideFirCollector.recordAnnotation(sourcePath, declaration.symbol, type, annotation.source)
         }
     }
 }
