@@ -9,6 +9,7 @@ mod artifact_cache;
 pub mod artifact_proto_adapter;
 pub mod artifact_query;
 pub mod query_resolver;
+pub mod query_package;
 pub mod selector;
 pub mod semantic_query;
 pub mod text_index;
