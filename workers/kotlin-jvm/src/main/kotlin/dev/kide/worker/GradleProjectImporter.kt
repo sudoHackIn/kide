@@ -127,7 +127,9 @@ internal object GradleProjectImporter {
         .flatMap { directory ->
             val root = directory.directory.toPath()
             if (!Files.isDirectory(root)) emptyList() else Files.walk(root).use { paths ->
-                paths.filter { path -> path.isRegularFile() && path.fileName.toString().endsWith(".kt") }.toList()
+                paths.filter { path ->
+                    path.isRegularFile() && (path.fileName.toString().endsWith(".kt") || path.fileName.toString().endsWith(".java"))
+                }.toList()
             }
         }
         .map { path -> path.toAbsolutePath().normalize() }
