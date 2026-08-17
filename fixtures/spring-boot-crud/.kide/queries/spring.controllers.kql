@@ -1,0 +1,5 @@
+command spring.controllers() {
+  from spring.web.controller()
+  return symbol
+  limit 100
+}

@@ -7,11 +7,13 @@ mod index;
 mod input;
 mod navigation;
 mod output;
+mod query;
 mod search;
 use kide_core::QueryStatus;
 
 pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
     match cli.command {
+        Command::Query { args, params } => query::run(&cli.workspace, args, params, human_output),
         Command::Index {
             path,
             force,

@@ -1,5 +1,7 @@
 package dev.kide.fixture.book;
 
+import org.springframework.web.bind.annotation.RestController;
+
 @interface Audited {
 }
 
@@ -15,6 +17,7 @@ final class SpringJavaBookAudit implements JavaBookAudit {
 }
 
 @Audited
+@RestController
 final class JavaBookAuditController {
     private final JavaBookAudit audit = new SpringJavaBookAudit();
 

@@ -26,6 +26,12 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    Query {
+        #[arg(required = true)]
+        args: Vec<String>,
+        #[arg(long = "param", value_parser = parse_parameter)]
+        params: Vec<(String, String)>,
+    },
     Index {
         path: PathBuf,
         #[arg(long)]
@@ -74,6 +80,12 @@ pub(crate) enum Command {
     TypeAt {
         location: String,
     },
+}
+
+fn parse_parameter(value: &str) -> Result<(String, String), String> {
+    let (name, value) = value.split_once('=').ok_or_else(|| "parameters use name=value".to_owned())?;
+    if name.is_empty() { return Err("parameter name is empty".to_owned()); }
+    Ok((name.to_owned(), value.to_owned()))
 }
 
 pub fn run_cli() -> ExitCode {

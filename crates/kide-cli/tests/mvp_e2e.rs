@@ -168,6 +168,10 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let audited_id = audited["result"]["symbols"][0]["id"].as_str().expect("Audited id");
     let java_selected = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "select", "--java-class", "--applies", audited_id]);
     assert_eq!(java_selected["symbol"]["name"], "JavaBookAuditController");
+    let controllers = run_json_lines(&workspace, ["--workspace", workspace.to_str().unwrap(), "query", "spring.controllers"]);
+    let controller_names = controllers.iter().map(|record| record["symbol"]["name"].as_str().expect("symbol name")).collect::<Vec<_>>();
+    assert!(controller_names.contains(&"BookController"));
+    assert!(controller_names.contains(&"JavaBookAuditController"));
     let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
     let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")
@@ -303,7 +307,7 @@ fn copy_fixture(source: &Path, destination: &Path) {
     for entry in fs::read_dir(source).expect("reads fixture directory") {
         let entry = entry.expect("directory entry");
         let name = entry.file_name();
-        if matches!(name.as_os_str(), value if value == OsStr::new(".gradle") || value == OsStr::new(".kide") || value == OsStr::new(".kotlin") || value == OsStr::new("build"))
+        if matches!(name.as_os_str(), value if value == OsStr::new(".gradle") || value == OsStr::new(".kotlin") || value == OsStr::new("build"))
         {
             continue;
         }

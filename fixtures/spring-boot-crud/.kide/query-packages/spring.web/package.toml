@@ -1,0 +1,12 @@
+format = 1
+id = "spring.web"
+version = "1.0.0"
+requires_core = "^1"
+
+[exports]
+macros = ["controller"]
+commands = []
+
+[[capabilities]]
+name = "applications.resolved_target"
+required = true

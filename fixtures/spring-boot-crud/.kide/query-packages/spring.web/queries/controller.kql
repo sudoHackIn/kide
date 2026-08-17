@@ -1,0 +1,2 @@
+from applies(qualified-symbol("org.springframework.web.bind.annotation.RestController"))
+where kind == class
