@@ -12,23 +12,29 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let workspace = directory.path().join("spring-boot-crud");
     copy_fixture(&fixture_root(), &workspace);
 
-    let started = Instant::now();
-    let cold = run_json(
-        &workspace,
-        ["index", workspace.to_str().expect("workspace path")],
-    );
+    let cold = measure("cold_index", || {
+        run_json(
+            &workspace,
+            ["index", workspace.to_str().expect("workspace path")],
+        )
+    });
     assert_eq!(cold["status"], "ok");
     assert_eq!(cold["analyzed"], 7);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
-    eprintln!(
-        "spring_crud cold_index_ms={}",
-        started.elapsed().as_millis()
-    );
 
-    let status = run_json(
-        &workspace,
-        ["--workspace", workspace.to_str().unwrap(), "status"],
-    );
+    let unchanged = measure("unchanged_index", || {
+        run_json(&workspace, ["index", workspace.to_str().unwrap()])
+    });
+    assert_eq!(unchanged["analyzed"], 0);
+    assert_eq!(unchanged["reused"], 7);
+    assert_eq!(unchanged["worker_starts"], 0);
+
+    let status = measure("warm_status", || {
+        run_json(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "status"],
+        )
+    });
     assert_eq!(status["status"], "ok");
     assert_eq!(status["result"]["source_units"]["fresh"], 7);
     assert!(status["result"]["workers_running"]
@@ -36,45 +42,46 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         .expect("workers array")
         .is_empty());
 
-    let warm_query_started = Instant::now();
-    let book_entity = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "symbols",
-            "BookEntity",
-        ],
-    );
+    let book_entity = measure("warm_symbols", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "symbols",
+                "BookEntity",
+            ],
+        )
+    });
     let symbol = book_entity["result"]["symbols"][0].clone();
-    eprintln!(
-        "spring_crud warm_symbols_ms={}",
-        warm_query_started.elapsed().as_millis()
-    );
     assert_eq!(symbol["name"], "BookEntity");
     let book_entity_id = symbol["id"].as_str().expect("stable symbol id").to_owned();
 
-    let definition = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "definition",
-            &book_entity_id,
-        ],
-    );
+    let definition = measure("warm_definition", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "definition",
+                &book_entity_id,
+            ],
+        )
+    });
     assert_eq!(definition["status"], "ok");
     assert_eq!(definition["result"]["symbol"]["id"], book_entity_id);
 
-    let references = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "refs",
-            &book_entity_id,
-        ],
-    );
+    let references = measure("warm_refs", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "refs",
+                &book_entity_id,
+            ],
+        )
+    });
     assert_eq!(references["status"], "ok");
     assert!(
         references["result"]["references"]
@@ -84,49 +91,57 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
             >= 5
     );
 
-    let implementations = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "implementations",
-            &book_entity_id,
-        ],
-    );
+    let implementations = measure("warm_implementations", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "implementations",
+                &book_entity_id,
+            ],
+        )
+    });
     assert_eq!(implementations["status"], "no_result");
 
-    let create = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "symbols",
-            "create",
-        ],
-    );
+    let create = measure("warm_create_symbols", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "symbols",
+                "create",
+            ],
+        )
+    });
     let create_id = create["result"]["symbols"][0]["id"]
         .as_str()
         .expect("create id");
-    let callers = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "callers",
-            create_id,
-        ],
-    );
+    let callers = measure("warm_callers", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "callers",
+                create_id,
+            ],
+        )
+    });
     assert_eq!(callers["status"], "no_result");
 
-    let type_at = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "type-at",
-            "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt:32:65",
-        ],
-    );
+    let type_at = measure("warm_type_at", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "type-at",
+                "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt:32:65",
+            ],
+        )
+    });
     assert_eq!(type_at["status"], "ok");
     assert_eq!(
         type_at["result"]["ty"]["display"],
@@ -140,28 +155,32 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         .map(|value| value.as_str().expect("symbol id"))
         .find(|id| id.ends_with(":jakarta.persistence.Entity"))
         .expect("Entity annotation");
-    let selected = run_json(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "select",
-            "--kotlin-class",
-            "--applies",
-            entity_annotation,
-        ],
-    );
+    let selected = measure("warm_select", || {
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "select",
+                "--kotlin-class",
+                "--applies",
+                entity_annotation,
+            ],
+        )
+    });
     assert_eq!(selected["symbol"]["id"], book_entity_id);
 
-    let text = run_json_lines(
-        &workspace,
-        [
-            "--workspace",
-            workspace.to_str().unwrap(),
-            "text",
-            "BookEntity",
-        ],
-    );
+    let text = measure("warm_text", || {
+        run_json_lines(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "text",
+                "BookEntity",
+            ],
+        )
+    });
     assert!(text
         .iter()
         .any(|record| record["path"] == "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"));
@@ -175,15 +194,26 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         ),
     )
     .expect("edits source");
-    let stale = run_json(
-        &workspace,
-        ["--workspace", workspace.to_str().unwrap(), "status"],
-    );
+    let stale = measure("stale_status", || {
+        run_json(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "status"],
+        )
+    });
     assert_eq!(stale["result"]["source_units"]["stale"], 1);
 
-    let incremental = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+    let incremental = measure("incremental_index", || {
+        run_json(&workspace, ["index", workspace.to_str().unwrap()])
+    });
     assert_eq!(incremental["analyzed"], 1);
     assert_eq!(incremental["reused"], 6);
+}
+
+fn measure<T>(name: &str, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    eprintln!("spring_crud {name}_ms={}", started.elapsed().as_millis());
+    result
 }
 
 fn fixture_root() -> std::path::PathBuf {
