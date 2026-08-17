@@ -22,8 +22,28 @@ internal object JvmArtifactBlobLayout {
                 }
             })
             .build()
+        val postings = Artifact.ArtifactSymbolPostings.newBuilder()
+            .apply {
+                artifact.snapshotsList.forEachIndexed { sourceUnitIndex, snapshot ->
+                    snapshot.symbolsList.forEach { symbol ->
+                        addEntries(
+                            Artifact.ArtifactSymbolPosting.newBuilder()
+                                .setSourceUnitIndex(sourceUnitIndex)
+                                .setId(symbol.id)
+                                .setName(symbol.name)
+                                .setQualifiedName(symbol.qualifiedName)
+                                .setDeclaration(symbol.declaration)
+                                .setNameRange(symbol.nameRange)
+                                .setKind(symbol.kind)
+                                .build(),
+                        )
+                    }
+                }
+            }
+            .build()
         val sections = listOf(
             Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_SYMBOL_DICTIONARY to dictionary.toByteArray(),
+            Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_SYMBOL_POSTINGS to postings.toByteArray(),
             Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_GRAPH_FACTS to artifact.toByteArray(),
         )
         var toc = Artifact.ArtifactBlobToc.newBuilder().setLayoutVersion(VERSION).build()

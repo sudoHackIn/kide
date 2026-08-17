@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    worker_proto, AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
-    ApplicationArgument, ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
+    AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest, ApplicationArgument,
+    ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
     ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryRequest,
     ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
     BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
@@ -11,7 +11,7 @@ use crate::{
     SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
     SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
     WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
-    WorkspacePath,
+    WorkspacePath, worker_proto,
 };
 
 #[derive(Debug, Error)]

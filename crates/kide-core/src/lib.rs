@@ -116,11 +116,13 @@ pub mod worker_proto_adapter;
 #[cfg(test)]
 mod worker_framing_tests {
     use prost::Message;
+    use tempfile::tempdir;
 
     use crate::{
-        worker_framing, worker_proto, BackendKey, ByteRange, Completeness, ComponentId,
+        ArtifactBlobCache, ArtifactBlobKey, BackendKey, ByteRange, Completeness, ComponentId,
         Fingerprint, Freshness, Language, Provenance, SourceOrigin, SourceRange, SourceUnit,
-        SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WorkspacePath,
+        SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WORKER_PROTOCOL_VERSION, WorkspacePath,
+        worker_framing, worker_proto,
     };
 
     #[test]
@@ -516,15 +518,58 @@ mod worker_framing_tests {
         )
         .expect("dictionary protobuf decodes");
         assert_eq!(dictionary.entries[0].id, "java:example.Widget");
+        let postings = validated.symbol_postings().expect("postings decode");
+        assert_eq!(postings.entries[0].name, "Widget");
 
         let mut corrupt = encoded.bytes().to_vec();
         *corrupt.last_mut().expect("nonempty blob") ^= 1;
         let validated = crate::artifact_blob_layout::ArtifactBlobLayout::validate(corrupt)
             .expect("header remains valid");
         assert!(matches!(
-            validated.section(crate::artifact_proto::ArtifactBlobSectionKind::GraphFacts),
+            validated.section(crate::artifact_proto::ArtifactBlobSectionKind::SymbolPostings),
             Err(crate::artifact_blob_layout::ArtifactBlobLayoutError::ChecksumMismatch)
         ));
+    }
+
+    #[test]
+    fn cached_blob_reads_postings_by_range_without_loading_graph_facts() {
+        let graph = crate::artifact_proto::GraphArtifact {
+            snapshots: vec![crate::artifact_proto::GraphSnapshot {
+                symbols: vec![crate::artifact_proto::ArtifactSymbol {
+                    id: "java:example.Widget".into(),
+                    name: "Widget".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let encoded = crate::artifact_blob_layout::ArtifactBlobLayout::encode(&graph);
+        let directory = tempdir().expect("temporary cache");
+        let cache = ArtifactBlobCache::open(directory.path()).expect("opens cache");
+        let provenance = Provenance {
+            backend: "fixture".into(),
+            backend_version: "1".into(),
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            analysis_options: Fingerprint::new("sha256:options"),
+        };
+        let key = ArtifactBlobKey::new(Fingerprint::new("sha256:artifact"), &provenance);
+        cache
+            .publish(&key, encoded.bytes())
+            .expect("publishes blob");
+        let mut blob = cache
+            .open_blob(&key)
+            .expect("opens blob")
+            .expect("blob exists");
+        let sections = crate::artifact_blob_layout::ArtifactBlobSections::open(&mut blob)
+            .expect("reads header and toc only");
+        assert_eq!(
+            sections
+                .symbol_postings(&mut blob)
+                .expect("reads postings")
+                .entries[0]
+                .name,
+            "Widget"
+        );
     }
 
     #[test]
@@ -593,8 +638,8 @@ pub use protocol::*;
 pub use query::*;
 pub use store::*;
 pub use supervisor::*;
-pub use worker_registry::*;
 pub use text_index::*;
+pub use worker_registry::*;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;

@@ -1,11 +1,11 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    index_batch, index_batch_with_artifact_cache_and_provenance, materialize_catalog_artifact,
-    ArtifactBlobCache, ArtifactDescriptor, BuildSystem, Component, ComponentId, Fingerprint,
-    IndexStore, Language, MaterializationBudget, MaterializationOutcome, ProjectManifest,
-    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerLaunch, WorkerSupervisor,
-    WorkspaceId, WorkspacePath,
+    ArtifactBlobCache, ArtifactBlobKey, ArtifactDescriptor, BuildSystem, Component, ComponentId,
+    Fingerprint, IndexStore, Language, MaterializationBudget, MaterializationOutcome,
+    ProjectManifest, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerLaunch,
+    WorkerSupervisor, WorkspaceId, WorkspacePath, index_batch,
+    index_batch_with_artifact_cache_and_provenance, materialize_catalog_artifact,
 };
 use tempfile::tempdir;
 
@@ -68,6 +68,49 @@ fn backend_version_drift_reanalyzes_unchanged_sources() {
 }
 
 #[test]
+fn cached_indexing_catalogs_dependencies_without_eager_graph_materialization() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+    let staging = directory.path().join("staging");
+    std::fs::create_dir_all(&staging).expect("creates staging");
+    let descriptor = artifact_descriptor();
+
+    index_batch_with_artifact_cache_and_provenance(
+        &mut store,
+        &manifest(),
+        &[source("One.kt", "sha256:one")],
+        materializing_launch(),
+        &cache,
+        &staging,
+        worker_provenance(),
+    )
+    .expect("indexes source and catalogs dependencies");
+
+    assert_eq!(
+        store
+            .artifact_descriptor(&descriptor.source_unit.id)
+            .expect("reads catalog"),
+        Some(descriptor.clone())
+    );
+    assert!(
+        store
+            .source_unit(&descriptor.source_unit.id)
+            .expect("reads store")
+            .is_none()
+    );
+    assert!(
+        cache
+            .open_blob(&ArtifactBlobKey::new(
+                descriptor.source_unit.content,
+                &descriptor.provenance,
+            ))
+            .expect("checks cache")
+            .is_none()
+    );
+}
+
+#[test]
 fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
@@ -75,10 +118,12 @@ fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
     store
         .put_artifact_descriptor(&artifact)
         .expect("catalogs artifact");
-    assert!(store
-        .source_unit(&artifact.source_unit.id)
-        .expect("reads store")
-        .is_none());
+    assert!(
+        store
+            .source_unit(&artifact.source_unit.id)
+            .expect("reads store")
+            .is_none()
+    );
 
     let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
     let staging = directory.path().join("staging");

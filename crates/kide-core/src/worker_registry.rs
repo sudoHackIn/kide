@@ -197,7 +197,7 @@ mod tests {
     use super::*;
     use crate::{
         Component, Fingerprint, ProjectManifest, Provenance, SourceOrigin, SourceUnitId,
-        WorkerIdentity, WorkspaceId, WorkspacePath, WORKER_PROTOCOL_VERSION,
+        WORKER_PROTOCOL_VERSION, WorkerIdentity, WorkspaceId, WorkspacePath,
     };
 
     fn source(component: &str, language: Language, path: &str) -> SourceUnit {

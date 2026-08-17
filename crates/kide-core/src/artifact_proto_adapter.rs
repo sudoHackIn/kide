@@ -8,7 +8,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{artifact_proto, worker_proto, worker_proto_adapter, FileAnalysisSnapshot};
+use crate::{FileAnalysisSnapshot, artifact_proto, worker_proto, worker_proto_adapter};
 
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
