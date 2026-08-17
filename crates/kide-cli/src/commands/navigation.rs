@@ -474,7 +474,7 @@ pub(super) enum TargetResolution {
 }
 
 fn resolve_target(store: &IndexStore, workspace: &Path, value: &str) -> Result<TargetResolution> {
-    if value.starts_with("jvm:sha256:") || value.starts_with("kotlin:") {
+    if value.starts_with("jvm:sha256:") || value.starts_with("kotlin:") || value.starts_with("java:") {
         let symbol = SymbolId::new(value);
         return Ok(
             if store.symbol(&symbol)?.is_some()
