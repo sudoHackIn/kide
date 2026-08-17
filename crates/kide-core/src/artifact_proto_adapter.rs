@@ -8,7 +8,10 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{FileAnalysisSnapshot, artifact_proto, worker_proto, worker_proto_adapter};
+use crate::{
+    FileAnalysisSnapshot, Provenance, SourceUnit, SymbolRecord, artifact_proto, worker_proto,
+    worker_proto_adapter,
+};
 
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
 
@@ -70,6 +73,42 @@ pub fn decode_graph_artifact(
         .snapshots
         .into_iter()
         .map(decode_snapshot)
+        .collect()
+}
+
+/// Reconstructs declaration records from the compact postings section. The
+/// descriptor supplies artifact-level source identity and provenance; no graph
+/// facts are decoded or persisted.
+pub fn decode_symbol_postings(
+    postings: artifact_proto::ArtifactSymbolPostings,
+    descriptor_source: &SourceUnit,
+    provenance: &Provenance,
+) -> Result<Vec<SymbolRecord>, ArtifactProtoError> {
+    postings
+        .entries
+        .into_iter()
+        .map(|posting| {
+            let symbol = posting.symbol.ok_or(ArtifactProtoError::LengthMismatch)?;
+            let snapshot = decode_snapshot(artifact_proto::GraphSnapshot {
+                source_unit: Some(source_unit(worker_proto_adapter::source_unit(
+                    descriptor_source,
+                ))),
+                provenances: vec![artifact_proto::ArtifactProvenance {
+                    backend: provenance.backend.clone(),
+                    backend_version: provenance.backend_version.clone(),
+                    worker_protocol_version: provenance.protocol_version,
+                    analysis_options_fingerprint: provenance.analysis_options.as_str().to_owned(),
+                }],
+                symbols: vec![symbol],
+                completeness: "partial".to_owned(),
+                ..Default::default()
+            })?;
+            snapshot
+                .symbols
+                .into_iter()
+                .next()
+                .ok_or(ArtifactProtoError::LengthMismatch)
+        })
         .collect()
 }
 

@@ -29,12 +29,7 @@ internal object JvmArtifactBlobLayout {
                         addEntries(
                             Artifact.ArtifactSymbolPosting.newBuilder()
                                 .setSourceUnitIndex(sourceUnitIndex)
-                                .setId(symbol.id)
-                                .setName(symbol.name)
-                                .setQualifiedName(symbol.qualifiedName)
-                                .setDeclaration(symbol.declaration)
-                                .setNameRange(symbol.nameRange)
-                                .setKind(symbol.kind)
+                                .setSymbol(symbol)
                                 .build(),
                         )
                     }

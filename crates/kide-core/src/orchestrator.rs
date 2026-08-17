@@ -272,6 +272,45 @@ pub fn materialize_catalog_artifact(
     Ok(MaterializationOutcome::Materialized)
 }
 
+/// Promotes exactly one cataloged artifact into the immutable blob cache. It
+/// intentionally does not decode graph facts or write any project-index rows.
+pub fn cache_catalog_artifact(
+    store: &IndexStore,
+    supervisor: &mut WorkerSupervisor,
+    cache: &ArtifactBlobCache,
+    workspace_root: WorkspacePath,
+    source_unit: &crate::SourceUnitId,
+    staging_directory: &Path,
+    budget: &mut MaterializationBudget,
+) -> Result<MaterializationOutcome, IndexOrchestratorError> {
+    let Some(descriptor) = store.artifact_descriptor(source_unit)? else {
+        return Ok(MaterializationOutcome::NotCataloged);
+    };
+    let key = ArtifactBlobKey::new(
+        descriptor.source_unit.content.clone(),
+        &descriptor.provenance,
+    );
+    if cache.open_blob(&key)?.is_some() {
+        return Ok(MaterializationOutcome::AlreadyMaterialized);
+    }
+    if budget.remaining_artifacts == 0 {
+        return Ok(MaterializationOutcome::BudgetExhausted);
+    }
+    budget.remaining_artifacts -= 1;
+    if materialize_artifact(
+        supervisor,
+        cache,
+        workspace_root,
+        descriptor,
+        staging_directory,
+        format!("cache-materialize-{}", source_unit.as_str()),
+    )? {
+        Ok(MaterializationOutcome::Materialized)
+    } else {
+        Ok(MaterializationOutcome::AlreadyMaterialized)
+    }
+}
+
 fn sha256_bytes(value: &Fingerprint) -> Option<[u8; 32]> {
     let hex = value.as_str().strip_prefix("sha256:")?;
     if hex.len() != 64 {

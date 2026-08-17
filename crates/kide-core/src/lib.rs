@@ -519,7 +519,14 @@ mod worker_framing_tests {
         .expect("dictionary protobuf decodes");
         assert_eq!(dictionary.entries[0].id, "java:example.Widget");
         let postings = validated.symbol_postings().expect("postings decode");
-        assert_eq!(postings.entries[0].name, "Widget");
+        assert_eq!(
+            postings.entries[0]
+                .symbol
+                .as_ref()
+                .expect("posting has symbol")
+                .name,
+            "Widget"
+        );
 
         let mut corrupt = encoded.bytes().to_vec();
         *corrupt.last_mut().expect("nonempty blob") ^= 1;
@@ -533,11 +540,29 @@ mod worker_framing_tests {
 
     #[test]
     fn cached_blob_reads_postings_by_range_without_loading_graph_facts() {
+        let source = SourceUnit {
+            id: SourceUnitId::new("jvm:example-widget"),
+            component: ComponentId::new("fixture:main"),
+            path: WorkspacePath::new(".kide/dependencies/widget.jar"),
+            language: Language::Java,
+            origin: SourceOrigin::Dependency,
+            content: Fingerprint::new("sha256:artifact"),
+            context: Fingerprint::new("sha256:context"),
+        };
         let graph = crate::artifact_proto::GraphArtifact {
             snapshots: vec![crate::artifact_proto::GraphSnapshot {
                 symbols: vec![crate::artifact_proto::ArtifactSymbol {
                     id: "java:example.Widget".into(),
+                    backend_key: "example.Widget".into(),
+                    backend_schema_version: 1,
+                    language: "java".into(),
+                    kind: "class".into(),
                     name: "Widget".into(),
+                    declaration: Some(crate::artifact_proto::ArtifactRange { start: 0, end: 6 }),
+                    name_range: Some(crate::artifact_proto::ArtifactRange { start: 0, end: 6 }),
+                    freshness: "fresh".into(),
+                    completeness: "partial".into(),
+                    component_id: "fixture:main".into(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -567,9 +592,18 @@ mod worker_framing_tests {
                 .symbol_postings(&mut blob)
                 .expect("reads postings")
                 .entries[0]
+                .symbol
+                .as_ref()
+                .expect("posting has symbol")
                 .name,
             "Widget"
         );
+        let postings = sections.symbol_postings(&mut blob).expect("reads postings");
+        let symbols =
+            crate::artifact_proto_adapter::decode_symbol_postings(postings, &source, &provenance)
+                .expect("decodes canonical symbol");
+        assert_eq!(symbols[0].id.as_str(), "java:example.Widget");
+        assert_eq!(symbols[0].declaration.source_unit, source.id);
     }
 
     #[test]

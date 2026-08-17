@@ -105,12 +105,7 @@ impl ArtifactBlobLayout {
                     snapshot.symbols.iter().map(move |symbol| {
                         artifact_proto::ArtifactSymbolPosting {
                             source_unit_index: source_unit_index as u32,
-                            id: symbol.id.clone(),
-                            name: symbol.name.clone(),
-                            qualified_name: symbol.qualified_name.clone(),
-                            declaration: symbol.declaration.clone(),
-                            name_range: symbol.name_range.clone(),
-                            kind: symbol.kind.clone(),
+                            symbol: Some(symbol.clone()),
                         }
                     })
                 })

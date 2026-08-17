@@ -44,12 +44,7 @@ message ArtifactSymbolPostings {
 }
 message ArtifactSymbolPosting {
   uint32 source_unit_index = 1;
-  string id = 2;
-  string name = 3;
-  optional string qualified_name = 4;
-  ArtifactRange declaration = 5;
-  ArtifactRange name_range = 6;
-  string kind = 7;
+  ArtifactSymbol symbol = 2;
 }
 
 message GraphArtifact {

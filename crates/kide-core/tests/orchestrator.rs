@@ -4,7 +4,7 @@ use kide_core::{
     ArtifactBlobCache, ArtifactBlobKey, ArtifactDescriptor, BuildSystem, Component, ComponentId,
     Fingerprint, IndexStore, Language, MaterializationBudget, MaterializationOutcome,
     ProjectManifest, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerLaunch,
-    WorkerSupervisor, WorkspaceId, WorkspacePath, index_batch,
+    WorkerSupervisor, WorkspaceId, WorkspacePath, cache_catalog_artifact, index_batch,
     index_batch_with_artifact_cache_and_provenance, materialize_catalog_artifact,
 };
 use tempfile::tempdir;
@@ -190,6 +190,52 @@ fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
         )
         .expect("reports absent catalog entry"),
         MaterializationOutcome::NotCataloged,
+    );
+}
+
+#[test]
+fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
+    let directory = tempdir().expect("temporary workspace");
+    let store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let artifact = artifact_descriptor();
+    store
+        .put_artifact_descriptor(&artifact)
+        .expect("catalogs artifact");
+    let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+    let staging = directory.path().join("staging");
+    std::fs::create_dir_all(&staging).expect("creates staging");
+    let mut worker = WorkerSupervisor::new(materializing_launch());
+    worker.handshake("fixture-handshake").expect("handshakes");
+
+    assert_eq!(
+        cache_catalog_artifact(
+            &store,
+            &mut worker,
+            &cache,
+            WorkspacePath::new("."),
+            &artifact.source_unit.id,
+            &staging,
+            &mut MaterializationBudget {
+                remaining_artifacts: 1
+            },
+        )
+        .expect("caches artifact"),
+        MaterializationOutcome::Materialized,
+    );
+    assert!(
+        cache
+            .open_blob(&ArtifactBlobKey::new(
+                artifact.source_unit.content.clone(),
+                &artifact.provenance,
+            ))
+            .expect("opens cache")
+            .is_some()
+    );
+    assert!(
+        store
+            .source_unit(&artifact.source_unit.id)
+            .expect("reads store")
+            .is_none()
     );
 }
 
