@@ -41,6 +41,14 @@ internal object GradleProjectImporter {
         val jdkHome: Path,
     )
 
+    /** Worker-local javac inputs. They deliberately never cross the worker boundary. */
+    data class JavaCompilationContext(
+        val component: String,
+        val sourceFiles: List<Path>,
+        val classpath: List<Path>,
+        val jdkHome: Path,
+    )
+
     fun import(workspace: Path): JsonElement {
         require(Files.isDirectory(workspace)) { "workspace root is not a directory: $workspace" }
         val canonicalRoot = workspace.toRealPath()
@@ -92,6 +100,27 @@ internal object GradleProjectImporter {
         }
     }
 
+    fun javaCompilationContexts(workspace: Path): Map<String, JavaCompilationContext> {
+        val root = workspace.toRealPath()
+        connector(root).connect().use { connection ->
+            val environment = connection.getModel(BuildEnvironment::class.java)
+            val project = connection.getModel(IdeaProject::class.java)
+            return project.modules.associate { module ->
+                val libraries = module.dependencies.filterIsInstance<IdeaSingleEntryLibraryDependency>()
+                    .map { dependency -> dependency.file.toPath().toAbsolutePath().normalize() }
+                    .filter(Files::exists)
+                    .distinct()
+                    .sortedBy(Path::toString)
+                componentId(module) to JavaCompilationContext(
+                    component = componentId(module),
+                    sourceFiles = javaSourceFiles(module),
+                    classpath = libraries,
+                    jdkHome = environment.java.javaHome.toPath().toAbsolutePath().normalize(),
+                )
+            }
+        }
+    }
+
     private fun kotlinSourceFiles(module: IdeaModule): List<Path> = module.contentRoots
         .flatMap { root -> root.sourceDirectories + root.testDirectories }
         .filterNot { directory -> directory.isGenerated }
@@ -99,6 +128,19 @@ internal object GradleProjectImporter {
             val root = directory.directory.toPath()
             if (!Files.isDirectory(root)) emptyList() else Files.walk(root).use { paths ->
                 paths.filter { path -> path.isRegularFile() && path.fileName.toString().endsWith(".kt") }.toList()
+            }
+        }
+        .map { path -> path.toAbsolutePath().normalize() }
+        .distinct()
+        .sortedBy(Path::toString)
+
+    private fun javaSourceFiles(module: IdeaModule): List<Path> = module.contentRoots
+        .flatMap { root -> root.sourceDirectories + root.testDirectories }
+        .filterNot { directory -> directory.isGenerated }
+        .flatMap { directory ->
+            val root = directory.directory.toPath()
+            if (!Files.isDirectory(root)) emptyList() else Files.walk(root).use { paths ->
+                paths.filter { path -> path.isRegularFile() && path.fileName.toString().endsWith(".java") }.toList()
             }
         }
         .map { path -> path.toAbsolutePath().normalize() }

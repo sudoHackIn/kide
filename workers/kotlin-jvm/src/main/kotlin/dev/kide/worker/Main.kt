@@ -155,13 +155,19 @@ internal fun artifactDescriptors(workspaceRoot: Path, maxArtifacts: Int, cursor:
     put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
 }
 
-internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path) = buildJsonObject {
+internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path): kotlinx.serialization.json.JsonObject {
     val sourceUnits = payload.jsonObject["source_units"]?.jsonArray
         ?: error("analyze_batch_request requires source_units")
-    require(sourceUnits.all { source -> source.jsonObject["language"]?.jsonPrimitive?.content == "kotlin" }) {
-        "kide-kotlin-jvm structural worker accepts Kotlin source units only"
+    val language = sourceUnits.firstOrNull()?.jsonObject?.get("language")?.jsonPrimitive?.content
+        ?: error("analyze_batch_request requires at least one source unit")
+    require(sourceUnits.all { source -> source.jsonObject["language"]?.jsonPrimitive?.content == language }) {
+        "worker batches must contain exactly one source language"
     }
-    KotlinStructuralExtractor().use { extractor ->
+    if (language == "java") return buildJsonObject {
+        put("snapshots", buildJsonArray { JavaSemanticExtractor.analyze(sourceUnits, workspaceRoot).forEach(::add) })
+    }
+    require(language == "kotlin") { "kide-kotlin-jvm does not support $language source units" }
+    return buildJsonObject { KotlinStructuralExtractor().use { extractor ->
         workerPhase("analyze-batch: structural extraction")
         val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
         workerPhase("analyze-batch: Gradle compilation contexts")
@@ -184,7 +190,7 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         put("snapshots", buildJsonArray {
             K2SnapshotEnricher.enrich(snapshots, workspaceRoot, facts.references, externalTargets, facts.hierarchy, facts.annotations).forEach(::add)
         })
-    }
+    } }
 }
 
 private fun workerPhase(message: String) {
