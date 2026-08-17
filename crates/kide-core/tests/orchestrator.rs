@@ -68,6 +68,32 @@ fn backend_version_drift_reanalyzes_unchanged_sources() {
 }
 
 #[test]
+fn incomplete_worker_batch_keeps_the_previous_source_snapshot() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let manifest = manifest();
+    let original = source("One.kt", "sha256:one");
+    index_batch(
+        &mut store,
+        &manifest,
+        std::slice::from_ref(&original),
+        launch(),
+    )
+    .expect("stores initial snapshot");
+
+    let changed = source("One.kt", "sha256:two");
+    let error = index_batch(&mut store, &manifest, &[changed], missing_launch())
+        .expect_err("rejects incomplete worker batch");
+    assert!(error.to_string().contains("did not return a snapshot"));
+    assert_eq!(
+        store
+            .source_unit(&original.id)
+            .expect("reads retained snapshot"),
+        Some(original)
+    );
+}
+
+#[test]
 fn cached_indexing_catalogs_dependencies_without_eager_graph_materialization() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
@@ -302,6 +328,12 @@ fn materializing_launch() -> WorkerLaunch {
 fn paginated_launch() -> WorkerLaunch {
     let mut launch = launch();
     launch.args = vec![OsString::from("paginated")];
+    launch
+}
+
+fn missing_launch() -> WorkerLaunch {
+    let mut launch = launch();
+    launch.args = vec![OsString::from("missing")];
     launch
 }
 
