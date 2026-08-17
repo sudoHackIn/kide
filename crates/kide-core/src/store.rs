@@ -1828,7 +1828,7 @@ mod tests {
             &Selector {
                 views: vec![LanguageView::KotlinClass],
                 predicates: vec![
-                    SelectorPredicate::AppliedSymbol(controller),
+                    SelectorPredicate::AppliedSymbol(controller.clone()),
                     SelectorPredicate::QualifiedNamePrefix("demo.Payment".to_owned()),
                 ],
             },
@@ -1836,6 +1836,28 @@ mod tests {
         .expect("plans from resolved applied-symbol posting");
         assert_eq!(selected.state, SelectorState::Complete);
         assert_eq!(selected.symbols, matching.symbols);
+
+        let query = crate::semantic_query::QueryProgram {
+            from: crate::semantic_query::QueryFrom::AppliedSymbol(
+                crate::semantic_query::QuerySymbol::Id(controller),
+            ),
+            predicates: vec![
+                crate::semantic_query::QueryPredicate::Kind(SymbolKind::Class),
+                crate::semantic_query::QueryPredicate::Language(Language::Kotlin),
+                crate::semantic_query::QueryPredicate::QualifiedNamePrefix(
+                    crate::semantic_query::QueryString::Literal("demo.Payment".to_owned()),
+                ),
+            ],
+            limit: 1,
+        };
+        let executed = crate::semantic_query::execute(
+            &store,
+            &query,
+            &crate::semantic_query::QueryParameters::new(),
+        )
+        .expect("compiles to the bounded applied-symbol posting");
+        assert_eq!(executed.state, SelectorState::Complete);
+        assert_eq!(executed.symbols, matching.symbols);
     }
 
     #[test]
