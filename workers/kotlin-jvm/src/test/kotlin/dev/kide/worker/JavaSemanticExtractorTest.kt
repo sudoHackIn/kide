@@ -33,6 +33,11 @@ class JavaSemanticExtractorTest {
         assertTrue(snapshots.any { it.jsonObject["hierarchy"]!!.jsonArray.isNotEmpty() }, snapshots.toString())
         assertTrue(use["types"]!!.jsonArray.isNotEmpty(), use.toString())
         assertTrue(api.isNotBlank())
+
+        val incremental = JavaSemanticExtractor.analyze(listOf(sourceUnit("src/main/java/fixture/Use.java")), root).single().jsonObject
+        assertTrue(incremental["references"]!!.jsonArray.isNotEmpty(), incremental.toString())
+        assertTrue(incremental["calls"]!!.jsonArray.isNotEmpty(), incremental.toString())
+        assertTrue(incremental["types"]!!.jsonArray.isNotEmpty(), incremental.toString())
     }
 
     private fun sourceUnit(path: String) = buildJsonObject {

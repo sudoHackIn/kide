@@ -40,7 +40,7 @@ internal object JavaSemanticExtractor {
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
         val contexts = GradleProjectImporter.javaCompilationContexts(workspaceRoot).values
-        val allSources = (contexts.flatMap { it.sourceFiles } + selected.keys).distinct().sortedBy(Path::toString)
+        val allSources = (contexts.flatMap { it.sourceFiles } + selected.keys).map(::canonical).distinct().sortedBy(Path::toString)
         require(allSources.isNotEmpty()) { "Java analysis requires source files" }
         val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler()) { "a JDK with javac is required for Java indexing" }
         val diagnostics = DiagnosticCollector<JavaFileObject>()
@@ -58,7 +58,7 @@ internal object JavaSemanticExtractor {
             val parsed = task.parse().toList()
             task.analyze()
             val trees = Trees.instance(task)
-            val collector = FactCollector(trees, selected, workspaceRoot)
+            val collector = FactCollector(trees, selected, allSources, workspaceRoot)
             collector.collectDeclarations(parsed)
             collector.collectReferences(parsed)
             return collector.snapshots(diagnostics.diagnostics)
@@ -68,13 +68,14 @@ internal object JavaSemanticExtractor {
     private class FactCollector(
         private val trees: Trees,
         private val selected: Map<Path, JsonElement>,
+        allSources: List<Path>,
         private val workspaceRoot: Path,
     ) : TreePathScanner<Unit, Unit>() {
         private val symbols = linkedMapOf<Path, MutableList<Symbol>>()
         private val occurrences = linkedMapOf<Path, MutableList<Occurrence>>()
         private val hierarchy = linkedMapOf<Path, MutableList<Pair<String, String>>>()
         private val elementIds = mutableMapOf<Element, String>()
-        private val contents = selected.keys.associateWith(Files::readString)
+        private val contents = allSources.associateWith(Files::readString)
         private var collectingReferences = false
 
         fun collectDeclarations(units: List<CompilationUnitTree>) {
@@ -121,7 +122,7 @@ internal object JavaSemanticExtractor {
         private fun declaration(tree: Tree, element: Element?) {
             if (element == null) return
             val path = sourcePath(getCurrentPath().compilationUnit) ?: return
-            val source = selected[path]?.jsonObject ?: return
+            val source = sourceIdentity(path) ?: return
             val text = contents.getValue(path)
             val positions = trees.sourcePositions
             val start = positions.getStartPosition(getCurrentPath().compilationUnit, tree).toInt()
@@ -132,8 +133,8 @@ internal object JavaSemanticExtractor {
             val id = "java:${source.requiredString("component")}:${source.requiredString("path")}#${kind(element)}:$name:$nameStart"
             elementIds[element] = id
             val owner = element.enclosingElement?.let(elementIds::get)
-            symbols.getOrPut(path, ::mutableListOf) += Symbol(id, element, start, end, nameStart, nameStart + name.length, owner)
-            if (element is TypeElement) {
+            if (path in selected) symbols.getOrPut(path, ::mutableListOf) += Symbol(id, element, start, end, nameStart, nameStart + name.length, owner)
+            if (path in selected && element is TypeElement) {
                 element.superclass?.let { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(elementIds::get) }
                     ?.let { superId -> hierarchy.getOrPut(path, ::mutableListOf) += id to superId }
                 element.interfaces.mapNotNull { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(elementIds::get) }
@@ -200,6 +201,19 @@ internal object JavaSemanticExtractor {
         }
 
         private fun sourcePath(unit: CompilationUnitTree): Path? = runCatching { canonical(Path.of(unit.sourceFile.toUri())) }.getOrNull()
+        private fun sourceIdentity(path: Path): JsonObject? {
+            selected[path]?.jsonObject?.let { return it }
+            val template = selected.values.firstOrNull()?.jsonObject ?: return null
+            val templatePath = template.requiredString("path")
+            val relativePath = workspaceRoot.relativize(path).toString()
+            return buildJsonObject {
+                put("id", template.requiredString("id").removeSuffix(templatePath) + relativePath)
+                put("path", relativePath)
+                put("language", "java")
+                put("component", template.requiredString("component"))
+                put("context", template.requiredString("context"))
+            }
+        }
         private fun range(unit: String, text: String, start: Int, end: Int) = buildJsonObject { put("source_unit", unit); put("bytes", buildJsonObject { put("start", utf8(text, start)); put("end", utf8(text, end)) }) }
         private fun utf8(text: String, offset: Int) = text.substring(0, offset.coerceIn(0, text.length)).encodeToByteArray().size
         private fun nameOffset(text: String, name: String, start: Int, end: Int): Int = Regex("\\b${Regex.escape(name)}\\b").find(text, start)?.range?.first?.takeIf { it < end } ?: start
