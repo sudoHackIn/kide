@@ -18,14 +18,17 @@ class JavaSemanticExtractorTest {
         val sources = root.resolve("src/main/java/fixture")
         Files.createDirectories(sources)
         Files.writeString(sources.resolve("Api.java"), "package fixture; public interface Api { String name(); }")
-        Files.writeString(sources.resolve("Impl.java"), "package fixture; public final class Impl implements Api { public String name() { return \"ok\"; } }")
+        Files.writeString(sources.resolve("Marker.java"), "package fixture; public @interface Marker {}")
+        Files.writeString(sources.resolve("Impl.java"), "package fixture; @Marker public final class Impl implements Api { public String name() { return \"ok\"; } }")
         Files.writeString(sources.resolve("Use.java"), "package fixture; public final class Use { String call(Api api) { return api.name(); } }")
 
-        val sourceUnits = listOf("Api.java", "Impl.java", "Use.java").map { file -> sourceUnit("src/main/java/fixture/$file") }
+        val sourceUnits = listOf("Api.java", "Marker.java", "Impl.java", "Use.java").map { file -> sourceUnit("src/main/java/fixture/$file") }
         val snapshots = JavaSemanticExtractor.analyze(sourceUnits, root)
         val allSymbols = snapshots.flatMap { it.jsonObject["symbols"]!!.jsonArray }
         assertTrue(allSymbols.any { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api") }, snapshots.toString())
         val api = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api") }.jsonObject["id"]!!.toString()
+        val marker = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Marker") }.jsonObject["id"]!!.toString()
+        val implementation = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Impl") }.jsonObject
         val use = snapshots.single { it.jsonObject["source_unit"]!!.jsonObject["path"]!!.toString().contains("Use.java") }.jsonObject
 
         assertTrue(use["calls"]!!.jsonArray.isNotEmpty(), use.toString())
@@ -33,6 +36,7 @@ class JavaSemanticExtractorTest {
         assertTrue(snapshots.any { it.jsonObject["hierarchy"]!!.jsonArray.isNotEmpty() }, snapshots.toString())
         assertTrue(use["types"]!!.jsonArray.isNotEmpty(), use.toString())
         assertTrue(api.isNotBlank())
+        assertTrue(implementation["applied_symbols"]!!.jsonArray.any { it.toString() == marker }, implementation.toString())
 
         val incremental = JavaSemanticExtractor.analyze(listOf(sourceUnit("src/main/java/fixture/Use.java")), root).single().jsonObject
         assertTrue(incremental["references"]!!.jsonArray.isNotEmpty(), incremental.toString())

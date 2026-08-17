@@ -1,5 +1,8 @@
 package dev.kide.fixture.book;
 
+@interface Audited {
+}
+
 public interface JavaBookAudit {
     String record(String title);
 }
@@ -11,6 +14,7 @@ final class SpringJavaBookAudit implements JavaBookAudit {
     }
 }
 
+@Audited
 final class JavaBookAuditController {
     private final JavaBookAudit audit = new SpringJavaBookAudit();
 

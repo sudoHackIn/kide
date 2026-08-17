@@ -164,12 +164,16 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let java_audit_id = java_audit["result"]["symbols"][0]["id"].as_str().expect("JavaBookAudit id");
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", java_audit_id])["status"], "ok");
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "implementations", java_audit_id])["status"], "ok");
+    let audited = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "Audited"]);
+    let audited_id = audited["result"]["symbols"][0]["id"].as_str().expect("Audited id");
+    let java_selected = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "select", "--java-class", "--applies", audited_id]);
+    assert_eq!(java_selected["symbol"]["name"], "JavaBookAuditController");
     let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
     let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")
         .and_then(|symbol| symbol["id"].as_str()).expect("JavaBookAudit.record id");
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "callers", java_record_id])["status"], "ok");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "type-at", "app/src/main/java/dev/kide/fixture/book/JavaBookAudit.java:15:19"])["status"], "ok");
+    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "type-at", "app/src/main/java/dev/kide/fixture/book/JavaBookAudit.java:22:19"])["status"], "ok");
 
     let entity_annotation = symbol["applied_symbols"]
         .as_array()

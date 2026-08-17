@@ -25,12 +25,14 @@ pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
         Command::Select {
             applies,
             kotlin_class,
+            java_class,
             component,
             qualified_prefix,
         } => navigation::select_symbols(
             &cli.workspace,
             applies,
             kotlin_class,
+            java_class,
             component,
             qualified_prefix,
             human_output,

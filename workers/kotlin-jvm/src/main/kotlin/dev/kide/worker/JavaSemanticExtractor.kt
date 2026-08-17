@@ -184,7 +184,7 @@ internal object JavaSemanticExtractor {
             put("id", symbol.id); put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", symbol.element.toString()) })
             put("language", "java"); put("kind", kind(symbol.element)); put("name", symbol.element.simpleName.toString()); put("qualified_name", qualifiedName(symbol.element)); put("signature", symbol.element.toString())
             put("component", source.requiredString("component")); put("declaration", range(source.requiredString("id"), text, symbol.start, symbol.end)); put("name_range", range(source.requiredString("id"), text, symbol.nameStart, symbol.nameEnd)); put("owner", symbol.owner)
-            put("modifiers", buildJsonArray { symbol.element.modifiers.map { it.name.lowercase() }.sorted().forEach { add(JsonPrimitive(it)) } }); put("applied_symbols", buildJsonArray {})
+            put("modifiers", buildJsonArray { symbol.element.modifiers.map { it.name.lowercase() }.sorted().forEach { add(JsonPrimitive(it)) } }); put("applied_symbols", buildJsonArray { appliedSymbols(symbol.element).forEach { add(JsonPrimitive(it)) } })
             put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
         }
 
@@ -220,6 +220,10 @@ internal object JavaSemanticExtractor {
         private fun utf8(text: String, offset: Int) = text.substring(0, offset.coerceIn(0, text.length)).encodeToByteArray().size
         private fun nameOffset(text: String, name: String, start: Int, end: Int): Int = Regex("\\b${Regex.escape(name)}\\b").find(text, start)?.range?.first?.takeIf { it < end } ?: start
         private fun kind(element: Element): String = when (element.kind) { ElementKind.CLASS -> "class"; ElementKind.INTERFACE -> "interface"; ElementKind.ENUM -> "enum"; ElementKind.ANNOTATION_TYPE -> "interface"; ElementKind.CONSTRUCTOR -> "constructor"; ElementKind.METHOD -> "method"; ElementKind.FIELD, ElementKind.ENUM_CONSTANT -> "field"; else -> "property" }
+        private fun appliedSymbols(element: Element): List<String> = element.annotationMirrors
+            .mapNotNull { annotation -> elementIds[annotation.annotationType.asElement()] }
+            .distinct()
+            .sorted()
         private fun qualifiedName(element: Element): String = when (element) { is TypeElement -> element.qualifiedName.toString(); else -> "${element.enclosingElement?.let(::qualifiedName).orEmpty()}.${element.simpleName}".trim('.') }
         private fun typeJson(display: String, provenance: JsonElement) = buildJsonObject { put("id", typeId(display)); put("language", "java"); put("display", display); put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", display) }); put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance) }
         private fun typeId(display: String): String { val hash = MessageDigest.getInstance("SHA-256").digest(display.encodeToByteArray()).joinToString("") { "%02x".format(it) }; return "java:type:$hash" }

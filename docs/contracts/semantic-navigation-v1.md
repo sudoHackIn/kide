@@ -197,7 +197,7 @@ flags. Logs and worker diagnostics go to stderr.
 selected declaration when stdout is piped. Each record contains the full
 canonical `SymbolRecord` and its freshness, completeness, and provenance
 metadata; consumers use `symbol.id`, never rendered declaration text. The
-optional `--kotlin-class`, `--component`, and `--qualified-prefix` filters are
+optional `--kotlin-class`, `--java-class`, `--component`, and `--qualified-prefix` filters are
 conjunctive. `refs`, `callers`, and `implementations` accept this JSONL stream,
 deduplicate SymbolIds, and process them in stable lexical ID order. A selector
 with no records exits `1`; a fan-out navigation command exits `0` if any target

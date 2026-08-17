@@ -29,6 +29,7 @@ pub(super) fn select_symbols(
     workspace: &Path,
     applies: String,
     kotlin_class: bool,
+    java_class: bool,
     component: Option<String>,
     qualified_prefix: Option<String>,
     human_output: bool,
@@ -46,10 +47,12 @@ pub(super) fn select_symbols(
         ),
     };
     let mut selector = Selector {
-        views: kotlin_class
-            .then_some(LanguageView::KotlinClass)
-            .into_iter()
-            .collect(),
+        views: match (kotlin_class, java_class) {
+            (true, false) => vec![LanguageView::KotlinClass],
+            (false, true) => vec![LanguageView::JavaClass],
+            (false, false) => Vec::new(),
+            (true, true) => unreachable!("clap rejects conflicting language views"),
+        },
         predicates: vec![SelectorPredicate::AppliedSymbol(applied_symbol)],
     };
     if let Some(component) = component {

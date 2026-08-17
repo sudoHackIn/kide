@@ -47,6 +47,8 @@ pub(crate) enum Command {
         applies: String,
         #[arg(long)]
         kotlin_class: bool,
+        #[arg(long, conflicts_with = "kotlin_class")]
+        java_class: bool,
         #[arg(long)]
         component: Option<String>,
         #[arg(long = "qualified-prefix")]
