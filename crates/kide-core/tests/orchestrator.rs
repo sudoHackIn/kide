@@ -1,11 +1,11 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    ArtifactBlobCache, ArtifactBlobKey, ArtifactDescriptor, BuildSystem, Component, ComponentId,
-    Fingerprint, IndexStore, Language, MaterializationBudget, MaterializationOutcome,
-    ProjectManifest, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerLaunch,
-    WorkerSupervisor, WorkspaceId, WorkspacePath, cache_catalog_artifact, index_batch,
-    index_batch_with_artifact_cache_and_provenance, materialize_catalog_artifact,
+    cache_catalog_artifact, index_batch, index_batch_with_artifact_cache_and_provenance,
+    materialize_catalog_artifact, ArtifactBlobCache, ArtifactBlobKey, ArtifactDescriptor,
+    BuildSystem, Component, ComponentId, Fingerprint, IndexStore, Language, MaterializationBudget,
+    MaterializationOutcome, ProjectManifest, Provenance, SourceOrigin, SourceUnit, SourceUnitId,
+    WorkerLaunch, WorkerSupervisor, WorkspaceId, WorkspacePath,
 };
 use tempfile::tempdir;
 
@@ -93,20 +93,72 @@ fn cached_indexing_catalogs_dependencies_without_eager_graph_materialization() {
             .expect("reads catalog"),
         Some(descriptor.clone())
     );
-    assert!(
+    assert!(store
+        .source_unit(&descriptor.source_unit.id)
+        .expect("reads store")
+        .is_none());
+    assert!(cache
+        .open_blob(&ArtifactBlobKey::new(
+            descriptor.source_unit.content,
+            &descriptor.provenance,
+        ))
+        .expect("checks cache")
+        .is_none());
+}
+
+#[test]
+fn cached_indexing_consumes_every_dependency_catalog_page() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
+    let staging = directory.path().join("staging");
+    std::fs::create_dir_all(&staging).expect("creates staging");
+
+    index_batch_with_artifact_cache_and_provenance(
+        &mut store,
+        &manifest(),
+        &[source("One.kt", "sha256:one")],
+        paginated_launch(),
+        &cache,
+        &staging,
+        worker_provenance(),
+    )
+    .expect("indexes source and every catalog page");
+
+    assert_eq!(
         store
-            .source_unit(&descriptor.source_unit.id)
-            .expect("reads store")
-            .is_none()
+            .artifact_descriptors()
+            .expect("reads catalog")
+            .into_iter()
+            .map(|descriptor| descriptor.source_unit.id)
+            .collect::<Vec<_>>(),
+        vec![
+            SourceUnitId::new("jvm:sha256:fixture-artifact"),
+            SourceUnitId::new("jvm:sha256:fixture-artifact-two"),
+        ]
     );
-    assert!(
-        cache
-            .open_blob(&ArtifactBlobKey::new(
-                descriptor.source_unit.content,
-                &descriptor.provenance,
-            ))
-            .expect("checks cache")
-            .is_none()
+    assert!(store
+        .source_units()
+        .expect("reads snapshots")
+        .iter()
+        .all(|source| source.origin != SourceOrigin::Dependency));
+
+    index_batch_with_artifact_cache_and_provenance(
+        &mut store,
+        &manifest(),
+        &[],
+        paginated_launch(),
+        &cache,
+        &staging,
+        worker_provenance(),
+    )
+    .expect("removes source without touching dependency catalog");
+    assert_eq!(
+        store
+            .artifact_descriptors()
+            .expect("preserves dependency catalog")
+            .len(),
+        2
     );
 }
 
@@ -118,12 +170,10 @@ fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
     store
         .put_artifact_descriptor(&artifact)
         .expect("catalogs artifact");
-    assert!(
-        store
-            .source_unit(&artifact.source_unit.id)
-            .expect("reads store")
-            .is_none()
-    );
+    assert!(store
+        .source_unit(&artifact.source_unit.id)
+        .expect("reads store")
+        .is_none());
 
     let cache = ArtifactBlobCache::open(directory.path().join("cache")).expect("opens cache");
     let staging = directory.path().join("staging");
@@ -222,21 +272,17 @@ fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
         .expect("caches artifact"),
         MaterializationOutcome::Materialized,
     );
-    assert!(
-        cache
-            .open_blob(&ArtifactBlobKey::new(
-                artifact.source_unit.content.clone(),
-                &artifact.provenance,
-            ))
-            .expect("opens cache")
-            .is_some()
-    );
-    assert!(
-        store
-            .source_unit(&artifact.source_unit.id)
-            .expect("reads store")
-            .is_none()
-    );
+    assert!(cache
+        .open_blob(&ArtifactBlobKey::new(
+            artifact.source_unit.content.clone(),
+            &artifact.provenance,
+        ))
+        .expect("opens cache")
+        .is_some());
+    assert!(store
+        .source_unit(&artifact.source_unit.id)
+        .expect("reads store")
+        .is_none());
 }
 
 fn launch() -> WorkerLaunch {
@@ -250,6 +296,12 @@ fn launch() -> WorkerLaunch {
 fn materializing_launch() -> WorkerLaunch {
     let mut launch = launch();
     launch.args = vec![OsString::from("materialize")];
+    launch
+}
+
+fn paginated_launch() -> WorkerLaunch {
+    let mut launch = launch();
+    launch.args = vec![OsString::from("paginated")];
     launch
 }
 

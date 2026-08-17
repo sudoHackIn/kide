@@ -9,9 +9,10 @@ use std::{
 use kide_core::{
     artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
     AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryResponse,
-    ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, HandshakeResponse,
-    Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerCapabilities,
-    WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage, WORKER_PROTOCOL_VERSION,
+    ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, Fingerprint,
+    HandshakeResponse, Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId,
+    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
+    WorkspacePath, WORKER_PROTOCOL_VERSION,
 };
 use sha2::{Digest, Sha256};
 
@@ -81,14 +82,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     next_cursor: None,
                 })
             }
-            WorkerMessage::ArtifactDiscoveryRequest(_) => {
+            WorkerMessage::ArtifactDiscoveryRequest(request) => {
+                let (artifacts, next_cursor) = if mode == "materialize" {
+                    (vec![descriptor()], None)
+                } else if mode == "paginated" {
+                    match request.cursor.as_deref() {
+                        None => (vec![descriptor()], Some("fixture-page-1".to_owned())),
+                        Some("fixture-page-1") => (vec![second_descriptor()], None),
+                        Some(_) => continue,
+                    }
+                } else {
+                    (Vec::new(), None)
+                };
                 WorkerMessage::ArtifactDiscoveryResponse(ArtifactDiscoveryResponse {
-                    artifacts: if mode == "materialize" {
-                        vec![descriptor()]
-                    } else {
-                        Vec::new()
-                    },
-                    next_cursor: None,
+                    artifacts,
+                    next_cursor,
                 })
             }
             WorkerMessage::ArtifactMaterializationRequest(request) if mode == "materialize" => {
@@ -165,6 +173,14 @@ fn descriptor() -> ArtifactDescriptor {
         provenance: provenance(),
         symbol_locators: Vec::new(),
     }
+}
+
+fn second_descriptor() -> ArtifactDescriptor {
+    let mut descriptor = descriptor();
+    descriptor.source_unit.id = SourceUnitId::new("jvm:sha256:fixture-artifact-two");
+    descriptor.source_unit.path = WorkspacePath::new(".kide/dependencies/fixture-two");
+    descriptor.source_unit.content = Fingerprint::new("sha256:fixture-artifact-two");
+    descriptor
 }
 
 fn provenance() -> Provenance {
