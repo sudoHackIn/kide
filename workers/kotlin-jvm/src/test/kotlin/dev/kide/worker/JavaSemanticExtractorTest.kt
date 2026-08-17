@@ -29,6 +29,7 @@ class JavaSemanticExtractorTest {
         val use = snapshots.single { it.jsonObject["source_unit"]!!.jsonObject["path"]!!.toString().contains("Use.java") }.jsonObject
 
         assertTrue(use["calls"]!!.jsonArray.isNotEmpty(), use.toString())
+        assertTrue(use["references"]!!.jsonArray.isNotEmpty(), use.toString())
         assertTrue(snapshots.any { it.jsonObject["hierarchy"]!!.jsonArray.isNotEmpty() }, snapshots.toString())
         assertTrue(use["types"]!!.jsonArray.isNotEmpty(), use.toString())
         assertTrue(api.isNotBlank())

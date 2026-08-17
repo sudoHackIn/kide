@@ -12,6 +12,8 @@ import javax.tools.StandardJavaFileManager
 import javax.tools.ToolProvider
 import com.sun.source.tree.ClassTree
 import com.sun.source.tree.CompilationUnitTree
+import com.sun.source.tree.IdentifierTree
+import com.sun.source.tree.MemberSelectTree
 import com.sun.source.tree.MethodInvocationTree
 import com.sun.source.tree.MethodTree
 import com.sun.source.tree.Tree
@@ -106,9 +108,14 @@ internal object JavaSemanticExtractor {
             super.visitMethodInvocation(node, unused)
         }
 
-        override fun scan(path: TreePath?, unused: Unit?) {
-            if (collectingReferences && path != null && path.leaf.kind.name in setOf("IDENTIFIER", "MEMBER_SELECT")) reference(path, isCall = false)
-            super.scan(path, unused)
+        override fun visitIdentifier(node: IdentifierTree, unused: Unit?) {
+            if (collectingReferences) reference(getCurrentPath(), isCall = false)
+            super.visitIdentifier(node, unused)
+        }
+
+        override fun visitMemberSelect(node: MemberSelectTree, unused: Unit?) {
+            if (collectingReferences) reference(getCurrentPath(), isCall = false)
+            super.visitMemberSelect(node, unused)
         }
 
         private fun declaration(tree: Tree, element: Element?) {
