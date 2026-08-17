@@ -17,6 +17,6 @@ class HandshakeTest {
             listOf("handshake", "project_manifest", "file_analysis_snapshot", "dependency_analysis"),
             envelope.handshakeResponse.capabilitiesList,
         )
-        assertEquals(listOf("kotlin"), envelope.handshakeResponse.languagesList)
+        assertEquals(listOf("kotlin", "java"), envelope.handshakeResponse.languagesList)
     }
 }

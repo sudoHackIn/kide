@@ -173,18 +173,27 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
         workerPhase("analyze-batch: Gradle compilation contexts")
         val contexts = gradleContexts(workspaceRoot)
-        // Compile all requested source units in one K2 session. A Gradle module
-        // dependency can be represented as sources rather than a built output;
-        // the union allows cross-module resolution without keeping a backend
-        // alive or materialising project artifacts.
-        val context = contexts.values.combinedForBatch()
         workerPhase("analyze-batch: K2 semantic analysis")
-        val facts = K2SemanticExtractor.semanticFacts(
-            selectedSourceFiles = sourceUnits.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
-            context = context,
+        // Each Gradle component is compiled with its transitive project-source
+        // dependencies. A workspace-wide K2 session incorrectly merges
+        // independent Gradle projects, which may legitimately reuse packages
+        // and type names (for example, separate examples).
+        val analyses = sourceUnits.groupBy { it.jsonObject.requiredString("component") }
+            .toSortedMap()
+            .map { (component, units) ->
+                val context = contexts.contextFor(component)
+                context to K2SemanticExtractor.semanticFacts(
+                    selectedSourceFiles = units.map { sourceUnit -> workspaceRoot.resolve(sourceUnit.jsonObject.requiredString("path")) },
+                    context = context,
+                )
+            }
+        val facts = K2SemanticFacts(
+            references = analyses.flatMap { it.second.references },
+            hierarchy = analyses.flatMap { it.second.hierarchy },
+            annotations = analyses.flatMap { it.second.annotations },
         )
         val externalTargets = JvmBytecodeExtractor.resolvedTargetIds(
-            classpath = context?.classpath.orEmpty(),
+            classpath = analyses.flatMap { it.first?.classpath.orEmpty() }.distinct(),
             targetKeys = (facts.references.map { it.targetKey } + facts.hierarchy.flatMap { listOf(it.subtypeKey, it.supertypeKey) } + facts.annotations.map { it.targetKey }).toSortedSet(),
         )
         workerPhase("analyze-batch: enrich snapshots")
@@ -218,10 +227,53 @@ internal fun Collection<GradleProjectImporter.KotlinCompilationContext>.combined
     require(jdkHomes.size == 1) { "K2 batch spans incompatible Gradle JVM toolchains" }
     return GradleProjectImporter.KotlinCompilationContext(
         component = "k2-batch",
+        moduleName = "k2-batch",
+        gradlePath = ":k2-batch",
         sourceFiles = flatMap { it.sourceFiles }.distinct().sortedBy(Path::toString),
         classpath = flatMap { it.classpath }.distinct().sortedBy(Path::toString),
         jdkHome = jdkHomes.single(),
     )
+}
+
+private fun Map<String, GradleProjectImporter.KotlinCompilationContext>.contextFor(
+    component: String,
+): GradleProjectImporter.KotlinCompilationContext? {
+    val root = this[component]
+        // Core canonicalizes the Gradle root separator in source-unit IDs
+        // (`gradle:app:main`), while the Tooling API preserves the leading
+        // Gradle path colon (`gradle::app:main`). Keep this compatibility
+        // boundary local to worker-only context lookup.
+        ?: values.singleOrNull { it.component.gradleComponentIdentity() == component.gradleComponentIdentity() }
+        ?: return null
+    val byModuleName = values.associateBy { it.moduleName }
+    val included = linkedSetOf<GradleProjectImporter.KotlinCompilationContext>()
+    val pending = ArrayDeque<GradleProjectImporter.KotlinCompilationContext>()
+    pending += root
+    while (pending.isNotEmpty()) {
+        val context = pending.removeFirst()
+        if (!included.add(context)) continue
+        context.projectDependencyModuleNames.sorted().forEach { dependency ->
+            byModuleName[dependency]?.let(pending::add)
+        }
+    }
+    val sourceContext = included.combinedForBatch() ?: return null
+    // Gradle's IDEA model may attach resolved binary libraries to sibling
+    // modules rather than to the module that declares a project dependency.
+    // Retain the full imported binary classpath, but never its sources: source
+    // isolation above is what prevents independent projects from colliding.
+    return sourceContext.copy(
+        classpath = values.flatMap { it.classpath }.distinct().sortedBy(Path::toString),
+    )
+}
+
+private fun String.gradleComponentIdentity(): String {
+    if (!startsWith("gradle:")) return this
+    val roleStart = lastIndexOf(":main")
+    if (roleStart < 0) return this
+    val projectPath = substring("gradle:".length, roleStart)
+        .removePrefix(":")
+        .replace(':', '/')
+    return "gradle:$projectPath:main"
 }
 
 private fun gradleContexts(workspaceRoot: Path): Map<String, GradleProjectImporter.KotlinCompilationContext> {

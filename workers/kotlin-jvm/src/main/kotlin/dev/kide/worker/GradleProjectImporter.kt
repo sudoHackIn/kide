@@ -36,9 +36,12 @@ internal object GradleProjectImporter {
     /** Worker-local K2 inputs. Neither file locations nor JDK details enter the protocol. */
     data class KotlinCompilationContext(
         val component: String,
+        val moduleName: String,
+        val gradlePath: String,
         val sourceFiles: List<Path>,
         val classpath: List<Path>,
         val jdkHome: Path,
+        val projectDependencyModuleNames: Set<String> = emptySet(),
     )
 
     /** Worker-local javac inputs. They deliberately never cross the worker boundary. */
@@ -92,9 +95,13 @@ internal object GradleProjectImporter {
                     .sortedBy(Path::toString)
                 componentId(module) to KotlinCompilationContext(
                     component = componentId(module),
+                    moduleName = module.name,
+                    gradlePath = module.gradleProject.path,
                     sourceFiles = kotlinSourceFiles(module),
                     classpath = libraries,
                     jdkHome = environment.java.javaHome.toPath().toAbsolutePath().normalize(),
+                    projectDependencyModuleNames = module.dependencies.filterIsInstance<IdeaModuleDependency>()
+                        .map(IdeaModuleDependency::getTargetModuleName).toSet(),
                 )
             }
         }

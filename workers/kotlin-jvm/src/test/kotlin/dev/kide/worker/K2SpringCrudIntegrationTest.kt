@@ -2,6 +2,7 @@ package dev.kide.worker
 
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -10,6 +11,15 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 class K2SpringCrudIntegrationTest {
+    @Test
+    fun importsProjectDependenciesByGradleModuleName() {
+        val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
+        val contexts = GradleProjectImporter.kotlinCompilationContexts(root)
+
+        assertEquals(setOf("domain"), contexts.getValue("gradle::app:main").projectDependencyModuleNames)
+        assertEquals(":domain", contexts.getValue("gradle::domain:main").gradlePath)
+    }
+
     @Test
     fun resolvesSpringSymbolsUsingTheGradleClasspath() {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
@@ -60,7 +70,7 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val payload = buildJsonObject {
             put("source_units", buildJsonArray {
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
             })
         }
 

@@ -40,6 +40,8 @@ class K2SemanticExtractorTest {
             selectedSourceFiles = listOf(use),
             context = GradleProjectImporter.KotlinCompilationContext(
                 component = "fixture",
+                moduleName = "fixture",
+                gradlePath = ":fixture",
                 sourceFiles = listOf(api),
                 classpath = emptyList(),
                 jdkHome = Path.of(System.getProperty("java.home")),
