@@ -186,6 +186,10 @@ fn resolve_symbol(
 
 fn resolve_qualified_symbol(store: &IndexStore, name: &str) -> Result<SymbolId, QueryCompileError> {
     match store.symbols_with_qualified_name(name)?.as_slice() {
+        // External JVM declarations may be referenced by source facts before
+        // their dependency JAR is materialized. Their canonical type identity
+        // is still a valid bounded posting key.
+        [] if name.contains('.') => Ok(SymbolId::new(format!("jvm:type:{name}"))),
         [] => Err(QueryCompileError::UnknownQualifiedSymbol(name.to_owned())),
         [symbol] => Ok(symbol.clone()),
         values => Err(QueryCompileError::AmbiguousQualifiedSymbol {

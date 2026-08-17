@@ -61,7 +61,29 @@ internal object JavaSemanticExtractor {
             val collector = FactCollector(trees, selected, allSources, workspaceRoot)
             collector.collectDeclarations(parsed)
             collector.collectReferences(parsed)
-            return collector.snapshots(diagnostics.diagnostics)
+            val snapshots = collector.snapshots(diagnostics.diagnostics)
+            val externalKeys = snapshots.flatMap { snapshot -> snapshot.jsonObject["symbols"]!!.jsonArray.flatMap { symbol ->
+                symbol.jsonObject["applied_symbols"]!!.jsonArray.mapNotNull { value -> value.jsonPrimitive.content.removePrefix("jvm:type:").takeIf { value.jsonPrimitive.content.startsWith("jvm:type:") }?.let { "class:$it" } }
+            } }.toSortedSet()
+            val resolved = JvmBytecodeExtractor.resolvedTargetIds(contexts.flatMap { it.classpath }.distinct(), externalKeys)
+            return snapshots.map { snapshot -> remapExternalAnnotations(snapshot.jsonObject, resolved) }
+        }
+    }
+
+    private fun remapExternalAnnotations(snapshot: JsonObject, resolved: Map<String, String>) = buildJsonObject {
+        snapshot.forEach { (key, value) ->
+            if (key != "symbols") put(key, value) else put("symbols", buildJsonArray {
+                value.jsonArray.forEach { symbol -> add(buildJsonObject {
+                    symbol.jsonObject.forEach { (symbolKey, symbolValue) ->
+                        if (symbolKey != "applied_symbols") put(symbolKey, symbolValue) else put("applied_symbols", buildJsonArray {
+                            symbolValue.jsonArray.forEach { annotation ->
+                                val raw = annotation.jsonPrimitive.content
+                                add(JsonPrimitive(resolved["class:${raw.removePrefix("jvm:type:")}"] ?: raw))
+                            }
+                        })
+                    }
+                }) }
+            })
         }
     }
 
@@ -221,7 +243,7 @@ internal object JavaSemanticExtractor {
         private fun nameOffset(text: String, name: String, start: Int, end: Int): Int = Regex("\\b${Regex.escape(name)}\\b").find(text, start)?.range?.first?.takeIf { it < end } ?: start
         private fun kind(element: Element): String = when (element.kind) { ElementKind.CLASS -> "class"; ElementKind.INTERFACE -> "interface"; ElementKind.ENUM -> "enum"; ElementKind.ANNOTATION_TYPE -> "interface"; ElementKind.CONSTRUCTOR -> "constructor"; ElementKind.METHOD -> "method"; ElementKind.FIELD, ElementKind.ENUM_CONSTANT -> "field"; else -> "property" }
         private fun appliedSymbols(element: Element): List<String> = element.annotationMirrors
-            .mapNotNull { annotation -> elementIds[annotation.annotationType.asElement()] }
+            .map { annotation -> elementIds[annotation.annotationType.asElement()] ?: "jvm:type:${qualifiedName(annotation.annotationType.asElement())}" }
             .distinct()
             .sorted()
         private fun qualifiedName(element: Element): String = when (element) { is TypeElement -> element.qualifiedName.toString(); else -> "${element.enclosingElement?.let(::qualifiedName).orEmpty()}.${element.simpleName}".trim('.') }

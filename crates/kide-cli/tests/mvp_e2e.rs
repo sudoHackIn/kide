@@ -313,6 +313,17 @@ fn copy_fixture(source: &Path, destination: &Path) {
         }
         let target = destination.join(&name);
         let kind = entry.file_type().expect("file type");
+        if name == OsStr::new(".kide") {
+            // Query definitions are fixture source; persistent cache/index
+            // state is not, otherwise the cold-index assertion is invalid.
+            for child in ["queries", "query-packages"] {
+                let source_child = entry.path().join(child);
+                if source_child.exists() {
+                    copy_fixture(&source_child, &target.join(child));
+                }
+            }
+            continue;
+        }
         if kind.is_dir() {
             copy_fixture(&entry.path(), &target);
         } else if kind.is_file() {

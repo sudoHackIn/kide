@@ -70,8 +70,14 @@ fn commands(workspace: &Path) -> Result<Vec<(String, PathBuf)>> {
             let path = entry.path();
             (path.extension().and_then(|value| value.to_str()) == Some("kql")).then_some(path)
         })
-        .map(|path| ProjectQuery::load(&path).map(|query| (query.name, path)))
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter_map(|path| {
+            let name = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)?;
+            Some((name, path))
+        })
+        .collect::<Vec<_>>();
     found.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(found)
 }
