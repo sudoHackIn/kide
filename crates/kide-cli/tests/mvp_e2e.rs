@@ -26,14 +26,14 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         )
     });
     assert_eq!(cold["status"], "ok");
-    assert_eq!(cold["analyzed"], 7);
+    assert_eq!(cold["analyzed"], 8);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
 
     let unchanged = measure("unchanged_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
     });
     assert_eq!(unchanged["analyzed"], 0);
-    assert_eq!(unchanged["reused"], 7);
+    assert_eq!(unchanged["reused"], 8);
     assert_eq!(unchanged["worker_starts"], 0);
 
     let status = measure("warm_status", || {
@@ -43,7 +43,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         )
     });
     assert_eq!(status["status"], "ok");
-    assert_eq!(status["result"]["source_units"]["fresh"], 7);
+    assert_eq!(status["result"]["source_units"]["fresh"], 8);
     assert!(status["result"]["workers_running"]
         .as_array()
         .expect("workers array")
@@ -155,6 +155,22 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         "dev/kide/fixture/book/BookEntity"
     );
 
+    let java_audit = measure("warm_java_symbols", || {
+        run_json(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "symbols", "JavaBookAudit"],
+        )
+    });
+    let java_audit_id = java_audit["result"]["symbols"][0]["id"].as_str().expect("JavaBookAudit id");
+    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", java_audit_id])["status"], "ok");
+    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "implementations", java_audit_id])["status"], "ok");
+    let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
+    let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
+        .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")
+        .and_then(|symbol| symbol["id"].as_str()).expect("JavaBookAudit.record id");
+    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "callers", java_record_id])["status"], "ok");
+    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "type-at", "app/src/main/java/dev/kide/fixture/book/JavaBookAudit.java:15:19"])["status"], "ok");
+
     let entity_annotation = symbol["applied_symbols"]
         .as_array()
         .expect("applied symbols")
@@ -213,7 +229,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
     });
     assert_eq!(incremental["analyzed"], 1);
-    assert_eq!(incremental["reused"], 6);
+    assert_eq!(incremental["reused"], 7);
 }
 
 /// Java source indexing exercises the same persisted navigation contract as
