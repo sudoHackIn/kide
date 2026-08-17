@@ -424,6 +424,37 @@ impl IndexStore {
             .map_err(IndexStoreError::from)
     }
 
+    /// Returns only dependency artifacts whose compact catalog advertises an
+    /// exact qualified symbol. This is deliberately read-only: callers decide
+    /// whether a matching artifact merits a bounded blob materialization.
+    pub fn artifact_candidates_with_qualified_name(
+        &self,
+        qualified_name: &str,
+    ) -> Result<Vec<ArtifactDescriptor>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT artifact_catalog.descriptor_json
+             FROM symbol_locators
+             JOIN artifact_catalog USING (source_unit_id)
+             WHERE symbol_locators.qualified_name = ?1
+             ORDER BY artifact_catalog.source_unit_id",
+        )?;
+        statement
+            .query_map(params![qualified_name], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row.and_then(|json| {
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IndexStoreError::from)
+    }
+
     /// Records immutable dependency identity without copying its graph facts
     /// into the live index. A demand path may materialize it later.
     pub fn put_artifact_descriptor(
@@ -1816,6 +1847,21 @@ mod tests {
                 .symbols_with_qualified_name("jakarta.persistence.Entity")
                 .expect("resolves locator"),
             vec![entity]
+        );
+        assert_eq!(
+            store
+                .artifact_candidates_with_qualified_name("jakarta.persistence.Entity")
+                .expect("selects artifact candidate")
+                .into_iter()
+                .map(|descriptor| descriptor.source_unit.id)
+                .collect::<Vec<_>>(),
+            vec![dependency.id.clone()]
+        );
+        assert!(
+            store
+                .artifact_candidates_with_qualified_name("jakarta.persistence.Missing")
+                .expect("reads empty candidate set")
+                .is_empty()
         );
         assert!(
             store
