@@ -197,7 +197,9 @@ internal object JavaSemanticExtractor {
         }
 
         private fun diagnosticJson(diagnostic: javax.tools.Diagnostic<out JavaFileObject>, source: JsonObject, text: String, provenance: JsonElement) = buildJsonObject {
-            put("message", diagnostic.getMessage(null)); put("severity", diagnostic.kind.name.lowercase()); put("range", range(source.requiredString("id"), text, diagnostic.startPosition.toInt().coerceAtLeast(0), diagnostic.endPosition.toInt().coerceAtLeast(diagnostic.startPosition.toInt().coerceAtLeast(0)))); put("provenance", provenance)
+            val start = diagnostic.startPosition.toInt().coerceAtLeast(0)
+            val end = diagnostic.endPosition.toInt().coerceAtLeast(start)
+            put("source_unit", source.requiredString("id")); put("message", diagnostic.getMessage(null)); put("severity", diagnostic.kind.name.lowercase()); put("range", buildJsonObject { put("start", utf8(text, start)); put("end", utf8(text, end)) }); put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
         }
 
         private fun sourcePath(unit: CompilationUnitTree): Path? = runCatching { canonical(Path.of(unit.sourceFile.toUri())) }.getOrNull()

@@ -75,6 +75,7 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot()))).build()
             } catch (error: Exception) {
+                logger().error("Source analysis failed for request {}", request.requestId, error)
                 unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
             }
         }
