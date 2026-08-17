@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use kide_core::{
-    CANONICAL_SCHEMA_VERSION, Completeness, Freshness, IndexStore, Precision, QueryPayload,
-    QueryProblem, QueryResponse, QueryStatus, ResultMetadata, document_from_bytes,
+    document_from_bytes, ArtifactBlobCache, Completeness, Freshness, IndexStore, Precision,
+    QueryPayload, QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolRecord,
+    CANONICAL_SCHEMA_VERSION,
 };
 
 use super::{
@@ -179,6 +180,9 @@ pub(super) fn symbols(workspace: &Path, query: String, short: bool) -> Result<Qu
             .collect();
     }
     if symbols.is_empty() {
+        symbols = cached_dependency_symbols(&store, workspace, &query)?;
+    }
+    if symbols.is_empty() {
         symbols = store.symbols_matching_name(&query)?;
     }
     symbols.sort_by_key(|symbol| {
@@ -255,4 +259,114 @@ pub(super) fn symbols(workspace: &Path, query: String, short: bool) -> Result<Qu
     };
     print_response(&response)?;
     Ok(status)
+}
+
+fn cached_dependency_symbols(
+    store: &IndexStore,
+    workspace: &Path,
+    qualified_name: &str,
+) -> Result<Vec<SymbolRecord>> {
+    let cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join(".kide/artifact-cache"));
+    let cache = ArtifactBlobCache::open(cache_root)?;
+    let mut symbols = Vec::new();
+    for descriptor in store.artifact_candidates_with_qualified_name(qualified_name)? {
+        symbols.extend(kide_core::artifact_query::symbols_with_qualified_name(
+            &cache,
+            &descriptor,
+            qualified_name,
+        )?);
+    }
+    Ok(symbols)
+}
+
+#[cfg(test)]
+mod tests {
+    use kide_core::{
+        artifact_blob_layout::ArtifactBlobLayout, artifact_proto, ArtifactBlobKey,
+        ArtifactDescriptor, ComponentId, Fingerprint, Language, Provenance, SourceOrigin,
+        SourceUnit, SourceUnitId, SymbolId, SymbolLocator, WORKER_PROTOCOL_VERSION,
+    };
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn reads_dependency_symbol_from_compact_directory_without_a_snapshot() {
+        let workspace = tempdir().expect("workspace");
+        let source = SourceUnit {
+            id: SourceUnitId::new("jvm:widget"),
+            component: ComponentId::new("fixture:main"),
+            path: kide_core::WorkspacePath::new(".kide/dependencies/widget.jar"),
+            language: Language::Java,
+            origin: SourceOrigin::Dependency,
+            content: Fingerprint::new("sha256:widget"),
+            context: Fingerprint::new("sha256:context"),
+        };
+        let provenance = Provenance {
+            backend: "fixture".into(),
+            backend_version: "1".into(),
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            analysis_options: Fingerprint::new("sha256:options"),
+        };
+        let descriptor = ArtifactDescriptor {
+            source_unit: source.clone(),
+            provenance: provenance.clone(),
+            symbol_locators: vec![SymbolLocator {
+                qualified_name: "example.Widget".into(),
+                symbol: SymbolId::new("java:example.Widget"),
+            }],
+        };
+        let store = IndexStore::open(IndexStore::default_path(workspace.path())).expect("store");
+        store.put_artifact_descriptor(&descriptor).expect("catalog");
+        let cache =
+            ArtifactBlobCache::open(workspace.path().join(".kide/artifact-cache")).expect("cache");
+        let graph = artifact_proto::GraphArtifact {
+            snapshots: vec![artifact_proto::GraphSnapshot {
+                source_unit: Some(artifact_proto::ArtifactSourceUnit {
+                    id: source.id.as_str().to_owned(),
+                    component: source.component.as_str().to_owned(),
+                    path: source.path.as_str().to_owned(),
+                    language: "java".into(),
+                    origin: "dependency".into(),
+                    content_fingerprint: source.content.as_str().to_owned(),
+                    context_fingerprint: source.context.as_str().to_owned(),
+                }),
+                provenances: vec![artifact_proto::ArtifactProvenance {
+                    backend: provenance.backend.clone(),
+                    backend_version: provenance.backend_version.clone(),
+                    worker_protocol_version: provenance.protocol_version,
+                    analysis_options_fingerprint: provenance.analysis_options.as_str().to_owned(),
+                }],
+                provenance_index: Some(0),
+                symbols: vec![artifact_proto::ArtifactSymbol {
+                    id: "java:example.Widget".into(),
+                    backend_key: "example.Widget".into(),
+                    backend_schema_version: 1,
+                    language: "java".into(),
+                    kind: "class".into(),
+                    name: "Widget".into(),
+                    qualified_name: Some("example.Widget".into()),
+                    declaration: Some(artifact_proto::ArtifactRange { start: 0, end: 6 }),
+                    name_range: Some(artifact_proto::ArtifactRange { start: 0, end: 6 }),
+                    freshness: "fresh".into(),
+                    completeness: "partial".into(),
+                    component_id: "fixture:main".into(),
+                    provenance_index: Some(0),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let key = ArtifactBlobKey::new(source.content.clone(), &provenance);
+        cache
+            .publish(&key, ArtifactBlobLayout::encode(&graph).bytes())
+            .expect("publishes");
+
+        let symbols = cached_dependency_symbols(&store, workspace.path(), "example.Widget")
+            .expect("queries postings");
+        assert_eq!(symbols[0].id.as_str(), "java:example.Widget");
+        assert!(store.source_unit(&source.id).expect("store read").is_none());
+    }
 }

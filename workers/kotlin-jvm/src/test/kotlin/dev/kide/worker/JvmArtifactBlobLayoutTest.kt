@@ -23,7 +23,7 @@ class JvmArtifactBlobLayoutTest {
         val tocOffset = header.long
         val tocLength = header.long
         val toc = Artifact.ArtifactBlobToc.parseFrom(blob.copyOfRange(tocOffset.toInt(), (tocOffset + tocLength).toInt()))
-        assertEquals(2, toc.sectionsCount)
+        assertEquals(6, toc.sectionsCount)
         assertEquals(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_SYMBOL_DICTIONARY, toc.sectionsList.first().kind)
     }
 }

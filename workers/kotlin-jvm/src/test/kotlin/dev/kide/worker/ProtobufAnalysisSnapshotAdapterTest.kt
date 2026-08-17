@@ -69,6 +69,7 @@ class ProtobufAnalysisSnapshotAdapterTest {
                 put("applied_symbols", buildJsonArray { add(JsonPrimitive("jvm:demo.Controller")) })
                 put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
             }) })
+            put("applications", buildJsonArray { })
             put("occurrences", buildJsonArray { add(occurrence) })
             put("references", buildJsonArray { add(buildJsonObject { put("source", occurrence); put("target", "target"); put("precision", "exact") }) })
             put("calls", buildJsonArray { add(buildJsonObject { put("source", occurrence); put("target", "target"); put("caller", "caller"); put("precision", "exact") }) })

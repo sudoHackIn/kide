@@ -2,16 +2,15 @@
 
 use std::{collections::BTreeSet, path::Path};
 
-use prost::Message;
 use thiserror::Error;
 
 use crate::{
-    AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError,
-    ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
-    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError, ProjectManifest,
-    Provenance, SourceOrigin, SourceUnit, WorkerBatch, WorkerCapability, WorkerEnvelope,
-    WorkerLaunch, WorkerMessage, WorkerSelection, WorkerSupervisor, WorkerSupervisorError,
-    WorkspacePath, plan_invalidation,
+    plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
+    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
+    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
+    WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
+    WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +115,17 @@ pub fn index_selected_batches(
             continue;
         }
         analyze_selected_batch(store, manifest, batch, requested, index, &mut run)?;
+    }
+    if !reanalyze.is_empty() {
+        let catalog_batch = selection
+            .batches
+            .first()
+            .expect("a supported selection has at least one batch");
+        let mut supervisor =
+            WorkerSupervisor::new(catalog_batch.worker.installation.launch.clone());
+        supervisor.handshake("index-dependency-catalog")?;
+        index_dependency_catalog(store, &mut supervisor)?;
+        run.worker_starts += supervisor.start_count();
     }
     store.put_manifest(manifest)?;
     Ok(run)
@@ -258,12 +268,9 @@ pub fn materialize_catalog_artifact(
         .ok_or(IndexOrchestratorError::InvalidStagedArtifact)?;
     let layout = crate::artifact_blob_layout::ArtifactBlobLayout::validate(payload)
         .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
-    let graph = crate::artifact_proto::GraphArtifact::decode(
-        layout
-            .section(crate::artifact_proto::ArtifactBlobSectionKind::GraphFacts)
-            .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?,
-    )
-    .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
+    let graph = layout
+        .graph_facts()
+        .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
     for snapshot in crate::artifact_proto_adapter::decode_graph_artifact(graph)
         .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?
     {

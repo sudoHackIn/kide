@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -18,6 +19,7 @@ class ProtobufArtifactMaterializationAdapterTest {
             put("backend", WORKER_NAME); put("backend_version", WORKER_VERSION)
             put("protocol_version", WORKER_PROTOCOL_VERSION); put("analysis_options", "sha256:options")
         })
+        put("symbol_locators", buildJsonArray { })
     }
 
     @Test

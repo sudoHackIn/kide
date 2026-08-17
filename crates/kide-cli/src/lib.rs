@@ -30,6 +30,8 @@ pub(crate) enum Command {
         path: PathBuf,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        warm_dependencies: bool,
     },
     Status,
     Text {

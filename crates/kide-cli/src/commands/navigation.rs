@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use kide_core::{
-    CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload, QueryProblem, QueryResponse, QueryStatus,
-    ResultMetadata, SymbolId, WorkspacePath, document_from_bytes,
+    ArtifactBlobCache, CANONICAL_SCHEMA_VERSION, IndexStore, QueryPayload, QueryProblem,
+    QueryResponse, QueryStatus, ResultMetadata, SymbolId, SymbolRecord, WorkspacePath,
+    document_from_bytes,
 };
 
 use super::print_response;
@@ -378,13 +379,16 @@ pub(super) fn implementations(
             } else {
                 store.implementations_of(&symbol)?
             };
-            let symbols = edges
+            let mut symbols = edges
                 .into_iter()
                 .map(|edge| store.symbol(&edge.subtype))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
+            if symbols.is_empty() && !transitive {
+                symbols = cached_dependency_implementations(&store, workspace, &symbol)?;
+            }
             if human_output {
                 if symbols.is_empty() {
                     println!("no implementations");
@@ -398,6 +402,26 @@ pub(super) fn implementations(
         resolution => target_problem(resolution),
     };
     print_query_response(status, result, problems)
+}
+
+pub(super) fn cached_dependency_implementations(
+    store: &IndexStore,
+    workspace: &Path,
+    supertype: &SymbolId,
+) -> Result<Vec<SymbolRecord>> {
+    let cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join(".kide/artifact-cache"));
+    let cache = ArtifactBlobCache::open(cache_root)?;
+    let mut symbols = Vec::new();
+    for artifact in store.artifact_candidates_with_symbol(supertype)? {
+        symbols.extend(kide_core::artifact_query::direct_implementations(
+            &cache, &artifact, supertype,
+        )?);
+    }
+    symbols.sort_by_key(|symbol| symbol.id.as_str().to_owned());
+    symbols.dedup_by(|left, right| left.id == right.id);
+    Ok(symbols)
 }
 
 pub(super) fn type_at(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
@@ -451,11 +475,16 @@ pub(super) enum TargetResolution {
 
 fn resolve_target(store: &IndexStore, workspace: &Path, value: &str) -> Result<TargetResolution> {
     if value.starts_with("jvm:sha256:") || value.starts_with("kotlin:") {
-        return Ok(if store.symbol(&SymbolId::new(value))?.is_some() {
-            TargetResolution::Symbol(SymbolId::new(value))
-        } else {
-            TargetResolution::NoResult
-        });
+        let symbol = SymbolId::new(value);
+        return Ok(
+            if store.symbol(&symbol)?.is_some()
+                || !store.artifact_candidates_with_symbol(&symbol)?.is_empty()
+            {
+                TargetResolution::Symbol(symbol)
+            } else {
+                TargetResolution::NoResult
+            },
+        );
     }
     if let Ok(location) = parse_location(value) {
         let source_text = std::fs::read_to_string(workspace.join(location.path.as_str()))?;

@@ -24,12 +24,22 @@ message ArtifactBlobSection {
   uint64 offset = 2;
   uint64 length = 3;
   bytes sha256 = 4;
+  ArtifactBlobCompression compression = 5;
+  uint32 symbol_ordinal_start = 6;
+  uint32 symbol_ordinal_end = 7;
+}
+enum ArtifactBlobCompression {
+  ARTIFACT_BLOB_COMPRESSION_NONE = 0;
+  ARTIFACT_BLOB_COMPRESSION_GZIP = 1;
 }
 enum ArtifactBlobSectionKind {
   ARTIFACT_BLOB_SECTION_KIND_UNSPECIFIED = 0;
   ARTIFACT_BLOB_SECTION_KIND_SYMBOL_DICTIONARY = 1;
   ARTIFACT_BLOB_SECTION_KIND_GRAPH_FACTS = 2;
   ARTIFACT_BLOB_SECTION_KIND_SYMBOL_POSTINGS = 3;
+  ARTIFACT_BLOB_SECTION_KIND_HIERARCHY_POSTINGS = 4;
+  ARTIFACT_BLOB_SECTION_KIND_QUALIFIED_SYMBOL_DIRECTORY = 5;
+  ARTIFACT_BLOB_SECTION_KIND_SYMBOL_DETAIL_BLOCK = 6;
 }
 
 message ArtifactSymbolDictionary {
@@ -45,6 +55,65 @@ message ArtifactSymbolPostings {
 message ArtifactSymbolPosting {
   uint32 source_unit_index = 1;
   ArtifactSymbol symbol = 2;
+}
+
+// Direct hierarchy is an independent query projection. It routes a direct
+// implementations lookup without reading the complete graph payload.
+message ArtifactHierarchyPostings {
+  repeated ArtifactHierarchyPosting entries = 1;
+}
+message ArtifactHierarchyPosting {
+  string subtype_symbol_id = 1;
+  string supertype_symbol_id = 2;
+  string precision = 3;
+}
+
+// Sorted exact-name routing table. The ordinal identifies one declaration in
+// the artifact-local symbol sequence without carrying its complete metadata.
+message ArtifactQualifiedSymbolDirectory {
+  repeated ArtifactQualifiedSymbolEntry entries = 1;
+}
+message ArtifactQualifiedSymbolEntry {
+  string qualified_name = 1;
+  uint32 symbol_ordinal = 2;
+}
+
+// Detail blocks are addressed by their ordinal interval in the TOC. Fields
+// shared by a dependency artifact are inherited from its snapshot/descriptor.
+message ArtifactSymbolDetailBlock {
+  uint32 first_symbol_ordinal = 1;
+  ArtifactSymbolSnapshotDefaults defaults = 2;
+  repeated ArtifactSymbolDetail entries = 3;
+}
+// Values shared by declarations emitted for one snapshot. Keeping them in the
+// block lets a reader reconstruct one declaration without reading GraphFacts.
+message ArtifactSymbolSnapshotDefaults {
+  ArtifactSourceUnit source_unit = 1;
+  repeated ArtifactProvenance provenances = 2;
+  string language = 3;
+  string freshness = 4;
+  string completeness = 5;
+  string component_id = 6;
+  optional uint32 provenance_index = 7;
+}
+message ArtifactSymbolDetail {
+  string id = 1;
+  string backend_key = 2;
+  uint32 backend_schema_version = 3;
+  string kind = 4;
+  string name = 5;
+  optional string qualified_name = 6;
+  optional string signature = 7;
+  ArtifactRange declaration = 8;
+  ArtifactRange name_range = 9;
+  optional string owner_id = 10;
+  repeated string modifiers = 11;
+  repeated string applied_symbol_ids = 12;
+  optional string language = 13;
+  optional string freshness = 14;
+  optional string completeness = 15;
+  optional string component_id = 16;
+  optional uint32 provenance_index = 17;
 }
 
 message GraphArtifact {
@@ -66,7 +135,7 @@ message GraphSnapshot {
   repeated ArtifactType types = 10;
   repeated ArtifactDiagnostic diagnostics = 11;
   string completeness = 12;
-  uint32 provenance_index = 13;
+  optional uint32 provenance_index = 13;
 }
 
 message ArtifactSourceUnit {
@@ -105,7 +174,7 @@ message ArtifactSymbol {
   string freshness = 14;
   string completeness = 15;
   string component_id = 16;
-  uint32 provenance_index = 17;
+  optional uint32 provenance_index = 17;
   repeated string applied_symbol_ids = 13;
 }
 
@@ -118,11 +187,11 @@ message ArtifactOccurrence {
   string precision = 6;
   string freshness = 7;
   string completeness = 8;
-  uint32 provenance_index = 9;
+  optional uint32 provenance_index = 9;
 }
 
 message ArtifactReference { uint32 source_occurrence_index = 1; string target_symbol_id = 2; string precision = 3; }
 message ArtifactCall { uint32 source_occurrence_index = 1; string target_symbol_id = 2; optional string caller_symbol_id = 3; string precision = 4; }
-message ArtifactHierarchy { string subtype_symbol_id = 1; string supertype_symbol_id = 2; string precision = 3; uint32 provenance_index = 4; }
-message ArtifactType { string id = 1; string language = 2; string display = 3; optional string backend_key = 4; uint32 backend_schema_version = 5; string freshness = 6; string completeness = 7; uint32 provenance_index = 8; }
-message ArtifactDiagnostic { uint32 source_unit_index = 1; optional ArtifactRange range = 2; string severity = 3; optional string code = 4; string message = 5; string freshness = 6; string completeness = 7; uint32 provenance_index = 8; }
+message ArtifactHierarchy { string subtype_symbol_id = 1; string supertype_symbol_id = 2; string precision = 3; optional uint32 provenance_index = 4; }
+message ArtifactType { string id = 1; string language = 2; string display = 3; optional string backend_key = 4; uint32 backend_schema_version = 5; string freshness = 6; string completeness = 7; optional uint32 provenance_index = 8; }
+message ArtifactDiagnostic { uint32 source_unit_index = 1; optional ArtifactRange range = 2; string severity = 3; optional string code = 4; string message = 5; string freshness = 6; string completeness = 7; optional uint32 provenance_index = 8; }

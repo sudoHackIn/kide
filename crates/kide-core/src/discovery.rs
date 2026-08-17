@@ -14,8 +14,8 @@ use thiserror::Error;
 
 use crate::{
     BuildSystem, Component, ComponentId, DependencyEdge, Fingerprint, Language, ProjectManifest,
-    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WORKER_PROTOCOL_VERSION, WorkspaceId,
-    WorkspacePath,
+    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkspaceId, WorkspacePath,
+    WORKER_PROTOCOL_VERSION,
 };
 
 const CONFIGURATION_FILE_NAMES: &[&str] = &[
@@ -486,30 +486,22 @@ mod tests {
                 "src/generated/kotlin/Generated.kt",
             ]
         );
-        assert!(
-            from_root
-                .source_units
-                .iter()
-                .any(|source| source.language == Language::Kotlin)
-        );
-        assert!(
-            from_root
-                .source_units
-                .iter()
-                .any(|source| source.language == Language::Java)
-        );
-        assert!(
-            from_root
-                .source_units
-                .iter()
-                .any(|source| source.origin == SourceOrigin::Generated)
-        );
-        assert!(
-            from_root
-                .configuration_inputs
-                .windows(2)
-                .all(|pair| pair[0].as_str() < pair[1].as_str())
-        );
+        assert!(from_root
+            .source_units
+            .iter()
+            .any(|source| source.language == Language::Kotlin));
+        assert!(from_root
+            .source_units
+            .iter()
+            .any(|source| source.language == Language::Java));
+        assert!(from_root
+            .source_units
+            .iter()
+            .any(|source| source.origin == SourceOrigin::Generated));
+        assert!(from_root
+            .configuration_inputs
+            .windows(2)
+            .all(|pair| pair[0].as_str() < pair[1].as_str()));
     }
 
     #[test]

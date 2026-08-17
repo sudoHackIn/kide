@@ -7,11 +7,21 @@ use std::{
 use anyhow::{Result, bail};
 use kide_core::{
     ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, Provenance, QueryStatus,
-    WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry, collect_workspace_text,
-    discover_workspace, index_batch_with_artifact_cache_and_provenance, index_selected_batches,
+    WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkerSupervisor,
+    cache_catalog_artifact, collect_workspace_text, discover_workspace,
+    index_batch_with_artifact_cache_and_provenance, index_selected_batches,
 };
 
-pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QueryStatus> {
+/// Explicit cache warmup is intentionally bounded. Dependency blobs can be
+/// large, so a normal index must never turn into an unbounded classpath copy.
+const WARM_DEPENDENCY_ARTIFACT_LIMIT: u32 = 16;
+
+pub(super) fn index(
+    path: PathBuf,
+    verbosity: u8,
+    force: bool,
+    warm_dependencies: bool,
+) -> Result<QueryStatus> {
     tracing::debug!(target: "kide::cli", workspace = %path.display(), "discovering workspace");
     let discovery = discover_workspace(&path)?;
     tracing::debug!(target: "kide::cli", "opening index");
@@ -54,7 +64,7 @@ pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QuerySt
             serde_json::to_string(&unsupported)?
         );
     }
-    let run = if selection.batches.len() == 1 {
+    let mut run = if selection.batches.len() == 1 {
         // Retain the cache-aware dependency catalog path for the common
         // single-backend workspace. Mixed workspaces use the global planner so
         // one batch cannot invalidate another language's source snapshots.
@@ -85,6 +95,33 @@ pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QuerySt
     } else {
         index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
     };
+    if warm_dependencies {
+        let mut worker =
+            WorkerSupervisor::new(selection.batches[0].worker.installation.launch.clone());
+        worker.handshake("warm-dependency-cache")?;
+        let mut budget = kide_core::MaterializationBudget {
+            remaining_artifacts: WARM_DEPENDENCY_ARTIFACT_LIMIT,
+        };
+        for descriptor in store.artifact_descriptors()? {
+            match cache_catalog_artifact(
+                &store,
+                &mut worker,
+                &artifact_cache,
+                discovery.manifest.root.clone(),
+                &descriptor.source_unit.id,
+                &staging,
+                &mut budget,
+            )? {
+                kide_core::MaterializationOutcome::Materialized => run.dependency_analyzed += 1,
+                kide_core::MaterializationOutcome::AlreadyMaterialized => {
+                    run.dependency_reused += 1
+                }
+                kide_core::MaterializationOutcome::BudgetExhausted => break,
+                _ => {}
+            }
+        }
+        run.worker_starts += worker.start_count();
+    }
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;
     tracing::info!(target: "kide::cli", analyzed = run.analyzed, dependency_analyzed = run.dependency_analyzed, "index complete");
@@ -100,6 +137,7 @@ pub(super) fn index(path: PathBuf, verbosity: u8, force: bool) -> Result<QuerySt
         "worker_starts": run.worker_starts,
         "dependency_analyzed": run.dependency_analyzed,
         "dependency_reused": run.dependency_reused,
+        "dependency_warm_limit": warm_dependencies.then_some(WARM_DEPENDENCY_ARTIFACT_LIMIT),
         "text_documents": text_inventory.documents.len(),
         "text_skipped": text_inventory.skipped.len(),
         })
@@ -123,6 +161,11 @@ fn kotlin_worker_installation(workspace: &Path, verbosity: u8) -> Result<WorkerI
         OsString::from("KIDE_WORKSPACE_ROOT"),
         workspace.as_os_str().to_os_string(),
     );
+    if let Some(gradle_home) = std::env::var_os("GRADLE_HOME") {
+        launch
+            .environment
+            .insert(OsString::from("KIDE_GRADLE_INSTALLATION"), gradle_home);
+    }
     launch.environment.insert(
         OsString::from("KIDE_WORKER_LOG_LEVEL"),
         OsString::from(match verbosity {

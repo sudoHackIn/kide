@@ -12,7 +12,11 @@ use kide_core::QueryStatus;
 
 pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
     match cli.command {
-        Command::Index { path, force } => index::index(path, cli.verbose, force),
+        Command::Index {
+            path,
+            force,
+            warm_dependencies,
+        } => index::index(path, cli.verbose, force, warm_dependencies),
         Command::Status => search::status(&cli.workspace, human_output),
         Command::Text { query } => search::text_search(&cli.workspace, query, human_output),
         Command::Symbols { query, short } => {
@@ -63,8 +67,8 @@ mod tests {
 
     use super::input::{target_from_pipe_text, target_from_symbols};
     use super::navigation::{
-        TargetResolution, byte_to_location, callers, fan_out, implementations, target_problem,
-        type_at,
+        TargetResolution, byte_to_location, cached_dependency_implementations, callers, fan_out,
+        implementations, target_problem, type_at,
     };
     use super::{Cli, Command, exit_code};
     use std::process::ExitCode;
@@ -212,6 +216,125 @@ mod tests {
             type_at(workspace.path(), "src/Main.kt:1:16".to_owned(), false).unwrap(),
             kide_core::QueryStatus::Ok
         );
+    }
+
+    #[test]
+    fn cached_dependency_hierarchy_falls_back_without_sqlite_snapshots() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source = kide_core::SourceUnit {
+            id: kide_core::SourceUnitId::new("jvm:sha256:widget"),
+            component: kide_core::ComponentId::new("fixture:main"),
+            path: kide_core::WorkspacePath::new(".kide/dependencies/widget"),
+            language: kide_core::Language::Java,
+            origin: kide_core::SourceOrigin::Dependency,
+            content: kide_core::Fingerprint::new("sha256:widget"),
+            context: kide_core::Fingerprint::new("sha256:context"),
+        };
+        let provenance = kide_core::Provenance {
+            backend: "fixture".into(),
+            backend_version: "1".into(),
+            protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
+            analysis_options: kide_core::Fingerprint::new("sha256:options"),
+        };
+        let target = kide_core::SymbolId::new("jvm:sha256:widget:example.Widget");
+        let implementation = kide_core::SymbolId::new("jvm:sha256:widget:example.WidgetImpl");
+        let descriptor = kide_core::ArtifactDescriptor {
+            source_unit: source.clone(),
+            provenance: provenance.clone(),
+            symbol_locators: vec![kide_core::SymbolLocator {
+                qualified_name: "example.Widget".into(),
+                symbol: target.clone(),
+            }],
+        };
+        let store =
+            kide_core::IndexStore::open(kide_core::IndexStore::default_path(workspace.path()))
+                .expect("store");
+        store.put_artifact_descriptor(&descriptor).expect("catalog");
+        assert!(store.source_unit(&source.id).expect("store read").is_none());
+
+        let graph = kide_core::artifact_proto::GraphArtifact {
+            snapshots: vec![kide_core::artifact_proto::GraphSnapshot {
+                source_unit: Some(kide_core::artifact_proto::ArtifactSourceUnit {
+                    id: source.id.as_str().into(),
+                    component: source.component.as_str().into(),
+                    path: source.path.as_str().into(),
+                    language: "java".into(),
+                    origin: "dependency".into(),
+                    content_fingerprint: source.content.as_str().into(),
+                    context_fingerprint: source.context.as_str().into(),
+                }),
+                provenances: vec![kide_core::artifact_proto::ArtifactProvenance {
+                    backend: provenance.backend.clone(),
+                    backend_version: provenance.backend_version.clone(),
+                    worker_protocol_version: provenance.protocol_version,
+                    analysis_options_fingerprint: provenance.analysis_options.as_str().into(),
+                }],
+                provenance_index: Some(0),
+                symbols: vec![
+                    artifact_symbol(&target, "Widget", 0),
+                    artifact_symbol(&implementation, "WidgetImpl", 7),
+                ],
+                hierarchy: vec![kide_core::artifact_proto::ArtifactHierarchy {
+                    subtype_symbol_id: implementation.as_str().into(),
+                    supertype_symbol_id: target.as_str().into(),
+                    precision: "exact".into(),
+                    provenance_index: Some(0),
+                }],
+                completeness: "partial".into(),
+                ..Default::default()
+            }],
+        };
+        let cache =
+            kide_core::ArtifactBlobCache::open(workspace.path().join(".kide/artifact-cache"))
+                .expect("cache");
+        cache
+            .publish(
+                &kide_core::ArtifactBlobKey::new(source.content.clone(), &provenance),
+                kide_core::artifact_blob_layout::ArtifactBlobLayout::encode(&graph).bytes(),
+            )
+            .expect("blob");
+
+        assert_eq!(
+            cached_dependency_implementations(&store, workspace.path(), &target)
+                .expect("cached hierarchy")
+                .into_iter()
+                .map(|symbol| symbol.id)
+                .collect::<Vec<_>>(),
+            vec![implementation]
+        );
+        assert_eq!(
+            implementations(workspace.path(), target.as_str().into(), false, false)
+                .expect("CLI fallback"),
+            kide_core::QueryStatus::Ok
+        );
+    }
+
+    fn artifact_symbol(
+        id: &kide_core::SymbolId,
+        name: &str,
+        start: u64,
+    ) -> kide_core::artifact_proto::ArtifactSymbol {
+        kide_core::artifact_proto::ArtifactSymbol {
+            id: id.as_str().into(),
+            backend_key: name.into(),
+            backend_schema_version: 1,
+            language: "java".into(),
+            kind: "class".into(),
+            name: name.into(),
+            declaration: Some(kide_core::artifact_proto::ArtifactRange {
+                start,
+                end: start + name.len() as u64,
+            }),
+            name_range: Some(kide_core::artifact_proto::ArtifactRange {
+                start,
+                end: start + name.len() as u64,
+            }),
+            freshness: "fresh".into(),
+            completeness: "partial".into(),
+            component_id: "fixture:main".into(),
+            provenance_index: Some(0),
+            ..Default::default()
+        }
     }
 
     #[test]

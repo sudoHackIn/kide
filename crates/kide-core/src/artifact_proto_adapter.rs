@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    FileAnalysisSnapshot, Provenance, SourceUnit, SymbolRecord, artifact_proto, worker_proto,
-    worker_proto_adapter,
+    artifact_proto, worker_proto, worker_proto_adapter, FileAnalysisSnapshot, Provenance,
+    SourceUnit, SymbolRecord,
 };
 
 pub const ARTIFACT_FORMAT_VERSION: u32 = 1;
@@ -88,7 +88,8 @@ pub fn decode_symbol_postings(
         .entries
         .into_iter()
         .map(|posting| {
-            let symbol = posting.symbol.ok_or(ArtifactProtoError::LengthMismatch)?;
+            let mut symbol = posting.symbol.ok_or(ArtifactProtoError::LengthMismatch)?;
+            symbol.provenance_index = Some(0);
             let snapshot = decode_snapshot(artifact_proto::GraphSnapshot {
                 source_unit: Some(source_unit(worker_proto_adapter::source_unit(
                     descriptor_source,
@@ -112,6 +113,66 @@ pub fn decode_symbol_postings(
         .collect()
 }
 
+/// Reconstructs one canonical declaration from its independently readable
+/// ordinal detail block. The block carries snapshot-level defaults, so this
+/// does not require GraphFacts or a descriptor supplied by the caller.
+pub fn decode_symbol_detail(
+    block: artifact_proto::ArtifactSymbolDetailBlock,
+    ordinal: u32,
+) -> Result<SymbolRecord, ArtifactProtoError> {
+    let index = ordinal
+        .checked_sub(block.first_symbol_ordinal)
+        .ok_or(ArtifactProtoError::LengthMismatch)? as usize;
+    let detail = block
+        .entries
+        .get(index)
+        .ok_or(ArtifactProtoError::LengthMismatch)?;
+    let defaults = block.defaults.ok_or(ArtifactProtoError::LengthMismatch)?;
+    let source_unit = defaults
+        .source_unit
+        .ok_or(ArtifactProtoError::LengthMismatch)?;
+    let provenance_index = detail
+        .provenance_index
+        .or(defaults.provenance_index)
+        .unwrap_or(0) as usize;
+    let provenance = defaults
+        .provenances
+        .get(provenance_index)
+        .ok_or(ArtifactProtoError::LengthMismatch)?;
+    let symbol = artifact_proto::ArtifactSymbol {
+        id: detail.id.clone(),
+        backend_key: detail.backend_key.clone(),
+        backend_schema_version: detail.backend_schema_version,
+        language: detail.language.clone().unwrap_or(defaults.language),
+        kind: detail.kind.clone(),
+        name: detail.name.clone(),
+        qualified_name: detail.qualified_name.clone(),
+        signature: detail.signature.clone(),
+        declaration: detail.declaration.clone(),
+        name_range: detail.name_range.clone(),
+        owner_id: detail.owner_id.clone(),
+        modifiers: detail.modifiers.clone(),
+        applied_symbol_ids: detail.applied_symbol_ids.clone(),
+        freshness: detail.freshness.clone().unwrap_or(defaults.freshness),
+        completeness: detail.completeness.clone().unwrap_or(defaults.completeness),
+        component_id: detail.component_id.clone().unwrap_or(defaults.component_id),
+        provenance_index: Some(0),
+    };
+    let snapshot = decode_snapshot(artifact_proto::GraphSnapshot {
+        source_unit: Some(source_unit),
+        provenances: vec![provenance.clone()],
+        symbols: vec![symbol],
+        completeness: "partial".to_owned(),
+        provenance_index: Some(0),
+        ..Default::default()
+    })?;
+    snapshot
+        .symbols
+        .into_iter()
+        .next()
+        .ok_or(ArtifactProtoError::LengthMismatch)
+}
+
 fn snapshot(
     value: &FileAnalysisSnapshot,
 ) -> Result<artifact_proto::GraphSnapshot, ArtifactProtoError> {
@@ -129,7 +190,7 @@ fn snapshot(
         types: proto.types.into_iter().map(ty).collect(),
         diagnostics: proto.diagnostics.into_iter().map(diagnostic).collect(),
         completeness: proto.completeness,
-        provenance_index: proto.provenance_index,
+        provenance_index: Some(proto.provenance_index),
     })
 }
 
@@ -162,7 +223,7 @@ fn decode_snapshot(
             .map(decode_diagnostic)
             .collect(),
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
     })
     .map_err(Into::into)
 }
@@ -247,14 +308,14 @@ fn symbol(value: worker_proto::SymbolDeclaration) -> artifact_proto::ArtifactSym
         freshness: value.freshness,
         completeness: value.completeness,
         component_id: value.component_id,
-        provenance_index: value.provenance_index,
+        provenance_index: Some(value.provenance_index),
     }
 }
 fn decode_symbol(value: artifact_proto::ArtifactSymbol) -> worker_proto::SymbolDeclaration {
     worker_proto::SymbolDeclaration {
         id: value.id,
         source_unit_index: 0,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
         backend_key: value.backend_key,
         backend_schema_version: value.backend_schema_version,
         language: value.language,
@@ -282,7 +343,7 @@ fn occurrence(value: worker_proto::Occurrence) -> artifact_proto::ArtifactOccurr
         precision: value.precision,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: Some(value.provenance_index),
     }
 }
 fn decode_occurrence(value: artifact_proto::ArtifactOccurrence) -> worker_proto::Occurrence {
@@ -295,7 +356,7 @@ fn decode_occurrence(value: artifact_proto::ArtifactOccurrence) -> worker_proto:
         precision: value.precision,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
     }
 }
 fn reference(value: worker_proto::ReferenceEdge) -> artifact_proto::ArtifactReference {
@@ -333,7 +394,7 @@ fn hierarchy(value: worker_proto::HierarchyEdge) -> artifact_proto::ArtifactHier
         subtype_symbol_id: value.subtype_symbol_id,
         supertype_symbol_id: value.supertype_symbol_id,
         precision: value.precision,
-        provenance_index: value.provenance_index,
+        provenance_index: Some(value.provenance_index),
     }
 }
 fn decode_hierarchy(value: artifact_proto::ArtifactHierarchy) -> worker_proto::HierarchyEdge {
@@ -341,7 +402,7 @@ fn decode_hierarchy(value: artifact_proto::ArtifactHierarchy) -> worker_proto::H
         subtype_symbol_id: value.subtype_symbol_id,
         supertype_symbol_id: value.supertype_symbol_id,
         precision: value.precision,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
     }
 }
 fn ty(value: worker_proto::TypeRecord) -> artifact_proto::ArtifactType {
@@ -353,7 +414,7 @@ fn ty(value: worker_proto::TypeRecord) -> artifact_proto::ArtifactType {
         backend_schema_version: value.backend_schema_version,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: Some(value.provenance_index),
     }
 }
 fn decode_type(value: artifact_proto::ArtifactType) -> worker_proto::TypeRecord {
@@ -365,7 +426,7 @@ fn decode_type(value: artifact_proto::ArtifactType) -> worker_proto::TypeRecord 
         backend_schema_version: value.backend_schema_version,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
     }
 }
 fn diagnostic(value: worker_proto::Diagnostic) -> artifact_proto::ArtifactDiagnostic {
@@ -377,7 +438,7 @@ fn diagnostic(value: worker_proto::Diagnostic) -> artifact_proto::ArtifactDiagno
         message: value.message,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: Some(value.provenance_index),
     }
 }
 fn decode_diagnostic(value: artifact_proto::ArtifactDiagnostic) -> worker_proto::Diagnostic {
@@ -389,6 +450,6 @@ fn decode_diagnostic(value: artifact_proto::ArtifactDiagnostic) -> worker_proto:
         message: value.message,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index,
+        provenance_index: value.provenance_index.unwrap_or(0),
     }
 }

@@ -10,14 +10,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use thiserror::Error;
 
 use crate::{
     AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
-    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
-    ProjectManifest, Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId,
-    SymbolId, SymbolRecord, TextDocument, TypeRecord, WORKER_PROTOCOL_VERSION, WorkspacePath,
+    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, LexicalMatch, ProjectManifest,
+    Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord,
+    TextDocument, TypeRecord, WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
 };
 
 const MIGRATION_1: &str = r#"
@@ -455,6 +455,37 @@ impl IndexStore {
             .map_err(IndexStoreError::from)
     }
 
+    /// Returns dependency artifacts that declare this stable symbol ID in
+    /// their compact catalog. This routes an explicit semantic query without
+    /// copying dependency graph facts into SQLite.
+    pub fn artifact_candidates_with_symbol(
+        &self,
+        symbol: &SymbolId,
+    ) -> Result<Vec<ArtifactDescriptor>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT artifact_catalog.descriptor_json
+             FROM symbol_locators
+             JOIN artifact_catalog USING (source_unit_id)
+             WHERE symbol_locators.symbol_id = ?1
+             ORDER BY artifact_catalog.source_unit_id",
+        )?;
+        statement
+            .query_map(params![symbol.as_str()], |row| row.get::<_, String>(0))?
+            .map(|row| {
+                row.and_then(|json| {
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IndexStoreError::from)
+    }
+
     /// Records immutable dependency identity without copying its graph facts
     /// into the live index. A demand path may materialize it later.
     pub fn put_artifact_descriptor(
@@ -487,6 +518,17 @@ impl IndexStore {
             "SELECT descriptor_json FROM artifact_catalog WHERE source_unit_id = ?1",
             source_unit.as_str(),
         )
+    }
+
+    pub fn artifact_descriptors(&self) -> Result<Vec<ArtifactDescriptor>, IndexStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT descriptor_json FROM artifact_catalog ORDER BY source_unit_id")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|row| row.map(|json| serde_json::from_str(&json)))
+            .collect::<Result<Result<Vec<_>, _>, _>>()?
+            .map_err(IndexStoreError::from)
     }
 
     pub fn manifest(
@@ -1434,11 +1476,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
+        selector::{select, LanguageView, Selector, SelectorPredicate, SelectorState},
         BackendKey, ByteRange, CallEdge, Completeness, Component, ComponentId, DiagnosticSeverity,
         Fingerprint, Freshness, HierarchyEdge, Language, OccurrenceKind, Precision,
         ProjectManifest, Provenance, SourceOccurrence, SourceOrigin, SourceRange, SymbolKind,
         WorkspaceId, WorkspacePath,
-        selector::{LanguageView, Selector, SelectorPredicate, SelectorState, select},
     };
 
     use super::*;
@@ -1601,12 +1643,10 @@ mod tests {
         );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
-        assert!(
-            store
-                .symbols_named("PaymentService")
-                .expect("reads facts")
-                .is_empty()
-        );
+        assert!(store
+            .symbols_named("PaymentService")
+            .expect("reads facts")
+            .is_empty());
     }
 
     #[test]
@@ -1743,12 +1783,10 @@ mod tests {
                 .expect("uses applied-symbol posting"),
             matching.symbols
         );
-        assert!(
-            store
-                .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
-                .expect("empty posting")
-                .is_empty()
-        );
+        assert!(store
+            .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
+            .expect("empty posting")
+            .is_empty());
         let selected = select(
             &store,
             &Selector {
@@ -1857,18 +1895,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![dependency.id.clone()]
         );
-        assert!(
-            store
-                .artifact_candidates_with_qualified_name("jakarta.persistence.Missing")
-                .expect("reads empty candidate set")
-                .is_empty()
-        );
-        assert!(
-            store
-                .source_unit(&dependency.id)
-                .expect("does not materialize graph")
-                .is_none()
-        );
+        assert!(store
+            .artifact_candidates_with_qualified_name("jakarta.persistence.Missing")
+            .expect("reads empty candidate set")
+            .is_empty());
+        assert!(store
+            .source_unit(&dependency.id)
+            .expect("does not materialize graph")
+            .is_none());
     }
 
     fn source_unit(content: &str) -> SourceUnit {

@@ -7,6 +7,7 @@
 pub mod artifact_blob_layout;
 mod artifact_cache;
 pub mod artifact_proto_adapter;
+pub mod artifact_query;
 pub mod query_resolver;
 pub mod selector;
 pub mod text_index;
@@ -119,10 +120,10 @@ mod worker_framing_tests {
     use tempfile::tempdir;
 
     use crate::{
-        ArtifactBlobCache, ArtifactBlobKey, BackendKey, ByteRange, Completeness, ComponentId,
-        Fingerprint, Freshness, Language, Provenance, SourceOrigin, SourceRange, SourceUnit,
-        SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WORKER_PROTOCOL_VERSION, WorkspacePath,
-        worker_framing, worker_proto,
+        worker_framing, worker_proto, ArtifactBlobCache, ArtifactBlobKey, BackendKey, ByteRange,
+        Completeness, ComponentId, Fingerprint, Freshness, Language, Provenance, SourceOrigin,
+        SourceRange, SourceUnit, SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WorkspacePath,
+        WORKER_PROTOCOL_VERSION,
     };
 
     #[test]
@@ -499,11 +500,41 @@ mod worker_framing_tests {
     fn jvm_blob_layout_validates_header_and_reads_dictionary_without_graph_decode() {
         let graph = crate::artifact_proto::GraphArtifact {
             snapshots: vec![crate::artifact_proto::GraphSnapshot {
-                symbols: vec![crate::artifact_proto::ArtifactSymbol {
-                    id: "java:example.Widget".into(),
-                    name: "Widget".into(),
-                    ..Default::default()
+                symbols: vec![
+                    crate::artifact_proto::ArtifactSymbol {
+                        id: "java:example.Widget".into(),
+                        name: "Widget".into(),
+                        ..Default::default()
+                    },
+                    crate::artifact_proto::ArtifactSymbol {
+                        id: "java:example.WidgetImpl".into(),
+                        backend_key: "example.WidgetImpl".into(),
+                        backend_schema_version: 1,
+                        language: "java".into(),
+                        kind: "class".into(),
+                        name: "WidgetImpl".into(),
+                        qualified_name: Some("example.WidgetImpl".into()),
+                        declaration: Some(crate::artifact_proto::ArtifactRange {
+                            start: 7,
+                            end: 17,
+                        }),
+                        name_range: Some(crate::artifact_proto::ArtifactRange {
+                            start: 7,
+                            end: 17,
+                        }),
+                        freshness: "fresh".into(),
+                        completeness: "partial".into(),
+                        component_id: "fixture:main".into(),
+                        ..Default::default()
+                    },
+                ],
+                hierarchy: vec![crate::artifact_proto::ArtifactHierarchy {
+                    subtype_symbol_id: "java:example.WidgetImpl".into(),
+                    supertype_symbol_id: "java:example.Widget".into(),
+                    precision: "exact".into(),
+                    provenance_index: Some(0),
                 }],
+                completeness: "partial".into(),
                 ..Default::default()
             }],
         };
@@ -527,15 +558,62 @@ mod worker_framing_tests {
                 .name,
             "Widget"
         );
+        assert_eq!(
+            validated
+                .graph_facts()
+                .expect("gzip graph facts decode")
+                .snapshots[0]
+                .hierarchy[0]
+                .subtype_symbol_id,
+            "java:example.WidgetImpl"
+        );
+        assert_eq!(
+            validated
+                .qualified_symbol_directory()
+                .expect("directory decodes")
+                .entries,
+            vec![crate::artifact_proto::ArtifactQualifiedSymbolEntry {
+                qualified_name: "example.WidgetImpl".into(),
+                symbol_ordinal: 1,
+            }]
+        );
 
         let mut corrupt = encoded.bytes().to_vec();
         *corrupt.last_mut().expect("nonempty blob") ^= 1;
         let validated = crate::artifact_blob_layout::ArtifactBlobLayout::validate(corrupt)
             .expect("header remains valid");
         assert!(matches!(
-            validated.section(crate::artifact_proto::ArtifactBlobSectionKind::SymbolPostings),
+            validated.section(crate::artifact_proto::ArtifactBlobSectionKind::SymbolDetailBlock),
             Err(crate::artifact_blob_layout::ArtifactBlobLayoutError::ChecksumMismatch)
         ));
+    }
+
+    #[test]
+    fn dependency_detail_blocks_bound_the_selected_ordinal_payload() {
+        let count = crate::artifact_blob_layout::SYMBOL_DETAIL_BLOCK_ENTRY_CAPACITY + 1;
+        let graph = crate::artifact_proto::GraphArtifact {
+            snapshots: vec![crate::artifact_proto::GraphSnapshot {
+                symbols: (0..count)
+                    .map(|ordinal| crate::artifact_proto::ArtifactSymbol {
+                        id: format!("java:example.Symbol{ordinal}"),
+                        name: format!("Symbol{ordinal}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+        };
+        let layout = crate::artifact_blob_layout::ArtifactBlobLayout::validate(
+            crate::artifact_blob_layout::ArtifactBlobLayout::encode(&graph)
+                .bytes()
+                .to_vec(),
+        )
+        .expect("valid layout");
+        let block = layout
+            .symbol_detail_block((count - 1) as u32)
+            .expect("reads last ordinal block only");
+        assert_eq!(block.first_symbol_ordinal, (count - 1) as u32);
+        assert_eq!(block.entries.len(), 1);
     }
 
     #[test]
@@ -551,24 +629,90 @@ mod worker_framing_tests {
         };
         let graph = crate::artifact_proto::GraphArtifact {
             snapshots: vec![crate::artifact_proto::GraphSnapshot {
-                symbols: vec![crate::artifact_proto::ArtifactSymbol {
-                    id: "java:example.Widget".into(),
-                    backend_key: "example.Widget".into(),
-                    backend_schema_version: 1,
+                source_unit: Some(crate::artifact_proto::ArtifactSourceUnit {
+                    id: "jvm:example-widget".into(),
+                    component: "fixture:main".into(),
+                    path: ".kide/dependencies/widget.jar".into(),
                     language: "java".into(),
-                    kind: "class".into(),
-                    name: "Widget".into(),
-                    declaration: Some(crate::artifact_proto::ArtifactRange { start: 0, end: 6 }),
-                    name_range: Some(crate::artifact_proto::ArtifactRange { start: 0, end: 6 }),
-                    freshness: "fresh".into(),
-                    completeness: "partial".into(),
-                    component_id: "fixture:main".into(),
-                    ..Default::default()
+                    origin: "dependency".into(),
+                    content_fingerprint: "sha256:artifact".into(),
+                    context_fingerprint: "sha256:context".into(),
+                }),
+                provenances: vec![crate::artifact_proto::ArtifactProvenance {
+                    backend: "fixture".into(),
+                    backend_version: "1".into(),
+                    worker_protocol_version: WORKER_PROTOCOL_VERSION,
+                    analysis_options_fingerprint: "sha256:options".into(),
                 }],
+                provenance_index: Some(0),
+                symbols: vec![
+                    crate::artifact_proto::ArtifactSymbol {
+                        id: "java:example.Widget".into(),
+                        backend_key: "example.Widget".into(),
+                        backend_schema_version: 1,
+                        language: "java".into(),
+                        kind: "class".into(),
+                        name: "Widget".into(),
+                        declaration: Some(crate::artifact_proto::ArtifactRange {
+                            start: 0,
+                            end: 6,
+                        }),
+                        name_range: Some(crate::artifact_proto::ArtifactRange { start: 0, end: 6 }),
+                        freshness: "fresh".into(),
+                        completeness: "partial".into(),
+                        component_id: "fixture:main".into(),
+                        provenance_index: Some(0),
+                        ..Default::default()
+                    },
+                    crate::artifact_proto::ArtifactSymbol {
+                        id: "java:example.WidgetImpl".into(),
+                        backend_key: "example.WidgetImpl".into(),
+                        backend_schema_version: 1,
+                        language: "java".into(),
+                        kind: "class".into(),
+                        name: "WidgetImpl".into(),
+                        declaration: Some(crate::artifact_proto::ArtifactRange {
+                            start: 7,
+                            end: 17,
+                        }),
+                        name_range: Some(crate::artifact_proto::ArtifactRange {
+                            start: 7,
+                            end: 17,
+                        }),
+                        freshness: "fresh".into(),
+                        completeness: "partial".into(),
+                        component_id: "fixture:main".into(),
+                        provenance_index: Some(0),
+                        ..Default::default()
+                    },
+                ],
+                hierarchy: vec![crate::artifact_proto::ArtifactHierarchy {
+                    subtype_symbol_id: "java:example.WidgetImpl".into(),
+                    supertype_symbol_id: "java:example.Widget".into(),
+                    precision: "exact".into(),
+                    provenance_index: Some(0),
+                }],
+                completeness: "partial".into(),
                 ..Default::default()
             }],
         };
         let encoded = crate::artifact_blob_layout::ArtifactBlobLayout::encode(&graph);
+        let layout =
+            crate::artifact_blob_layout::ArtifactBlobLayout::validate(encoded.bytes().to_vec())
+                .expect("validates detail-block layout");
+        let detail = layout
+            .symbol_detail_block(1)
+            .expect("selected ordinal reads one block");
+        assert_eq!(detail.first_symbol_ordinal, 0);
+        let reconstructed = crate::artifact_proto_adapter::decode_symbol_detail(detail, 1)
+            .expect("reconstructs selected canonical declaration");
+        assert_eq!(reconstructed.id, SymbolId::new("java:example.WidgetImpl"));
+        assert_eq!(
+            reconstructed.declaration.source_unit,
+            SourceUnitId::new("jvm:example-widget")
+        );
+        assert_eq!(reconstructed.provenance.backend, "fixture");
+        assert_eq!(reconstructed.component, ComponentId::new("fixture:main"));
         let directory = tempdir().expect("temporary cache");
         let cache = ArtifactBlobCache::open(directory.path()).expect("opens cache");
         let provenance = Provenance {
@@ -604,6 +748,22 @@ mod worker_framing_tests {
                 .expect("decodes canonical symbol");
         assert_eq!(symbols[0].id.as_str(), "java:example.Widget");
         assert_eq!(symbols[0].declaration.source_unit, source.id);
+        assert_eq!(
+            crate::artifact_query::direct_implementations(
+                &cache,
+                &crate::ArtifactDescriptor {
+                    source_unit: source,
+                    provenance,
+                    symbol_locators: Vec::new()
+                },
+                &crate::SymbolId::new("java:example.Widget")
+            )
+            .expect("reads hierarchy")
+            .into_iter()
+            .map(|symbol| symbol.id)
+            .collect::<Vec<_>>(),
+            vec![crate::SymbolId::new("java:example.WidgetImpl")]
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{CANONICAL_SCHEMA_VERSION, Fingerprint, Provenance};
+use crate::{Fingerprint, Provenance, CANONICAL_SCHEMA_VERSION};
 
 const MAGIC: [u8; 8] = *b"KIDEBLB1";
 const HEADER_SIZE: usize = MAGIC.len() + 4 + 32 + 8;
@@ -318,16 +318,12 @@ mod tests {
         let second = ArtifactBlobCache::open(directory.path()).expect("opens second cache");
         let key = key();
 
-        assert!(
-            first
-                .publish(&key, b"opaque binary facts")
-                .expect("publishes")
-        );
-        assert!(
-            !second
-                .publish(&key, b"different payload")
-                .expect("reuses existing")
-        );
+        assert!(first
+            .publish(&key, b"opaque binary facts")
+            .expect("publishes"));
+        assert!(!second
+            .publish(&key, b"different payload")
+            .expect("reuses existing"));
         assert_eq!(
             second.load(&key).expect("loads"),
             Some(b"opaque binary facts".to_vec())
@@ -345,11 +341,9 @@ mod tests {
         let key = key();
         let source = Cursor::new(b"streamed payload".to_vec());
 
-        assert!(
-            cache
-                .publish_stream(&key, 16, source)
-                .expect("streams blob")
-        );
+        assert!(cache
+            .publish_stream(&key, 16, source)
+            .expect("streams blob"));
         assert_eq!(
             cache.load(&key).expect("loads"),
             Some(b"streamed payload".to_vec())
@@ -391,11 +385,9 @@ mod tests {
         fs::write(&staged, &payload).expect("writes staged payload");
         let digest: [u8; 32] = Sha256::digest(&payload).into();
 
-        assert!(
-            cache
-                .promote_staged(&key(), &staged, payload.len() as u64, digest)
-                .expect("promotes staged blob")
-        );
+        assert!(cache
+            .promote_staged(&key(), &staged, payload.len() as u64, digest)
+            .expect("promotes staged blob"));
         assert_eq!(cache.load(&key()).expect("loads cache"), Some(payload));
     }
 

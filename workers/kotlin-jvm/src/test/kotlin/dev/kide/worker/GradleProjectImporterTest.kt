@@ -72,6 +72,19 @@ class GradleProjectImporterTest {
     }
 
     @Test
+    fun resolves_gradle_home_before_local_wrapper_cache() {
+        val root = fixtureProject()
+        val installation = Files.createTempDirectory("kide-gradle-home-")
+        gradleInstallation(installation)
+        write(root.resolve("gradle/wrapper/gradle-wrapper.properties"), "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14-bin.zip")
+
+        assertEquals(
+            installation,
+            GradleProjectImporter.resolveGradleInstallation(root, mapOf("GRADLE_HOME" to installation.toString())),
+        )
+    }
+
+    @Test
     fun resolves_installed_wrapper_distribution_from_gradle_user_home() {
         val root = fixtureProject()
         val cache = Files.createTempDirectory("kide-gradle-cache-")

@@ -128,12 +128,29 @@ internal object GradleProjectImporter {
             ?.let(Path::of)
             ?.takeIf(::isGradleInstallation)
             ?.let { return it }
+        environment["GRADLE_HOME"]
+            ?.takeIf(String::isNotBlank)
+            ?.let(Path::of)
+            ?.takeIf(::isGradleInstallation)
+            ?.let { return it }
+        gradleInstallationFromPath(environment["PATH"])
+            ?.let { return it }
         val gradleUserHome = environment["GRADLE_USER_HOME"]
             ?.takeIf(String::isNotBlank)
             ?.let(Path::of)
             ?: Path.of(System.getProperty("user.home"), ".gradle")
         return localWrapperInstallation(root, gradleUserHome)
     }
+
+    private fun gradleInstallationFromPath(path: String?): Path? = path
+        ?.split(java.io.File.pathSeparator)
+        ?.asSequence()
+        ?.map(Path::of)
+        ?.map { it.resolve("gradle") }
+        ?.firstOrNull { it.isRegularFile() && Files.isExecutable(it) }
+        ?.parent
+        ?.parent
+        ?.takeIf(::isGradleInstallation)
 
     private fun localWrapperInstallation(root: Path, gradleUserHome: Path): Path? {
         val wrapper = root.resolve("gradle/wrapper/gradle-wrapper.properties")
