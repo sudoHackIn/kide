@@ -66,6 +66,13 @@ name = "application.arguments"
 required = false
 ```
 
+Each exported macro or command has its declarative body in
+`queries/<export-name>.kql` relative to the package root. Nested dotted names
+map directly to directories (for example `admin.controller` is
+`queries/admin/controller.kql`). This mapping is intentionally conventional,
+not executable configuration: it gives Core a deterministic path to parse and
+fingerprint without allowing a manifest to point outside its package.
+
 - `format` changes only when manifest meaning changes incompatibly.
 - `requires_core` is checked before loading the package.
 - A capability is a versioned, named semantic relation capability, never an
