@@ -1,4 +1,4 @@
-.PHONY: check test fmt storage-transport-spike worker-handshake
+.PHONY: check test e2e fmt storage-transport-spike worker-handshake
 
 build:
 	cargo build
@@ -12,6 +12,9 @@ check:
 test:
 	cargo test --workspace
 	./workers/kotlin-jvm/gradlew --project-dir workers/kotlin-jvm test
+
+e2e: build
+	cargo test -p kide --test mvp_e2e -- --ignored --nocapture
 
 fmt:
 	cargo fmt --all -- --check
