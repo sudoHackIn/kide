@@ -1,6 +1,9 @@
 //! Batch orchestration for cold language workers.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use thiserror::Error;
 
@@ -500,11 +503,12 @@ fn index_batch_with_optional_cache(
 }
 
 fn index_dependency_catalog(
-    store: &IndexStore,
+    store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
 ) -> Result<(), IndexOrchestratorError> {
     let mut cursor = None;
     let mut page = 0_u64;
+    let mut descriptors = BTreeMap::new();
     loop {
         let response = supervisor.request(WorkerEnvelope::new(
             format!("index-artifact-descriptors-{page}"),
@@ -519,15 +523,19 @@ fn index_dependency_catalog(
                 received: Box::new(response.message),
             });
         };
-        for descriptor in &response.artifacts {
-            store.put_artifact_descriptor(descriptor)?;
+        for descriptor in response.artifacts {
+            descriptors.insert(descriptor.source_unit.id.as_str().to_owned(), descriptor);
         }
         match response.next_cursor {
             Some(next) => {
                 cursor = Some(next);
                 page += 1
             }
-            None => return Ok(()),
+            None => {
+                store
+                    .replace_artifact_descriptors(&descriptors.into_values().collect::<Vec<_>>())?;
+                return Ok(());
+            }
         }
     }
 }

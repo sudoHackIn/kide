@@ -510,6 +510,42 @@ impl IndexStore {
         Ok(())
     }
 
+    /// Atomically replaces the current dependency catalog discovered for a
+    /// workspace. Dependency graph facts remain in immutable blob storage;
+    /// SQLite keeps only the current descriptor and exact-name routing rows.
+    pub fn replace_artifact_descriptors(
+        &mut self,
+        descriptors: &[ArtifactDescriptor],
+    ) -> Result<(), IndexStoreError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM symbol_locators WHERE source_unit_id IN (SELECT source_unit_id FROM artifact_catalog)",
+            [],
+        )?;
+        transaction.execute("DELETE FROM artifact_catalog", [])?;
+        for descriptor in descriptors {
+            transaction.execute(
+                "INSERT INTO artifact_catalog (source_unit_id, descriptor_json) VALUES (?1, ?2)",
+                params![
+                    descriptor.source_unit.id.as_str(),
+                    serde_json::to_string(descriptor)?
+                ],
+            )?;
+            for locator in &descriptor.symbol_locators {
+                transaction.execute(
+                    "INSERT INTO symbol_locators (source_unit_id, qualified_name, symbol_id) VALUES (?1, ?2, ?3)",
+                    params![
+                        descriptor.source_unit.id.as_str(),
+                        locator.qualified_name,
+                        locator.symbol.as_str()
+                    ],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn artifact_descriptor(
         &self,
         source_unit: &SourceUnitId,
@@ -1864,7 +1900,8 @@ mod tests {
     #[test]
     fn qualified_symbol_locator_resolves_without_materializing_graph_facts() {
         let directory = tempdir().expect("temporary directory");
-        let store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens store");
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens store");
         let mut dependency = source_unit("sha256:entity-jar");
         dependency.id = SourceUnitId::new("jvm:sha256:entity-jar");
         dependency.origin = SourceOrigin::Dependency;
@@ -1903,6 +1940,17 @@ mod tests {
             .source_unit(&dependency.id)
             .expect("does not materialize graph")
             .is_none());
+        store
+            .replace_artifact_descriptors(&[])
+            .expect("atomically replaces catalog");
+        assert!(store
+            .artifact_candidates_with_qualified_name("jakarta.persistence.Entity")
+            .expect("removes stale locator")
+            .is_empty());
+        assert!(store
+            .artifact_descriptors()
+            .expect("reads replaced catalog")
+            .is_empty());
     }
 
     fn source_unit(content: &str) -> SourceUnit {
