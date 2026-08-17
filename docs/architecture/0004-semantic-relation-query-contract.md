@@ -1,6 +1,6 @@
 # ADR 0004: Semantic Relation and Worker Query Contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Scope: framework-neutral semantic relations, composable queries, worker capabilities
 - Related: [ADR 0001](0001-cold-disposable-backend-workers.md),
