@@ -1,0 +1,12 @@
+format = 1
+id = "spring.boot"
+version = "1.0.0"
+requires_core = "^1"
+
+[exports]
+macros = ["autoconfiguration"]
+commands = []
+
+[[capabilities]]
+name = "applications.resolved_target"
+required = true

@@ -1,0 +1,2 @@
+from applies(qualified-symbol("org.springframework.stereotype.Service"))
+where kind == class

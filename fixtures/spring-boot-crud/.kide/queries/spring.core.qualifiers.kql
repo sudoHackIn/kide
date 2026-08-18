@@ -1,0 +1,5 @@
+command spring.core.qualifiers() {
+  from spring.core.qualifier()
+  return symbol
+  limit 100
+}

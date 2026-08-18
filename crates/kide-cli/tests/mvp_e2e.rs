@@ -31,14 +31,14 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         )
     });
     assert_eq!(cold["status"], "ok");
-    assert_eq!(cold["analyzed"], 8);
+    assert_eq!(cold["analyzed"], 9);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
 
     let unchanged = measure("unchanged_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
     });
     assert_eq!(unchanged["analyzed"], 0);
-    assert_eq!(unchanged["reused"], 8);
+    assert_eq!(unchanged["reused"], 9);
     assert_eq!(unchanged["worker_starts"], 0);
 
     let status = measure("warm_status", || {
@@ -48,7 +48,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         )
     });
     assert_eq!(status["status"], "ok");
-    assert_eq!(status["result"]["source_units"]["fresh"], 8);
+    assert_eq!(status["result"]["source_units"]["fresh"], 9);
     assert!(status["result"]["workers_running"]
         .as_array()
         .expect("workers array")
@@ -205,6 +205,29 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert!(repositories.iter().any(|record| {
         record["symbol"]["qualified_name"] == "dev.kide.fixture.book.BookRepository"
     }));
+    for (command, expected_name) in [
+        ("spring.core.components", "IndexedComponent"),
+        ("spring.core.services", "IndexedService"),
+        ("spring.core.repositories", "IndexedRepository"),
+        ("spring.core.configurations", "IndexedConfiguration"),
+        ("spring.core.beans", "indexedBean"),
+        ("spring.core.qualifiers", "QualifiedComponent"),
+        ("spring.core.primaries", "indexedBean"),
+        ("spring.boot.autoconfigurations", "IndexedAutoConfiguration"),
+    ] {
+        let records = run_json_lines(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "query", command],
+        );
+        assert!(records.iter().any(|record| record["symbol"]["name"] == expected_name),
+            "{command} should select {expected_name}");
+        let package = if command == "spring.boot.autoconfigurations" {
+            "spring.boot"
+        } else {
+            "spring.core"
+        };
+        assert_eq!(records[0]["plan"]["packages"][0]["id"], package);
+    }
     let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
     let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")

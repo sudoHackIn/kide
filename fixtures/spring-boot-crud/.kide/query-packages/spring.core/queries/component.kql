@@ -1,0 +1,2 @@
+from applies(qualified-symbol("org.springframework.stereotype.Component"))
+where kind == class

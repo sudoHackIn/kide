@@ -1,0 +1,5 @@
+command spring.core.primaries() {
+  from spring.core.primary()
+  return symbol
+  limit 100
+}

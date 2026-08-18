@@ -50,6 +50,44 @@ The JSONL plan identifies only the package selected by that command, including
 its version and manifest digest. Installing another package therefore does not
 change the resolution or provenance of existing Spring commands.
 
+## Spring declaration inventory
+
+The fixture also installs `spring.core` for Spring Framework annotations and
+`spring.boot` for Spring Boot annotations. Both provide direct, bounded
+declaration lookups: they answer *where an annotation is declared*, not whether
+Spring creates or selects a bean at runtime.
+
+| Command | Direct annotation selected | Declaration kinds |
+| --- | --- | --- |
+| `spring.core.components` | `@Component` | classes |
+| `spring.core.services` | `@Service` | classes |
+| `spring.core.repositories` | `@Repository` | indexed annotation owners |
+| `spring.core.configurations` | `@Configuration` | classes |
+| `spring.core.beans` | `@Bean` | indexed annotation owners (normally methods/functions) |
+| `spring.core.qualifiers` | `@Qualifier` | any indexed annotation owner |
+| `spring.core.primaries` | `@Primary` | indexed annotation owners |
+| `spring.boot.autoconfigurations` | `@AutoConfiguration` | classes |
+
+For example:
+
+```sh
+kide query spring.core.components
+kide query spring.core.beans
+kide query spring.boot.autoconfigurations
+```
+
+`spring.boot.autoconfigurations` deliberately selects
+`org.springframework.boot.autoconfigure.AutoConfiguration`. It does **not**
+select `@EnableAutoConfiguration`: that annotation enables the discovery
+mechanism in an application and is not itself an auto-configuration
+declaration.
+
+These commands do not expand meta-annotations, compute component scanning,
+evaluate profiles or conditions, inspect generated/auto-registered beans, or
+resolve an injection point. A future bean-environment query may use these
+declarations as evidence, but it must report any runtime-dependent case as
+partial rather than infer activation or candidate selection.
+
 Queries may also start from the persisted direct hierarchy posting. Use
 `subtype_of(...)` or its equivalent `implements(...)` spelling; both are
 direct-only and require the same `symbol-id` or `qualified-symbol` values as

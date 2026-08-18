@@ -12,4 +12,6 @@
 **/.kotlin/
 **/build/
 **/.kide/
+!fixtures/spring-boot-crud/.kide/
+!fixtures/spring-boot-crud/.kide/**
 .DS_Store

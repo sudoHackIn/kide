@@ -1,0 +1,5 @@
+command spring.core.beans() {
+  from spring.core.bean()
+  return symbol
+  limit 100
+}

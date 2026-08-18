@@ -1,0 +1,5 @@
+command spring.boot.autoconfigurations() {
+  from spring.boot.autoconfiguration()
+  return symbol
+  limit 100
+}

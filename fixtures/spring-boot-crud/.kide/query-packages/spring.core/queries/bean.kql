@@ -1,0 +1,1 @@
+from applies(qualified-symbol("org.springframework.context.annotation.Bean"))

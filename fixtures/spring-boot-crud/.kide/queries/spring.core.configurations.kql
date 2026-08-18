@@ -1,0 +1,5 @@
+command spring.core.configurations() {
+  from spring.core.configuration()
+  return symbol
+  limit 100
+}

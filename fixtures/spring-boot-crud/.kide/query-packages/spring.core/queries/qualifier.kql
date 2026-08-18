@@ -1,0 +1,1 @@
+from applies(qualified-symbol("org.springframework.beans.factory.annotation.Qualifier"))

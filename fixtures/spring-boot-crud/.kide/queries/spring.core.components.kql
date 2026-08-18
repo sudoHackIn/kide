@@ -1,0 +1,5 @@
+command spring.core.components() {
+  from spring.core.component()
+  return symbol
+  limit 100
+}
