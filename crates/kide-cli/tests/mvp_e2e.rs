@@ -30,7 +30,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
             ["index", workspace.to_str().expect("workspace path")],
         )
     });
-    assert_eq!(cold["status"], "ok");
+    assert_eq!(cold["status"], "ok", "cold index result: {cold}");
     assert_eq!(cold["analyzed"], 9);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
 
@@ -292,8 +292,13 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let incremental = measure("incremental_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
     });
+    assert_eq!(
+        incremental["status"],
+        "ok",
+        "incremental index result: {incremental}"
+    );
     assert_eq!(incremental["analyzed"], 1);
-    assert_eq!(incremental["reused"], 7);
+    assert_eq!(incremental["reused"], 8);
 }
 
 /// Java source indexing exercises the same persisted navigation contract as
