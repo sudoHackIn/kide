@@ -76,6 +76,59 @@ pub enum SemanticQueryResultKind {
     NormalizedFacts,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryArgument {
+    pub name: String,
+    pub value: SemanticQueryArgumentValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum SemanticQueryArgumentValue {
+    SymbolId(SymbolId),
+    ComponentId(crate::ComponentId),
+    String(String),
+    Integer(i64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryBudget {
+    pub max_candidates: u32,
+    pub max_nodes: u32,
+    pub max_bytes: u64,
+    pub deadline_millis: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryRequest {
+    pub capability_name: String,
+    pub capability_version: u32,
+    pub arguments: Vec<SemanticQueryArgument>,
+    pub candidate_symbols: Vec<SymbolId>,
+    pub candidate_source_units: Vec<SourceUnitId>,
+    pub budget: SemanticQueryBudget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticQueryResponseState {
+    Complete,
+    Partial,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryResponse {
+    pub capability_name: String,
+    pub capability_version: u32,
+    pub state: SemanticQueryResponseState,
+    pub candidate_symbols: Vec<SymbolId>,
+    pub snapshots: Vec<FileAnalysisSnapshot>,
+    pub provenance: crate::Provenance,
+    pub visited_nodes: u32,
+    pub produced_bytes: u64,
+}
+
 /// A request whose only purpose is compatibility and static discovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandshakeRequest {
@@ -284,8 +337,9 @@ impl WorkerEnvelope {
     }
 }
 
-/// The complete MVP message vocabulary. New variants require a protocol
-/// version bump, so v1 workers fail safely rather than guessing semantics.
+/// The complete MVP message vocabulary. Capability-gated protobuf extensions
+/// may share a protocol version because old workers cannot advertise them;
+/// unconditional incompatible changes require a protocol-version bump.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum WorkerMessage {
@@ -302,6 +356,8 @@ pub enum WorkerMessage {
     /// Staging carries a descriptor and must not inflate every routine message.
     ArtifactMaterializationRequest(Box<ArtifactMaterializationRequest>),
     ArtifactMaterializationResponse(Box<ArtifactMaterializationResponse>),
+    SemanticQueryRequest(Box<SemanticQueryRequest>),
+    SemanticQueryResponse(Box<SemanticQueryResponse>),
     /// Kept behind an indirection so one rare, full-file delta does not make
     /// every handshake and batch message as large as the delta payload.
     /// The indirection keeps ordinary control-plane messages compact.
@@ -334,6 +390,8 @@ mod tests {
         "analyze-batch-request.json",
         "analysis-batch-response.json",
         "analysis-delta.json",
+        "semantic-query-request.json",
+        "semantic-query-response.json",
         "error.json",
     ];
 

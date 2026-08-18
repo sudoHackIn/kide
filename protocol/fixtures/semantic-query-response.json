@@ -1,0 +1,20 @@
+{
+  "protocol_version": 3,
+  "request_id": "semantic-query-1",
+  "kind": "semantic_query_response",
+  "payload": {
+    "capability_name": "hierarchy.direct",
+    "capability_version": 1,
+    "state": "complete",
+    "candidate_symbols": ["kotlin:fixture.Impl"],
+    "snapshots": [],
+    "provenance": {
+      "backend": "kide-kotlin-jvm",
+      "backend_version": "0.1.0",
+      "protocol_version": 3,
+      "analysis_options": "sha256:semantic-query"
+    },
+    "visited_nodes": 1,
+    "produced_bytes": 128
+  }
+}

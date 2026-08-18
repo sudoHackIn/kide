@@ -1,0 +1,20 @@
+{
+  "protocol_version": 3,
+  "request_id": "semantic-query-1",
+  "kind": "semantic_query_request",
+  "payload": {
+    "capability_name": "hierarchy.direct",
+    "capability_version": 1,
+    "arguments": [
+      {"name": "supertype", "value": {"type": "symbol_id", "value": "jvm:type:fixture.Api"}}
+    ],
+    "candidate_symbols": [],
+    "candidate_source_units": ["gradle:app:main:src/Impl.kt"],
+    "budget": {
+      "max_candidates": 100,
+      "max_nodes": 500,
+      "max_bytes": 1048576,
+      "deadline_millis": 2000
+    }
+  }
+}

@@ -23,6 +23,8 @@ message Envelope {
     AnalysisDelta analysis_delta = 21;
     ArtifactAnalysisRequest artifact_analysis_request = 22;
     ArtifactAnalysisResponse artifact_analysis_response = 23;
+    SemanticQueryRequest semantic_query_request = 24;
+    SemanticQueryResponse semantic_query_response = 25;
   }
 }
 
@@ -48,6 +50,40 @@ message SemanticQueryParameter {
   string name = 1;
   string type = 2;
   bool required = 3;
+}
+
+message SemanticQueryArgument {
+  string name = 1;
+  oneof value {
+    string symbol_id = 2;
+    string component_id = 3;
+    string string_value = 4;
+    sint64 integer_value = 5;
+  }
+}
+message SemanticQueryBudget {
+  uint32 max_candidates = 1;
+  uint32 max_nodes = 2;
+  uint64 max_bytes = 3;
+  uint64 deadline_millis = 4;
+}
+message SemanticQueryRequest {
+  string capability_name = 1;
+  uint32 capability_version = 2;
+  repeated SemanticQueryArgument arguments = 3;
+  repeated string candidate_symbol_ids = 4;
+  repeated string candidate_source_unit_ids = 5;
+  SemanticQueryBudget budget = 6;
+}
+message SemanticQueryResponse {
+  string capability_name = 1;
+  uint32 capability_version = 2;
+  string state = 3;
+  repeated string candidate_symbol_ids = 4;
+  repeated FileAnalysisSnapshot snapshots = 5;
+  Provenance provenance = 6;
+  uint32 visited_nodes = 7;
+  uint64 produced_bytes = 8;
 }
 
 message ProjectManifestRequest { string workspace_root = 1; }

@@ -13,6 +13,7 @@ pub mod query_package;
 pub mod project_query;
 pub mod selector;
 pub mod semantic_query;
+pub mod semantic_capability;
 pub mod text_index;
 pub mod worker_proto {
     include!(concat!(env!("OUT_DIR"), "/kide.worker.v1.rs"));
@@ -190,6 +191,22 @@ mod worker_framing_tests {
             crate::worker_proto_adapter::decode_envelope(encoded).expect("decodes handshake");
 
         assert_eq!(restored, envelope);
+    }
+
+    #[test]
+    fn semantic_query_request_and_response_round_trip_protobuf() {
+        for fixture in [
+            include_str!("../../../protocol/fixtures/semantic-query-request.json"),
+            include_str!("../../../protocol/fixtures/semantic-query-response.json"),
+        ] {
+            let envelope: crate::WorkerEnvelope =
+                serde_json::from_str(fixture).expect("semantic query fixture parses");
+            let encoded =
+                crate::worker_proto_adapter::envelope(&envelope).expect("encodes semantic query");
+            let restored = crate::worker_proto_adapter::decode_envelope(encoded)
+                .expect("decodes semantic query");
+            assert_eq!(restored, envelope);
+        }
     }
 
     #[test]
@@ -867,6 +884,7 @@ pub use freshness::*;
 pub use orchestrator::*;
 pub use protocol::*;
 pub use query::*;
+pub use semantic_capability::*;
 pub use store::*;
 pub use supervisor::*;
 pub use text_index::*;

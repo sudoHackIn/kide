@@ -143,6 +143,17 @@ impl WorkerSupervisor {
         &mut self,
         request: WorkerEnvelope,
     ) -> Result<WorkerEnvelope, WorkerSupervisorError> {
+        self.request_with_timeout(request, self.launch.request_timeout)
+    }
+
+    /// Sends one envelope with a caller-owned deadline no greater than the
+    /// launch-wide timeout. Bounded semantic queries use this to make their
+    /// declared deadline an actual process wait bound.
+    pub fn request_with_timeout(
+        &mut self,
+        request: WorkerEnvelope,
+        timeout: Duration,
+    ) -> Result<WorkerEnvelope, WorkerSupervisorError> {
         request.validate_protocol_version().map_err(|error| {
             WorkerSupervisorError::IncompatibleProtocol {
                 found: error.received_protocol_version.unwrap_or(0),
@@ -155,7 +166,7 @@ impl WorkerSupervisor {
         let request_id = request.request_id.clone();
         let _span = tracing::debug_span!(target: "kide::worker", "worker_request", request_id = %request_id).entered();
         tracing::debug!(target: "kide::worker", "sending request");
-        let timeout = self.launch.request_timeout;
+        let timeout = timeout.min(self.launch.request_timeout);
         let response = {
             let running = self.running.as_mut().expect("worker starts before request");
             if !running.request_ids.insert(request_id.clone()) {

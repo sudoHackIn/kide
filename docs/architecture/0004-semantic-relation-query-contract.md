@@ -98,21 +98,25 @@ Workers advertise relation capabilities, for example
 `macro_attributes`, and `macro_generated_symbols`. Core plans only against
 advertised capabilities.
 
-A future request is declarative and segment-bounded:
+A worker capability request is declarative and segment-bounded:
 
 ```text
 SemanticPatternRequest {
-  pattern: relation-pattern-v1,
-  required_relations: [owns, applies, targets, argument],
+  capability: hierarchy.direct@1,
+  arguments: { supertype: symbol-id(...) },
+  candidate_symbols: [...],
   candidate_source_units: [...],
-  budget: { max_units, max_nodes, max_bytes, deadline }
+  budget: { max_candidates, max_nodes, max_bytes, deadline_millis }
 }
 ```
 
-The worker response contains normalized facts owned by each source/artifact
-snapshot, plus `complete`, `partial`, or `unsupported` per requested
-capability. It does not return PSI/FIR/AST objects and it does not make the
-worker a persistent query database.
+The response contains either candidate symbol IDs or normalized facts owned by
+each source/artifact snapshot, plus worker provenance, measured node/byte use,
+and `complete`, `partial`, or `unsupported`. Core rejects a mismatched
+capability/version, facts outside the bounded source set, the wrong result
+kind, invalid provenance, or any result over budget. A request deadline is also
+the supervisor wait timeout. The worker never returns PSI/FIR/AST objects and
+does not become a persistent query database.
 
 ### Extraction requirements
 

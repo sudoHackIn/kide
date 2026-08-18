@@ -11,7 +11,9 @@ use crate::{
     SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
     SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
     WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
-    WorkspacePath, SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
+    WorkspacePath, SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
+    SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
+    SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseState,
     SemanticQueryResultKind,
 };
 
@@ -133,6 +135,184 @@ fn decode_semantic_query_capability(
     })
 }
 
+fn semantic_query_argument(value: &SemanticQueryArgument) -> worker_proto::SemanticQueryArgument {
+    use worker_proto::semantic_query_argument::Value;
+    worker_proto::SemanticQueryArgument {
+        name: value.name.clone(),
+        value: Some(match &value.value {
+            SemanticQueryArgumentValue::SymbolId(value) => {
+                Value::SymbolId(value.as_str().to_owned())
+            }
+            SemanticQueryArgumentValue::ComponentId(value) => {
+                Value::ComponentId(value.as_str().to_owned())
+            }
+            SemanticQueryArgumentValue::String(value) => Value::StringValue(value.clone()),
+            SemanticQueryArgumentValue::Integer(value) => Value::IntegerValue(*value),
+        }),
+    }
+}
+
+fn decode_semantic_query_argument(
+    value: worker_proto::SemanticQueryArgument,
+) -> Result<SemanticQueryArgument, AdapterError> {
+    use worker_proto::semantic_query_argument::Value;
+    Ok(SemanticQueryArgument {
+        name: value.name,
+        value: match value
+            .value
+            .ok_or(AdapterError::Missing("semantic_query_argument.value"))?
+        {
+            Value::SymbolId(value) => SemanticQueryArgumentValue::SymbolId(SymbolId::new(value)),
+            Value::ComponentId(value) => {
+                SemanticQueryArgumentValue::ComponentId(ComponentId::new(value))
+            }
+            Value::StringValue(value) => SemanticQueryArgumentValue::String(value),
+            Value::IntegerValue(value) => SemanticQueryArgumentValue::Integer(value),
+        },
+    })
+}
+
+fn semantic_query_budget(value: SemanticQueryBudget) -> worker_proto::SemanticQueryBudget {
+    worker_proto::SemanticQueryBudget {
+        max_candidates: value.max_candidates,
+        max_nodes: value.max_nodes,
+        max_bytes: value.max_bytes,
+        deadline_millis: value.deadline_millis,
+    }
+}
+
+fn decode_semantic_query_budget(value: worker_proto::SemanticQueryBudget) -> SemanticQueryBudget {
+    SemanticQueryBudget {
+        max_candidates: value.max_candidates,
+        max_nodes: value.max_nodes,
+        max_bytes: value.max_bytes,
+        deadline_millis: value.deadline_millis,
+    }
+}
+
+pub fn semantic_query_request(value: &SemanticQueryRequest) -> worker_proto::SemanticQueryRequest {
+    worker_proto::SemanticQueryRequest {
+        capability_name: value.capability_name.clone(),
+        capability_version: value.capability_version,
+        arguments: value
+            .arguments
+            .iter()
+            .map(semantic_query_argument)
+            .collect(),
+        candidate_symbol_ids: value
+            .candidate_symbols
+            .iter()
+            .map(|symbol| symbol.as_str().to_owned())
+            .collect(),
+        candidate_source_unit_ids: value
+            .candidate_source_units
+            .iter()
+            .map(|source| source.as_str().to_owned())
+            .collect(),
+        budget: Some(semantic_query_budget(value.budget)),
+    }
+}
+
+pub fn decode_semantic_query_request(
+    value: worker_proto::SemanticQueryRequest,
+) -> Result<SemanticQueryRequest, AdapterError> {
+    Ok(SemanticQueryRequest {
+        capability_name: value.capability_name,
+        capability_version: value.capability_version,
+        arguments: value
+            .arguments
+            .into_iter()
+            .map(decode_semantic_query_argument)
+            .collect::<Result<Vec<_>, _>>()?,
+        candidate_symbols: value
+            .candidate_symbol_ids
+            .into_iter()
+            .map(SymbolId::new)
+            .collect(),
+        candidate_source_units: value
+            .candidate_source_unit_ids
+            .into_iter()
+            .map(SourceUnitId::new)
+            .collect(),
+        budget: decode_semantic_query_budget(
+            value
+                .budget
+                .ok_or(AdapterError::Missing("semantic_query_request.budget"))?,
+        ),
+    })
+}
+
+fn semantic_query_response_state(value: SemanticQueryResponseState) -> &'static str {
+    match value {
+        SemanticQueryResponseState::Complete => "complete",
+        SemanticQueryResponseState::Partial => "partial",
+        SemanticQueryResponseState::Unsupported => "unsupported",
+    }
+}
+
+fn decode_semantic_query_response_state(
+    value: String,
+) -> Result<SemanticQueryResponseState, AdapterError> {
+    match value.as_str() {
+        "complete" => Ok(SemanticQueryResponseState::Complete),
+        "partial" => Ok(SemanticQueryResponseState::Partial),
+        "unsupported" => Ok(SemanticQueryResponseState::Unsupported),
+        other => Err(AdapterError::Unsupported(format!(
+            "semantic query response state {other}"
+        ))),
+    }
+}
+
+pub fn semantic_query_response(
+    value: &SemanticQueryResponse,
+) -> Result<worker_proto::SemanticQueryResponse, AdapterError> {
+    Ok(worker_proto::SemanticQueryResponse {
+        capability_name: value.capability_name.clone(),
+        capability_version: value.capability_version,
+        state: semantic_query_response_state(value.state).to_owned(),
+        candidate_symbol_ids: value
+            .candidate_symbols
+            .iter()
+            .map(|symbol| symbol.as_str().to_owned())
+            .collect(),
+        snapshots: value
+            .snapshots
+            .iter()
+            .map(file_analysis_snapshot)
+            .collect::<Result<Vec<_>, _>>()?,
+        provenance: Some(proto_provenance(&value.provenance)),
+        visited_nodes: value.visited_nodes,
+        produced_bytes: value.produced_bytes,
+    })
+}
+
+pub fn decode_semantic_query_response(
+    value: worker_proto::SemanticQueryResponse,
+) -> Result<SemanticQueryResponse, AdapterError> {
+    Ok(SemanticQueryResponse {
+        capability_name: value.capability_name,
+        capability_version: value.capability_version,
+        state: decode_semantic_query_response_state(value.state)?,
+        candidate_symbols: value
+            .candidate_symbol_ids
+            .into_iter()
+            .map(SymbolId::new)
+            .collect(),
+        snapshots: value
+            .snapshots
+            .into_iter()
+            .map(decode_file_analysis_snapshot)
+            .collect::<Result<Vec<_>, _>>()?,
+        provenance: provenance(
+            value
+                .provenance
+                .ok_or(AdapterError::Missing("semantic_query_response.provenance"))?,
+        ),
+        visited_nodes: value.visited_nodes,
+        produced_bytes: value.produced_bytes,
+    })
+}
+
 fn handshake_response(value: &crate::HandshakeResponse) -> worker_proto::HandshakeResponse {
     worker_proto::HandshakeResponse {
         backend: value.capabilities.identity.backend.clone(),
@@ -233,6 +413,12 @@ pub fn envelope(value: &WorkerEnvelope) -> Result<worker_proto::Envelope, Adapte
         WorkerMessage::ArtifactMaterializationResponse(response) => {
             Message::ArtifactMaterializationResponse(materialization_response(response)?)
         }
+        WorkerMessage::SemanticQueryRequest(request) => {
+            Message::SemanticQueryRequest(semantic_query_request(request))
+        }
+        WorkerMessage::SemanticQueryResponse(response) => {
+            Message::SemanticQueryResponse(semantic_query_response(response)?)
+        }
         WorkerMessage::AnalysisDelta(delta) => Message::AnalysisDelta(analysis_delta(delta)?),
         WorkerMessage::Error(error) => Message::Error(worker_error(error)),
     };
@@ -303,6 +489,14 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
             WorkerMessage::ArtifactMaterializationResponse(Box::new(
                 decode_materialization_response(response)?,
             ))
+        }
+        Message::SemanticQueryRequest(request) => WorkerMessage::SemanticQueryRequest(Box::new(
+            decode_semantic_query_request(request)?,
+        )),
+        Message::SemanticQueryResponse(response) => {
+            WorkerMessage::SemanticQueryResponse(Box::new(decode_semantic_query_response(
+                response,
+            )?))
         }
         Message::AnalysisDelta(delta) => {
             WorkerMessage::AnalysisDelta(Box::new(decode_analysis_delta(delta)?))

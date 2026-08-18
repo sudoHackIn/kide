@@ -112,6 +112,26 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 unsupported(request.requestId, failureMessage(error, "JVM artifact materialization failed"))
             }
         }
+        Worker.Envelope.MessageCase.SEMANTIC_QUERY_REQUEST -> {
+            val query = request.semanticQueryRequest
+            Worker.Envelope.newBuilder()
+                .setProtocolVersion(WORKER_PROTOCOL_VERSION)
+                .setRequestId(request.requestId)
+                .setSemanticQueryResponse(
+                    Worker.SemanticQueryResponse.newBuilder()
+                        .setCapabilityName(query.capabilityName)
+                        .setCapabilityVersion(query.capabilityVersion)
+                        .setState("unsupported")
+                        .setProvenance(
+                            Worker.Provenance.newBuilder()
+                                .setBackend(WORKER_NAME)
+                                .setBackendVersion(WORKER_VERSION)
+                                .setProtocolVersion(WORKER_PROTOCOL_VERSION)
+                                .setAnalysisOptionsFingerprint("sha256:semantic-query-unavailable"),
+                        ),
+                )
+                .build()
+        }
         else -> unsupported(request.requestId, "worker does not implement ${request.messageCase.name.lowercase()}")
     }
 }

@@ -1,10 +1,12 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, ComponentId,
-    Fingerprint, Language, SourceOrigin, SourceUnit, SourceUnitId, WorkerEnvelope, WorkerLaunch,
-    WorkerMessage, WorkerSupervisor, WorkerSupervisorError, WorkspaceId, WorkspacePath,
-    materialize_artifact,
+    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, BuildSystem,
+    ComponentId, DiscoveredWorker, Fingerprint, Language, SemanticCapabilityError,
+    SemanticQueryBudget, SemanticQueryResponseState, SourceOrigin, SourceUnit, SourceUnitId,
+    WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry,
+    WorkerSupervisor, WorkerSupervisorError, WorkspaceId, WorkspacePath,
+    execute_semantic_capability, materialize_artifact, plan_semantic_capability,
 };
 use tempfile::tempdir;
 
@@ -141,6 +143,99 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
             .is_none(),
         "successful promotion removes its staging file"
     );
+}
+
+#[test]
+fn bounded_semantic_capability_succeeds_and_rejects_over_budget_worker_output() {
+    let normal = discovered_worker("normal");
+    let plan = plan_semantic_capability(
+        &normal,
+        "fixture.echo",
+        1,
+        Vec::new(),
+        vec![kide_core::SymbolId::new("symbol:b"), kide_core::SymbolId::new("symbol:a")],
+        Vec::new(),
+        SemanticQueryBudget {
+            max_candidates: 2,
+            max_nodes: 2,
+            max_bytes: 4096,
+            deadline_millis: 2_000,
+        },
+    )
+    .expect("plans advertised capability");
+    let mut supervisor = WorkerSupervisor::new(launch("normal"));
+    let response = execute_semantic_capability(&mut supervisor, &plan, "capability-1")
+        .expect("executes bounded capability");
+    assert_eq!(response.state, SemanticQueryResponseState::Complete);
+    assert_eq!(
+        response
+            .candidate_symbols
+            .iter()
+            .map(|symbol| symbol.as_str())
+            .collect::<Vec<_>>(),
+        vec!["symbol:a", "symbol:b"]
+    );
+    assert_eq!(response.provenance.backend, "kide-fixture-worker");
+
+    let over_budget = discovered_worker("capability-over-budget");
+    let plan = plan_semantic_capability(
+        &over_budget,
+        "fixture.echo",
+        1,
+        Vec::new(),
+        vec![kide_core::SymbolId::new("symbol:a")],
+        Vec::new(),
+        SemanticQueryBudget {
+            max_candidates: 1,
+            max_nodes: 1,
+            max_bytes: 4096,
+            deadline_millis: 2_000,
+        },
+    )
+    .expect("plans bounded capability");
+    let mut supervisor = WorkerSupervisor::new(launch("capability-over-budget"));
+    assert!(matches!(
+        execute_semantic_capability(&mut supervisor, &plan, "capability-over-budget-1"),
+        Err(SemanticCapabilityError::BudgetExceeded("node"))
+    ));
+
+    let sleeping = discovered_worker("capability-sleep");
+    let plan = plan_semantic_capability(
+        &sleeping,
+        "fixture.echo",
+        1,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        SemanticQueryBudget {
+            max_candidates: 1,
+            max_nodes: 1,
+            max_bytes: 4096,
+            deadline_millis: 50,
+        },
+    )
+    .expect("plans deadline-bounded capability");
+    let mut supervisor = WorkerSupervisor::new(launch("capability-sleep"));
+    assert!(matches!(
+        execute_semantic_capability(&mut supervisor, &plan, "capability-sleep-1"),
+        Err(SemanticCapabilityError::Supervisor(
+            WorkerSupervisorError::TimedOut { timeout }
+        )) if timeout == Duration::from_millis(50)
+    ));
+}
+
+fn discovered_worker(mode: &str) -> DiscoveredWorker {
+    let registry = WorkerRegistry::new(vec![WorkerInstallation {
+        name: "fixture".to_owned(),
+        launch: launch(mode),
+        build_systems: vec![BuildSystem::Filesystem],
+    }]);
+    registry
+        .discover()
+        .expect("discovers fixture worker")
+        .into_iter()
+        .next()
+        .expect("fixture worker")
 }
 
 fn batch(request_id: &str, count: usize) -> WorkerEnvelope {

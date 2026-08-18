@@ -10,7 +10,8 @@ use kide_core::{
     artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
     AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryResponse,
     ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, Fingerprint,
-    HandshakeResponse, Language, Provenance, SourceOrigin, SourceUnit, SourceUnitId,
+    HandshakeResponse, Language, Provenance, SemanticQueryCapability, SemanticQueryResponse,
+    SemanticQueryResponseState, SemanticQueryResultKind, SourceOrigin, SourceUnit, SourceUnitId,
     WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
     WorkspacePath, WORKER_PROTOCOL_VERSION,
 };
@@ -50,7 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             WorkerCapability::Handshake,
                             WorkerCapability::FileAnalysisSnapshot,
                         ],
-                        semantic_query_capabilities: Vec::new(),
+                        semantic_query_capabilities: vec![SemanticQueryCapability {
+                            name: "fixture.echo".to_owned(),
+                            version: 1,
+                            parameters: Vec::new(),
+                            result: SemanticQueryResultKind::CandidateSymbols,
+                        }],
                     },
                 })
             }
@@ -148,6 +154,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         blob_format_version: 1,
                     },
                 ))
+            }
+            WorkerMessage::SemanticQueryRequest(request) => {
+                if mode == "capability-sleep" {
+                    thread::sleep(Duration::from_millis(250));
+                }
+                let visited_nodes = if mode == "capability-over-budget" {
+                    request.budget.max_nodes.saturating_add(1)
+                } else {
+                    request.candidate_symbols.len() as u32
+                };
+                WorkerMessage::SemanticQueryResponse(Box::new(SemanticQueryResponse {
+                    capability_name: request.capability_name,
+                    capability_version: request.capability_version,
+                    state: SemanticQueryResponseState::Complete,
+                    candidate_symbols: request.candidate_symbols,
+                    snapshots: Vec::new(),
+                    provenance: provenance(),
+                    visited_nodes,
+                    produced_bytes: 1,
+                }))
             }
             _ => continue,
         };
