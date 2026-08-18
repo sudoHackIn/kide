@@ -15,6 +15,7 @@ repositories {
 
 dependencies {
     implementation("org.gradle:gradle-tooling-api:9.4.1")
+    implementation("org.apache.maven:maven-model:3.9.9")
     implementation("org.ow2.asm:asm:9.8")
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.10")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")

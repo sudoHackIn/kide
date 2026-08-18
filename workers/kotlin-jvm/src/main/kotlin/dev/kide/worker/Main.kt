@@ -62,11 +62,11 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
             val workspaceRoot = request.projectManifestRequest.workspaceRoot
                 .takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "project_manifest_request requires workspace_root")
             try {
-                workerPhase("project-manifest: Gradle import")
+                workerPhase("project-manifest: build import")
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
-                    .setProjectManifestResponse(Worker.ProjectManifestResponse.newBuilder().setManifest(ProtobufManifestAdapter.manifest(GradleProjectImporter.import(resolveWorkspacePath(workspaceRoot)).jsonObject))).build()
+                    .setProjectManifestResponse(Worker.ProjectManifestResponse.newBuilder().setManifest(ProtobufManifestAdapter.manifest(projectManifest(resolveWorkspacePath(workspaceRoot)).jsonObject))).build()
             } catch (error: Exception) {
-                unsupported(request.requestId, failureMessage(error, "Gradle project import failed"))
+                unsupported(request.requestId, failureMessage(error, "build project import failed"))
             }
         }
         Worker.Envelope.MessageCase.ANALYZE_BATCH_REQUEST -> {
@@ -134,6 +134,11 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
         }
         else -> unsupported(request.requestId, "worker does not implement ${request.messageCase.name.lowercase()}")
     }
+}
+
+private fun projectManifest(workspace: Path) = when {
+    workspace.resolve("pom.xml").toFile().isFile -> MavenProjectImporter.import(workspace)
+    else -> GradleProjectImporter.import(workspace)
 }
 
 private fun workspaceRoot(): Path = System.getenv("KIDE_WORKSPACE_ROOT")

@@ -183,6 +183,6 @@ pub(super) fn kotlin_worker_installation(
     Ok(WorkerInstallation {
         name: "kotlin-jvm".to_owned(),
         launch,
-        build_systems: vec![BuildSystem::Gradle, BuildSystem::Filesystem],
+        build_systems: vec![BuildSystem::Gradle, BuildSystem::Maven, BuildSystem::Filesystem],
     })
 }
