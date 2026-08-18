@@ -59,10 +59,12 @@ commands = ["controllers"]
 
 [[capabilities]]
 name = "applications.resolved_target"
+version = 1
 required = true
 
 [[capabilities]]
 name = "application.arguments"
+version = 1
 required = false
 ```
 
@@ -81,6 +83,13 @@ fingerprint without allowing a manifest to point outside its package.
   `partial` result only when the selected plan uses them.
 - `version` and the canonical manifest digest are carried in resolved-plan
   provenance.
+
+Workers advertise matching static descriptors during handshake. A descriptor
+contains the dotted capability name, positive integer version, named parameters
+typed as `symbol_id`, `component_id`, `string`, or `integer`, and a result kind
+of `candidate_symbols` or `normalized_facts`. Negotiation is deterministic:
+an unavailable required version is `unsupported`, while unavailable optional
+capabilities make a plan `partial` only when it needs them.
 
 The MVP does not download packages, execute package code, load dynamic
 libraries, or permit project configuration to mutate the registry.

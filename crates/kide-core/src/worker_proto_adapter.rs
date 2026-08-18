@@ -11,7 +11,8 @@ use crate::{
     SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
     SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
     WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
-    WorkspacePath,
+    WorkspacePath, SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
+    SemanticQueryResultKind,
 };
 
 #[derive(Debug, Error)]
@@ -47,6 +48,91 @@ fn decode_worker_capability(value: String) -> Result<WorkerCapability, AdapterEr
     }
 }
 
+fn semantic_parameter_type(value: SemanticQueryParameterType) -> &'static str {
+    match value {
+        SemanticQueryParameterType::SymbolId => "symbol_id",
+        SemanticQueryParameterType::ComponentId => "component_id",
+        SemanticQueryParameterType::String => "string",
+        SemanticQueryParameterType::Integer => "integer",
+    }
+}
+
+fn decode_semantic_parameter_type(
+    value: String,
+) -> Result<SemanticQueryParameterType, AdapterError> {
+    match value.as_str() {
+        "symbol_id" => Ok(SemanticQueryParameterType::SymbolId),
+        "component_id" => Ok(SemanticQueryParameterType::ComponentId),
+        "string" => Ok(SemanticQueryParameterType::String),
+        "integer" => Ok(SemanticQueryParameterType::Integer),
+        other => Err(AdapterError::Unsupported(format!(
+            "semantic query parameter type {other}"
+        ))),
+    }
+}
+
+fn semantic_result_kind(value: SemanticQueryResultKind) -> &'static str {
+    match value {
+        SemanticQueryResultKind::CandidateSymbols => "candidate_symbols",
+        SemanticQueryResultKind::NormalizedFacts => "normalized_facts",
+    }
+}
+
+fn decode_semantic_result_kind(
+    value: String,
+) -> Result<SemanticQueryResultKind, AdapterError> {
+    match value.as_str() {
+        "candidate_symbols" => Ok(SemanticQueryResultKind::CandidateSymbols),
+        "normalized_facts" => Ok(SemanticQueryResultKind::NormalizedFacts),
+        other => Err(AdapterError::Unsupported(format!(
+            "semantic query result kind {other}"
+        ))),
+    }
+}
+
+fn semantic_query_capability(
+    value: &SemanticQueryCapability,
+) -> worker_proto::SemanticQueryCapability {
+    worker_proto::SemanticQueryCapability {
+        name: value.name.clone(),
+        version: value.version,
+        parameters: value
+            .parameters
+            .iter()
+            .map(|parameter| worker_proto::SemanticQueryParameter {
+                name: parameter.name.clone(),
+                r#type: semantic_parameter_type(parameter.ty).to_owned(),
+                required: parameter.required,
+            })
+            .collect(),
+        result_kind: semantic_result_kind(value.result).to_owned(),
+    }
+}
+
+fn decode_semantic_query_capability(
+    value: worker_proto::SemanticQueryCapability,
+) -> Result<SemanticQueryCapability, AdapterError> {
+    if value.name.is_empty() || value.version == 0 {
+        return Err(AdapterError::Invalid("semantic_query_capability"));
+    }
+    Ok(SemanticQueryCapability {
+        name: value.name,
+        version: value.version,
+        parameters: value
+            .parameters
+            .into_iter()
+            .map(|parameter| {
+                Ok(SemanticQueryParameter {
+                    name: parameter.name,
+                    ty: decode_semantic_parameter_type(parameter.r#type)?,
+                    required: parameter.required,
+                })
+            })
+            .collect::<Result<Vec<_>, AdapterError>>()?,
+        result: decode_semantic_result_kind(value.result_kind)?,
+    })
+}
+
 fn handshake_response(value: &crate::HandshakeResponse) -> worker_proto::HandshakeResponse {
     worker_proto::HandshakeResponse {
         backend: value.capabilities.identity.backend.clone(),
@@ -64,6 +150,12 @@ fn handshake_response(value: &crate::HandshakeResponse) -> worker_proto::Handsha
             .languages
             .iter()
             .map(proto_language)
+            .collect(),
+        semantic_query_capabilities: value
+            .capabilities
+            .semantic_query_capabilities
+            .iter()
+            .map(semantic_query_capability)
             .collect(),
     }
 }
@@ -83,6 +175,11 @@ fn decode_handshake_response(
                 .capabilities
                 .into_iter()
                 .map(decode_worker_capability)
+                .collect::<Result<Vec<_>, _>>()?,
+            semantic_query_capabilities: value
+                .semantic_query_capabilities
+                .into_iter()
+                .map(decode_semantic_query_capability)
                 .collect::<Result<Vec<_>, _>>()?,
         },
     })

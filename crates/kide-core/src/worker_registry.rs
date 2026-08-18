@@ -5,14 +5,40 @@
 //! handshake for its language and protocol capabilities.  Launch arguments
 //! remain process-local and never enter the canonical worker protocol.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 
 use crate::{
+    query_package::PackageCapability,
     BuildSystem, ComponentId, Language, ProjectManifest, SourceUnit, WorkerCapabilities,
     WorkerCapability, WorkerLaunch, WorkerSupervisor, WorkerSupervisorError,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryCapabilityStatus {
+    Supported,
+    Missing,
+    IncompatibleVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryCapabilitySupport {
+    Complete,
+    Partial,
+    Unsupported,
+}
+
+/// Deterministic negotiation record retained by a later resolved query plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCapabilityNegotiation {
+    pub name: String,
+    pub version: u32,
+    pub required: bool,
+    pub status: QueryCapabilityStatus,
+    pub providers: Vec<String>,
+    pub available_versions: Vec<u32>,
+}
 
 /// A locally discoverable worker installation.  Build-system compatibility is
 /// installation metadata because it describes how Core may launch the worker;
@@ -182,6 +208,72 @@ pub fn select_discovered(
     selection
 }
 
+/// Matches declarative package requirements against static worker handshakes.
+/// This performs no worker query and starts no compiler session.
+pub fn negotiate_query_capabilities(
+    requirements: &[PackageCapability],
+    workers: &[DiscoveredWorker],
+) -> Vec<QueryCapabilityNegotiation> {
+    let mut requirements = requirements.to_vec();
+    requirements.sort_by(|left, right| {
+        (&left.name, left.version, left.required).cmp(&(
+            &right.name,
+            right.version,
+            right.required,
+        ))
+    });
+    requirements
+        .into_iter()
+        .map(|requirement| {
+            let mut providers = BTreeSet::new();
+            let mut available_versions = BTreeSet::new();
+            for worker in workers {
+                for capability in &worker.capabilities.semantic_query_capabilities {
+                    if capability.name == requirement.name {
+                        available_versions.insert(capability.version);
+                        if capability.version == requirement.version {
+                            providers.insert(worker.installation.name.clone());
+                        }
+                    }
+                }
+            }
+            let status = if !providers.is_empty() {
+                QueryCapabilityStatus::Supported
+            } else if available_versions.is_empty() {
+                QueryCapabilityStatus::Missing
+            } else {
+                QueryCapabilityStatus::IncompatibleVersion
+            };
+            QueryCapabilityNegotiation {
+                name: requirement.name,
+                version: requirement.version,
+                required: requirement.required,
+                status,
+                providers: providers.into_iter().collect(),
+                available_versions: available_versions.into_iter().collect(),
+            }
+        })
+        .collect()
+}
+
+pub fn query_capability_support(
+    negotiations: &[QueryCapabilityNegotiation],
+) -> QueryCapabilitySupport {
+    if negotiations
+        .iter()
+        .any(|item| item.required && item.status != QueryCapabilityStatus::Supported)
+    {
+        QueryCapabilitySupport::Unsupported
+    } else if negotiations
+        .iter()
+        .any(|item| item.status != QueryCapabilityStatus::Supported)
+    {
+        QueryCapabilitySupport::Partial
+    } else {
+        QueryCapabilitySupport::Complete
+    }
+}
+
 fn language_key(language: &Language) -> String {
     match language {
         Language::Kotlin => "kotlin".to_owned(),
@@ -197,7 +289,9 @@ mod tests {
     use super::*;
     use crate::{
         Component, Fingerprint, ProjectManifest, Provenance, SourceOrigin, SourceUnitId,
-        WorkerIdentity, WorkspaceId, WorkspacePath, WORKER_PROTOCOL_VERSION,
+        SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
+        SemanticQueryResultKind, WorkerIdentity, WorkspaceId, WorkspacePath,
+        WORKER_PROTOCOL_VERSION,
     };
 
     fn source(component: &str, language: Language, path: &str) -> SourceUnit {
@@ -233,6 +327,7 @@ mod tests {
                     WorkerCapability::Handshake,
                     WorkerCapability::FileAnalysisSnapshot,
                 ],
+                semantic_query_capabilities: Vec::new(),
             },
         }
     }
@@ -331,5 +426,92 @@ mod tests {
             )],
         );
         assert_eq!(selection.unsupported.len(), 1);
+    }
+
+    #[test]
+    fn negotiates_versioned_package_capabilities_deterministically() {
+        let mut kotlin = worker(
+            "kotlin",
+            vec![Language::Kotlin],
+            vec![BuildSystem::Gradle],
+        );
+        kotlin.capabilities.semantic_query_capabilities = vec![
+            SemanticQueryCapability {
+                name: "hierarchy.direct".to_owned(),
+                version: 1,
+                parameters: vec![SemanticQueryParameter {
+                    name: "supertype".to_owned(),
+                    ty: SemanticQueryParameterType::SymbolId,
+                    required: true,
+                }],
+                result: SemanticQueryResultKind::CandidateSymbols,
+            },
+            SemanticQueryCapability {
+                name: "applications.resolved_target".to_owned(),
+                version: 1,
+                parameters: Vec::new(),
+                result: SemanticQueryResultKind::NormalizedFacts,
+            },
+        ];
+        let requirements = vec![
+            PackageCapability {
+                name: "missing.optional".to_owned(),
+                version: 1,
+                required: false,
+            },
+            PackageCapability {
+                name: "hierarchy.direct".to_owned(),
+                version: 2,
+                required: true,
+            },
+            PackageCapability {
+                name: "applications.resolved_target".to_owned(),
+                version: 1,
+                required: true,
+            },
+        ];
+
+        let negotiated = negotiate_query_capabilities(&requirements, &[kotlin.clone()]);
+
+        assert_eq!(
+            negotiated
+                .iter()
+                .map(|item| (item.name.as_str(), item.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "applications.resolved_target",
+                    QueryCapabilityStatus::Supported
+                ),
+                (
+                    "hierarchy.direct",
+                    QueryCapabilityStatus::IncompatibleVersion
+                ),
+                (
+                    "missing.optional",
+                    QueryCapabilityStatus::Missing
+                ),
+            ]
+        );
+        assert_eq!(negotiated[0].providers, vec!["kotlin"]);
+        assert_eq!(negotiated[1].available_versions, vec![1]);
+        assert_eq!(
+            query_capability_support(&negotiated),
+            QueryCapabilitySupport::Unsupported
+        );
+        assert_eq!(
+            query_capability_support(&negotiate_query_capabilities(
+                &requirements[..1],
+                &[]
+            )),
+            QueryCapabilitySupport::Partial
+        );
+        assert_eq!(
+            query_capability_support(&negotiate_query_capabilities(
+                &requirements[2..],
+                &[kotlin]
+            )),
+            QueryCapabilitySupport::Complete
+        );
     }
 }

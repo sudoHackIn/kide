@@ -40,6 +40,40 @@ pub struct WorkerCapabilities {
     pub protocol_version: u32,
     pub languages: Vec<Language>,
     pub capabilities: Vec<WorkerCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub semantic_query_capabilities: Vec<SemanticQueryCapability>,
+}
+
+/// A versioned, typed relation capability advertised as static handshake data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryCapability {
+    pub name: String,
+    pub version: u32,
+    pub parameters: Vec<SemanticQueryParameter>,
+    pub result: SemanticQueryResultKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticQueryParameter {
+    pub name: String,
+    pub ty: SemanticQueryParameterType,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticQueryParameterType {
+    SymbolId,
+    ComponentId,
+    String,
+    Integer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticQueryResultKind {
+    CandidateSymbols,
+    NormalizedFacts,
 }
 
 /// A request whose only purpose is compatibility and static discovery.

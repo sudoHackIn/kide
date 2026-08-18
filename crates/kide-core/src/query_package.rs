@@ -50,7 +50,13 @@ pub struct PackageExports {
 #[serde(deny_unknown_fields)]
 pub struct PackageCapability {
     pub name: String,
+    #[serde(default = "default_capability_version")]
+    pub version: u32,
     pub required: bool,
+}
+
+const fn default_capability_version() -> u32 {
+    1
 }
 
 /// Where a registered package was obtained.
@@ -311,6 +317,12 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), String> {
                 capability.name
             ));
         }
+        if capability.version == 0 {
+            return Err(format!(
+                "capability `{}` version must be positive",
+                capability.name
+            ));
+        }
     }
     Ok(())
 }
@@ -402,6 +414,7 @@ required = true
             .expect("resolves exported macro");
 
         assert_eq!(resolved.package.manifest.version, "1.0.0");
+        assert_eq!(resolved.package.manifest.capabilities[0].version, 1);
         assert_eq!(resolved.export_name, "controller");
         assert!(resolved
             .package

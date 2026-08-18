@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             WorkerCapability::Handshake,
                             WorkerCapability::FileAnalysisSnapshot,
                         ],
+                        semantic_query_capabilities: Vec::new(),
                     },
                 })
             }

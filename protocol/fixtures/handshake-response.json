@@ -10,7 +10,17 @@
       },
       "protocol_version": 1,
       "languages": ["kotlin", "java"],
-      "capabilities": ["handshake", "project_manifest", "file_analysis_snapshot"]
+      "capabilities": ["handshake", "project_manifest", "file_analysis_snapshot"],
+      "semantic_query_capabilities": [
+        {
+          "name": "hierarchy.direct",
+          "version": 1,
+          "parameters": [
+            {"name": "supertype", "ty": "symbol_id", "required": true}
+          ],
+          "result": "candidate_symbols"
+        }
+      ]
     }
   }
 }

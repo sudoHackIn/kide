@@ -33,6 +33,21 @@ message HandshakeResponse {
   uint32 protocol_version = 3;
   repeated string capabilities = 4;
   repeated string languages = 5;
+  repeated SemanticQueryCapability semantic_query_capabilities = 6;
+}
+
+// Declarative query capability metadata is static handshake data. It does not
+// execute package code or imply that a worker owns persistent query state.
+message SemanticQueryCapability {
+  string name = 1;
+  uint32 version = 2;
+  repeated SemanticQueryParameter parameters = 3;
+  string result_kind = 4;
+}
+message SemanticQueryParameter {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
 }
 
 message ProjectManifestRequest { string workspace_root = 1; }

@@ -18,5 +18,13 @@ class HandshakeTest {
             envelope.handshakeResponse.capabilitiesList,
         )
         assertEquals(listOf("kotlin", "java"), envelope.handshakeResponse.languagesList)
+        assertEquals(
+            listOf("applications.resolved_target", "hierarchy.direct"),
+            envelope.handshakeResponse.semanticQueryCapabilitiesList.map { it.name },
+        )
+        assertEquals(
+            listOf("normalized_facts", "candidate_symbols"),
+            envelope.handshakeResponse.semanticQueryCapabilitiesList.map { it.resultKind },
+        )
     }
 }

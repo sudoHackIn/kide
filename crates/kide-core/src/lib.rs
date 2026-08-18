@@ -159,6 +159,40 @@ mod worker_framing_tests {
     }
 
     #[test]
+    fn semantic_query_handshake_capability_round_trips_protobuf() {
+        let envelope = crate::WorkerEnvelope::new(
+            "semantic-capability-1",
+            crate::WorkerMessage::HandshakeResponse(crate::HandshakeResponse {
+                capabilities: crate::WorkerCapabilities {
+                    identity: crate::WorkerIdentity {
+                        backend: "fixture".to_owned(),
+                        backend_version: "1.0.0".to_owned(),
+                    },
+                    protocol_version: WORKER_PROTOCOL_VERSION,
+                    languages: vec![Language::Kotlin],
+                    capabilities: vec![crate::WorkerCapability::Handshake],
+                    semantic_query_capabilities: vec![crate::SemanticQueryCapability {
+                        name: "hierarchy.direct".to_owned(),
+                        version: 1,
+                        parameters: vec![crate::SemanticQueryParameter {
+                            name: "supertype".to_owned(),
+                            ty: crate::SemanticQueryParameterType::SymbolId,
+                            required: true,
+                        }],
+                        result: crate::SemanticQueryResultKind::CandidateSymbols,
+                    }],
+                },
+            }),
+        );
+
+        let encoded = crate::worker_proto_adapter::envelope(&envelope).expect("encodes handshake");
+        let restored =
+            crate::worker_proto_adapter::decode_envelope(encoded).expect("decodes handshake");
+
+        assert_eq!(restored, envelope);
+    }
+
+    #[test]
     fn source_unit_adapter_preserves_snapshot_identity() {
         let source = SourceUnit {
             id: SourceUnitId::new("gradle:app:Main.kt"),
