@@ -3,6 +3,13 @@ package dev.kide.worker
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
+import java.io.StringReader
+import java.io.StringWriter
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
@@ -12,25 +19,36 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.apache.maven.model.Model
+import org.apache.maven.model.Plugin
 import org.apache.maven.model.io.xpp3.MavenXpp3Reader
+import org.codehaus.plexus.util.xml.Xpp3Dom
 
 /**
  * Worker-local Maven reactor discovery for the supported v1 subset.
  *
- * Maven's typed model reader owns XML parsing. This importer deliberately
- * emits only the generic manifest/source-set layer; effective dependency
- * resolution and language compilation contexts are added separately.
+ * Maven owns effective-model construction. The worker invokes a selected
+ * local Maven only to obtain an effective POM, then emits the generic
+ * manifest/source-set layer. Dependency artifact resolution is added
+ * separately.
  */
 internal object MavenProjectImporter {
     private const val MODEL_VERSION = "3.9.9"
 
-    fun import(workspace: Path): JsonElement {
+    data class ResolvedArtifact(val path: Path, val component: String, val context: String)
+
+    fun import(workspace: Path): JsonElement = import(workspace, System.getenv())
+
+    internal fun import(workspace: Path, environment: Map<String, String>): JsonElement {
         require(workspace.isDirectory()) { "workspace root is not a directory: $workspace" }
         val root = workspace.toRealPath()
         val rootPom = root.resolve("pom.xml")
         require(rootPom.isRegularFile()) { "Maven workspace has no pom.xml at $rootPom" }
-        val modules = reactor(root, rootPom)
-        val components = modules.map { module -> component(root, module) }
+        val maven = selectMaven(root, environment)
+        val modules = effectiveReactor(root, canonicalPath(root, rootPom, "Maven workspace POM"), maven, environment)
+        val classpath = resolvedArtifacts(root, environment).groupBy { it.component }.mapValues { (_, artifacts) ->
+            artifacts.map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }.distinct().sorted()
+        }
+        val components = modules.map { module -> component(root, module, classpath[componentId(root, module)].orEmpty()) }
         val configuration = fingerprint(modules.map { Files.readAllBytes(it.pom) })
         return buildJsonObject {
             put("workspace", "maven:${fingerprint(listOf(root.toString().encodeToByteArray()))}")
@@ -40,6 +58,41 @@ internal object MavenProjectImporter {
             put("fingerprint", configuration)
             put("provenance", provenance(configuration))
         }
+    }
+
+    /** Resolve Maven's test classpath per reactor module; only regular JARs enter the catalog. */
+    fun resolvedArtifacts(workspace: Path): List<ResolvedArtifact> = resolvedArtifacts(workspace, System.getenv())
+
+    fun javaCompilationContexts(workspace: Path): List<GradleProjectImporter.JavaCompilationContext> {
+        val root = workspace.toRealPath()
+        val maven = selectMaven(root, System.getenv())
+        val modules = effectiveReactor(root, canonicalPath(root, root.resolve("pom.xml"), "Maven workspace POM"), maven, System.getenv())
+        val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        return modules.map { module ->
+            val sources = sourceSets(root, module).flatMap { sourceSet -> sourceSet.roots }
+                .flatMap { relative -> Files.walk(root.resolve(relative)).use { paths -> paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".java") }.toList() } }
+                .distinct().sortedBy(Path::toString)
+            GradleProjectImporter.JavaCompilationContext(
+                componentId(root, module),
+                sources,
+                MavenExternalResolver.resolve(module.model, reactorCoordinates),
+                Path.of(System.getProperty("java.home")),
+            )
+        }
+    }
+
+    internal fun resolvedArtifacts(workspace: Path, environment: Map<String, String>): List<ResolvedArtifact> {
+        val root = workspace.toRealPath()
+        val maven = selectMaven(root, environment)
+        val modules = effectiveReactor(root, canonicalPath(root, root.resolve("pom.xml"), "Maven workspace POM"), maven, environment)
+        val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        return modules.flatMap { module ->
+            if (module.model.packaging == "pom") return@flatMap emptyList()
+            val component = componentId(root, module)
+            val context = fingerprint(listOf(Files.readAllBytes(module.pom)))
+            MavenExternalResolver.resolve(module.model, reactorCoordinates)
+                .map { path -> ResolvedArtifact(path, component, context) }
+        }.distinctBy { it.path.toAbsolutePath().normalize() }.sortedBy { it.path.toString() }
     }
 
     private fun reactor(root: Path, pom: Path): List<Module> {
@@ -54,17 +107,30 @@ internal object MavenProjectImporter {
                 require(childPom.isRegularFile()) {
                     "Maven reactor module `$child` declared by ${workspacePath(root, canonicalPom)} has no pom.xml"
                 }
-                require(childPom.normalize().startsWith(root)) {
-                    "Maven reactor module `$child` escapes workspace root"
-                }
-                visit(childPom)
+                visit(canonicalPath(root, childPom, "Maven reactor module `$child`"))
             }
             return listOf(module) + children
         }
         return visit(pom).sortedBy { workspacePath(root, it.directory) }
     }
 
-    private fun component(root: Path, module: Module): JsonElement {
+    private fun effectiveReactor(root: Path, rootPom: Path, maven: Path, environment: Map<String, String>): List<Module> {
+        val raw = reactor(root, rootPom)
+        val effective = effectiveModels(maven, rootPom, environment).toMutableMap()
+        // Some Maven/plugin combinations report only the requested project.
+        // Fill only missing reactor entries; the normal path is one root call.
+        raw.forEach { module ->
+            val key = modelKey(module.model)
+            if (key !in effective) effective.putAll(effectiveModels(maven, module.pom, environment))
+        }
+        return raw.map { module ->
+            module.copy(model = requireNotNull(effective[modelKey(module.model)]) {
+                "Maven effective model omitted ${modelKey(module.model)}"
+            })
+        }
+    }
+
+    private fun component(root: Path, module: Module, classpath: List<String>): JsonElement {
         val sourceSets = sourceSets(root, module)
         val configuration = fingerprint(
             listOf(
@@ -73,12 +139,9 @@ internal object MavenProjectImporter {
             ),
         )
         val relative = workspacePath(root, module.directory)
-        val group = module.model.groupId ?: module.model.parent?.groupId ?: "local"
-        val artifact = requireNotNull(module.model.artifactId) {
-            "Maven POM ${workspacePath(root, module.pom)} has no artifactId"
-        }
+        val artifact = moduleArtifactId(root, module)
         return buildJsonObject {
-            put("id", "maven:$group:$artifact:$relative:main")
+            put("id", componentId(root, module))
             put("name", artifact)
             put("build_system", "maven")
             put("root", relative)
@@ -87,7 +150,7 @@ internal object MavenProjectImporter {
             })
             put("configuration", configuration)
             put("source_sets", buildJsonArray { sourceSets.forEach { add(it.json) } })
-            put("classpath", buildJsonArray { })
+            put("classpath", buildJsonArray { classpath.forEach { add(JsonPrimitive(it)) } })
             put("toolchain", buildJsonObject {
                 put("jvm_version", System.getProperty("java.version"))
                 put("build_tool_version", "maven-model-$MODEL_VERSION")
@@ -105,10 +168,14 @@ internal object MavenProjectImporter {
     private fun sourceSet(root: Path, module: Module, name: String, test: Boolean): SourceSet {
         val build = module.model.build
         val configured = if (test) build?.testSourceDirectory else build?.sourceDirectory
-        val conventional = listOf("src/$name/java", "src/$name/kotlin")
-        val roots = (listOfNotNull(configured) + conventional)
+        val conventional = buildList {
+            add("src/$name/java")
+            if (hasKotlinPlugin(module.model)) add("src/$name/kotlin")
+        }
+        val roots = (listOfNotNull(configured) + conventional + kotlinSourceDirectories(module.model, test))
             .map { path -> module.directory.resolve(path).normalize() }
-            .filter { path -> path.isDirectory() && path.startsWith(root) }
+            .filter(Path::isDirectory)
+            .map { path -> canonicalPath(root, path, "Maven source root") }
             .distinct()
             .sortedBy(Path::toString)
         return SourceSet(
@@ -131,6 +198,108 @@ internal object MavenProjectImporter {
 
     private fun read(pom: Path): Model = Files.newBufferedReader(pom).use { reader ->
         MavenXpp3Reader().read(reader)
+    }
+
+    private fun readEffectivePoms(pom: Path): List<Model> {
+        val document = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(pom.toFile())
+        if (document.documentElement.tagName == "project") return listOf(read(pom))
+        require(document.documentElement.tagName == "projects") { "unexpected Maven effective POM root" }
+        val projects = document.documentElement.getElementsByTagName("project")
+        return (0 until projects.length).map { index ->
+            val xml = StringWriter().also { writer ->
+                TransformerFactory.newInstance().newTransformer().transform(DOMSource(projects.item(index)), StreamResult(writer))
+            }.toString()
+            MavenXpp3Reader().read(StringReader(xml))
+        }
+    }
+
+    private fun hasKotlinPlugin(model: Model): Boolean = model.build?.plugins.orEmpty().any { plugin ->
+        plugin.isKideKotlinMavenPlugin()
+    }
+
+    private fun kotlinSourceDirectories(model: Model, test: Boolean): List<String> = model.build?.plugins.orEmpty()
+        .filter { plugin -> plugin.isKideKotlinMavenPlugin() }
+        .flatMap { plugin ->
+            buildList {
+                if (!test) addAll(sourceDirectories(plugin.configuration))
+                plugin.executions.orEmpty()
+                    .filter { execution -> execution.goals.orEmpty().any { goal -> goal == if (test) "test-compile" else "compile" } }
+                    .flatMapTo(this) { execution -> sourceDirectories(execution.configuration) }
+            }
+        }.distinct().sorted()
+
+    private fun Plugin.isKideKotlinMavenPlugin(): Boolean =
+        artifactId == "kotlin-maven-plugin" && (groupId == null || groupId == "org.jetbrains.kotlin")
+
+    private fun sourceDirectories(configuration: Any?): List<String> {
+        val sourceDirs = (configuration as? Xpp3Dom)?.getChild("sourceDirs") ?: return emptyList()
+        return sourceDirs.getChildren("source").mapNotNull(Xpp3Dom::getValue).filter(String::isNotBlank)
+    }
+
+    /**
+     * Resolve Maven in the same order an IDE-managed worker would: an explicit
+     * bundled distribution, the checked-in wrapper, then the user's PATH.
+     * The command is deliberately kept worker-local and never enters Core
+     * provenance or canonical records.
+     */
+    internal fun selectMaven(root: Path, environment: Map<String, String>): Path {
+        environment["KIDE_MAVEN_HOME"]?.takeIf(String::isNotBlank)?.let { configured ->
+            val executable = Path.of(configured).resolve("bin/mvn")
+            require(executable.isRegularFile() && Files.isExecutable(executable)) {
+                "KIDE_MAVEN_HOME does not contain an executable bin/mvn"
+            }
+            return executable
+        }
+        root.resolve("mvnw").takeIf { it.isRegularFile() && Files.isExecutable(it) }?.let { return it }
+        environment["PATH"]?.split(java.io.File.pathSeparator)?.asSequence()
+            ?.map(Path::of)?.map { it.resolve("mvn") }
+            ?.firstOrNull { it.isRegularFile() && Files.isExecutable(it) }
+            ?.let { return it }
+        error("Maven is unavailable; set KIDE_MAVEN_HOME, add an executable mvnw, or put mvn on PATH")
+    }
+
+    private fun effectiveModels(maven: Path, pom: Path, environment: Map<String, String>): Map<String, Model> {
+        val output = Files.createTempFile("kide-maven-effective-", ".xml")
+        try {
+            runMaven(maven, pom, listOf("-N", "help:effective-pom", "-Doutput=${output}"), environment)
+            require(output.isRegularFile()) { "Maven effective-model import did not produce ${output.fileName}" }
+            return readEffectivePoms(output).associateBy(::modelKey)
+        } finally {
+            Files.deleteIfExists(output)
+        }
+    }
+
+    private fun runMaven(maven: Path, pom: Path, goals: List<String>, environment: Map<String, String>) {
+        val process = ProcessBuilder(listOf(maven.toString(), "-B", "-q", "-f", pom.toString()) + goals)
+            .redirectErrorStream(true).also { builder ->
+                // Selection variables affect only launcher choice; replacing PATH
+                // would also hide shell utilities used by wrapper scripts.
+                builder.environment().putAll(environment.filterKeys { it !in setOf("PATH", "KIDE_MAVEN_HOME") })
+            }.start()
+        val log = process.inputStream.bufferedReader().use { it.readText() }
+        require(process.waitFor(60, TimeUnit.SECONDS)) { "Maven import timed out" }
+        require(process.exitValue() == 0) { "Maven import failed for ${pom.fileName}: ${log.takeLast(1_000)}" }
+    }
+
+    private fun componentId(root: Path, module: Module): String {
+        // Keep IDs aligned with core discovery, which owns canonical component
+        // identity for every build system. Maven coordinates are useful model
+        // metadata, but are not part of a source-unit identity.
+        val relative = workspacePath(root, module.directory)
+        val rootKey = if (relative == ".") "root" else relative
+        return "maven:$rootKey:main"
+    }
+
+    private fun modelKey(model: Model): String = "${model.groupId ?: model.parent?.groupId ?: "local"}:${requireNotNull(model.artifactId)}"
+
+    private fun moduleArtifactId(root: Path, module: Module): String = requireNotNull(module.model.artifactId) {
+        "Maven POM ${workspacePath(root, module.pom)} has no artifactId"
+    }
+
+    private fun canonicalPath(root: Path, path: Path, description: String): Path {
+        val canonical = path.toRealPath()
+        require(canonical.startsWith(root)) { "$description escapes workspace root" }
+        return canonical
     }
 
     private fun workspacePath(root: Path, path: Path): String = root.relativize(path)

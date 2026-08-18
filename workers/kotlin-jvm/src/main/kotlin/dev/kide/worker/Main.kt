@@ -13,6 +13,11 @@ import kotlinx.serialization.json.put
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
+/** Worker-local artifact location. Paths never cross the worker protocol. */
+internal data class ResolvedJvmArtifact(val path: Path, val component: String, val context: String) {
+    val cursor: String get() = path.toAbsolutePath().normalize().toString()
+}
+
 fun main(args: Array<String>) {
     configureLogging()
     when {
@@ -154,9 +159,7 @@ internal fun resolveWorkspacePath(value: String): Path {
 }
 
 internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {
-    // The Gradle model is the authority for every binary artifact, including
-    // platform libraries. This worker never scans a JDK installation itself.
-    val artifacts = GradleProjectImporter.resolvedArtifacts(workspaceRoot)
+    val artifacts = resolvedArtifacts(workspaceRoot)
     val start = cursor?.let { previous ->
         artifacts.indexOfFirst { it.cursor == previous }
             .takeIf { it >= 0 }
@@ -173,12 +176,19 @@ internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: Strin
 }
 
 internal fun artifactDescriptors(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {
-    val artifacts = GradleProjectImporter.resolvedArtifacts(workspaceRoot)
+    val artifacts = resolvedArtifacts(workspaceRoot)
     val start = cursor?.let { previous -> artifacts.indexOfFirst { it.cursor == previous }.takeIf { it >= 0 }?.plus(1)
         ?: error("artifact cursor is not valid for this workspace") } ?: 0
     val batch = artifacts.drop(start).take(maxArtifacts)
     put("artifacts", buildJsonArray { batch.forEach { artifact -> add(JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context)) } })
     put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
+}
+
+internal fun resolvedArtifacts(workspace: Path): List<ResolvedJvmArtifact> = when {
+    workspace.resolve("pom.xml").toFile().isFile -> MavenProjectImporter.resolvedArtifacts(workspace)
+        .map { ResolvedJvmArtifact(it.path, it.component, it.context) }
+    else -> GradleProjectImporter.resolvedArtifacts(workspace)
+        .map { ResolvedJvmArtifact(it.path, it.component, it.context) }
 }
 
 internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path): kotlinx.serialization.json.JsonObject {

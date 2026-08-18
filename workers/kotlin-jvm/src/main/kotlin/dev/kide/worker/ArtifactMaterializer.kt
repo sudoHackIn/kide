@@ -15,7 +15,7 @@ internal object ArtifactMaterializer {
         require(request.hasArtifact()) { "artifact materialization requires artifact descriptor" }
         require(request.blobFormatVersion == JvmArtifactBlobLayout.VERSION) { "unsupported artifact blob format" }
         val workspace = resolveWorkspacePath(request.workspaceRoot)
-        val artifact = GradleProjectImporter.resolvedArtifacts(workspace).singleOrNull { candidate ->
+        val artifact = resolvedArtifacts(workspace).singleOrNull { candidate ->
             val descriptor = JvmBytecodeExtractor.descriptor(candidate.path, candidate.component, candidate.context).jsonObject
             descriptor["source_unit"]!!.jsonObject["id"]!!.toString().trim('"') == request.artifact.sourceUnitId
         } ?: error("requested artifact is not resolved by this workspace")

@@ -367,6 +367,44 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(incremental["reused"], 2);
 }
 
+#[test]
+#[ignore = "requires the Kotlin worker distribution and KIDE_MAVEN_HOME; run Maven e2e"]
+fn maven_spring_crud_survives_cold_restarts_and_incremental_updates() {
+    assert!(std::env::var_os("KIDE_MAVEN_HOME").is_some(), "set KIDE_MAVEN_HOME for Maven e2e");
+    let directory = tempdir().expect("temporary workspace");
+    let workspace = directory.path().join("maven-spring-boot-crud");
+    copy_fixture(&maven_fixture_root(), &workspace);
+
+    let cold = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+    assert_eq!(cold["status"], "ok", "cold index result: {cold}");
+    assert_eq!(cold["analyzed"], 2);
+
+    let book = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "Book"]);
+    let book_id = book["result"]["symbols"].as_array().unwrap().iter()
+        .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.domain.Book")
+        .and_then(|symbol| symbol["id"].as_str()).expect("Book symbol").to_owned();
+    let book_symbol = book["result"]["symbols"].as_array().unwrap().iter()
+        .find(|symbol| symbol["id"] == book_id)
+        .expect("Book symbol record");
+    assert!(!book_symbol["applied_symbols"].as_array().expect("Book annotations").is_empty());
+    let repository = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "BookRepository"]);
+    assert!(repository["result"]["symbols"].as_array().unwrap().iter().any(|symbol| {
+        symbol["qualified_name"] == "dev.kide.fixture.domain.BookRepository"
+    }));
+    let book_refs = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", &book_id]);
+    assert_eq!(book_refs["status"], "ok", "Book refs result: {book_refs}");
+
+    let unchanged = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+    assert_eq!(unchanged["analyzed"], 0);
+    assert_eq!(unchanged["reused"], 2);
+
+    let controller = workspace.join("app/src/main/java/dev/kide/fixture/app/BookController.java");
+    fs::write(&controller, format!("{}\n// Maven e2e edit\n", fs::read_to_string(&controller).unwrap())).unwrap();
+    let incremental = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+    assert_eq!(incremental["analyzed"], 1);
+    assert_eq!(incremental["reused"], 1);
+}
+
 fn measure<T>(name: &str, operation: impl FnOnce() -> T) -> T {
     let started = Instant::now();
     let result = operation();
@@ -382,12 +420,16 @@ fn java_fixture_root() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/java-semantic")
 }
 
+fn maven_fixture_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/maven-spring-boot-crud")
+}
+
 fn copy_fixture(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("creates fixture root");
     for entry in fs::read_dir(source).expect("reads fixture directory") {
         let entry = entry.expect("directory entry");
         let name = entry.file_name();
-        if matches!(name.as_os_str(), value if value == OsStr::new(".gradle") || value == OsStr::new(".kotlin") || value == OsStr::new("build"))
+        if matches!(name.as_os_str(), value if value == OsStr::new(".gradle") || value == OsStr::new(".kotlin") || value == OsStr::new("build") || value == OsStr::new("target"))
         {
             continue;
         }
