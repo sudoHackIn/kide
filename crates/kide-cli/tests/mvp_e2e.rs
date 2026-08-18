@@ -177,6 +177,22 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let controller_names = controllers.iter().map(|record| record["symbol"]["name"].as_str().expect("symbol name")).collect::<Vec<_>>();
     assert!(controller_names.contains(&"BookController"));
     assert!(controller_names.contains(&"JavaBookAuditController"));
+    let entities = run_json_lines(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "query",
+            "persistence.entities",
+        ],
+    );
+    assert_eq!(entities.len(), 1);
+    assert_eq!(entities[0]["symbol"]["name"], "BookEntity");
+    assert_eq!(
+        entities[0]["plan"]["packages"][0]["id"],
+        "jakarta.persistence"
+    );
+    assert_eq!(entities[0]["state"], "partial");
     let repositories = run_json_lines(
         &workspace,
         [

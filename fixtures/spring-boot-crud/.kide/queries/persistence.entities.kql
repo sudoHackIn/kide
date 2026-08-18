@@ -1,0 +1,5 @@
+command persistence.entities() {
+  from jakarta.persistence.entity()
+  return symbol
+  limit 100
+}

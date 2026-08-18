@@ -1,0 +1,2 @@
+from applies(qualified-symbol("jakarta.persistence.Entity"))
+where kind == class

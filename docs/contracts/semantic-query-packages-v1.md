@@ -11,14 +11,14 @@ commands without adding framework vocabulary or project-specific commands to
 Core. A package is declarative: it supplies macros and typed command templates
 written in the bounded semantic relation DSL. Core validates, plans and
 executes them against its persistent graph; workers are only asked for a
-declared, bounded capability when a future plan requires one.
+declared, bounded capability when the selected plan explicitly requires one.
 
 ```text
 project command -> package macro -> relation DSL / typed IR -> Core planner
                                                                ↓
                                                     persistent graph postings
                                                                ↓
-                                                bounded worker capability (future)
+                                                    bounded worker capability (explicit step)
 ```
 
 The current `kide select` command is a built-in package-shaped proof: an
@@ -118,6 +118,18 @@ from one positive indexed relation; a bare `from symbol` is invalid. The first
 implementation uses `applies(target)` as that relation, preserving the bounded
 selector property.
 
+An explicit candidate-refinement step may follow that bounded posting:
+
+```text
+using capability hierarchy.direct(supertype=$api)
+```
+
+The capability must be declared by a package on the selected macro path and
+advertised with the exact version. Its typed arguments are bound structurally,
+and its candidate/source/node/byte/deadline budgets appear in the resolved
+plan. Package requirements without such a step negotiate compatibility but do
+not issue a semantic query request.
+
 `not` is reserved until the planner can prove that its candidate set is
 materialized and complete. Unbounded traversal, arbitrary regular expressions,
 file reads, shell execution, reflection and user-defined functions are not
@@ -212,11 +224,24 @@ its required relation capability was unavailable.
 | Project | Compose imported packages into named repository commands and bind project-specific components/prefixes. |
 | Worker | Advertise and, in a future version, materialize declared language-native relation capabilities for bounded candidates. It never owns package registration or query persistence. |
 
+## Co-installable framework proof
+
+The Spring CRUD fixture installs two independent packages:
+
+- `spring.web.controller()` selects resolved `@RestController` applications;
+- `jakarta.persistence.entity()` selects resolved `@Entity` applications.
+
+Both compile to the generic `applies` posting. Project commands select a
+package-qualified macro, and their resolved plans retain only the selected
+package's ID, version and manifest digest. Duplicate package identities and an
+incompatible `requires_core` remain registry errors before query planning.
+
 ## MVP boundary
 
-The MVP proves one Spring macro and one project-local command on Spring CRUD,
-selecting both Kotlin and Java annotated source declarations. It compiles only
-to existing persistent relation/posting primitives. Worker-declared custom
+The MVP proves co-installed Spring and Jakarta Persistence macros with
+project-local commands on Spring CRUD, including mixed Kotlin/Java Spring
+declarations. They compile only to existing persistent relation/posting
+primitives. Worker-declared custom
 capabilities, downloadable package distribution, negation/path traversal and
 lazy dependency graph materialization are follow-up work; their absence is
 represented as explicit capability or completeness state, not silently hidden.

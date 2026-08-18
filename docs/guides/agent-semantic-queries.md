@@ -1,7 +1,9 @@
 # Agent Semantic Query Workflow
 
 KIDE queries are bounded semantic lookups over the persistent index. Start by
-indexing the workspace; a query itself does not start a language worker.
+indexing the workspace. Plain Java/Kotlin relation queries remain worker-free;
+a package with required compatibility may perform a disposable handshake, and
+only an explicit `using capability ...` step sends a bounded query request.
 
 ```sh
 kide index .
@@ -34,6 +36,19 @@ The Spring CRUD fixture is the mixed-language proof. Its project command
 returns both Kotlin `BookController` and Java `JavaBookAuditController`.
 The macro resolves the external Spring annotation through the dependency
 classpath; agents do not need to materialize the Spring JAR before querying.
+
+Framework packages compose without adding framework vocabulary to Core. The
+same fixture installs `jakarta.persistence` beside `spring.web`; its independent
+project command uses the same generic resolved-annotation posting:
+
+```sh
+kide query describe persistence.entities
+kide query persistence.entities
+```
+
+The JSONL plan identifies only the package selected by that command, including
+its version and manifest digest. Installing another package therefore does not
+change the resolution or provenance of existing Spring commands.
 
 Queries may also start from the persisted direct hierarchy posting. Use
 `subtype_of(...)` or its equivalent `implements(...)` spelling; both are
