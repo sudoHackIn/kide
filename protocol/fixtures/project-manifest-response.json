@@ -16,7 +16,11 @@
           "configuration": "sha256:project-config",
           "source_sets": [],
           "classpath": [],
-          "toolchain": null,
+          "toolchain": {
+            "jvm_version": "21",
+            "build_tool_version": "9.4.1",
+            "kotlin_version": "2.4.10"
+          },
           "compiler_configuration": null
         }
       ],

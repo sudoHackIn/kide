@@ -1461,7 +1461,7 @@ pub fn decode_manifest(
                 .collect(),
             toolchain: component.toolchain.map(|toolchain| Toolchain {
                 jvm_version: toolchain.jvm_version,
-                gradle_version: toolchain.gradle_version,
+                build_tool_version: toolchain.build_tool_version,
                 kotlin_version: toolchain.kotlin_version,
             }),
             compiler_configuration: component
@@ -1771,7 +1771,7 @@ pub fn manifest(value: &ProjectManifest) -> worker_proto::ProjectManifest {
                     .as_ref()
                     .map(|toolchain| worker_proto::Toolchain {
                         jvm_version: toolchain.jvm_version.clone(),
-                        gradle_version: toolchain.gradle_version.clone(),
+                        build_tool_version: toolchain.build_tool_version.clone(),
                         kotlin_version: toolchain.kotlin_version.clone(),
                     }),
                 compiler_configuration_fingerprint: component

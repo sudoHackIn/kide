@@ -235,7 +235,7 @@ pub struct Component {
     /// SHA-256 content fingerprints of resolved external classpath artifacts.
     #[serde(default)]
     pub classpath: Vec<Fingerprint>,
-    /// The Gradle JVM/toolchain identity used to construct this component.
+    /// The build-tool/JVM identity used to construct this component.
     #[serde(default)]
     pub toolchain: Option<Toolchain>,
     /// Hash of compiler arguments and language-plugin configuration. Raw
@@ -258,7 +258,7 @@ pub struct SourceSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Toolchain {
     pub jvm_version: String,
-    pub gradle_version: String,
+    pub build_tool_version: String,
     pub kotlin_version: Option<String>,
 }
 

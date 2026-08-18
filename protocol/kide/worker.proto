@@ -88,7 +88,7 @@ message SemanticQueryResponse {
 
 message ProjectManifestRequest { string workspace_root = 1; }
 message SourceSet { string name = 1; repeated string source_roots = 2; repeated string generated_roots = 3; bool test = 4; }
-message Toolchain { string jvm_version = 1; string gradle_version = 2; optional string kotlin_version = 3; }
+message Toolchain { string jvm_version = 1; string build_tool_version = 2; optional string kotlin_version = 3; }
 message Component {
   string id = 1; string name = 2; string build_system = 3; string root = 4;
   repeated string languages = 5; string configuration_fingerprint = 6;

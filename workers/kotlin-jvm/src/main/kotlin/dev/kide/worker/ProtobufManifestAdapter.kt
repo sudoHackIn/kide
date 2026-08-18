@@ -80,7 +80,7 @@ internal object ProtobufManifestAdapter {
                     component["toolchain"]?.takeUnless { it is JsonNull }?.jsonObject?.let { toolchain ->
                         setToolchain(Worker.Toolchain.newBuilder()
                             .setJvmVersion(toolchain["jvm_version"]!!.jsonPrimitive.content)
-                            .setGradleVersion(toolchain["gradle_version"]!!.jsonPrimitive.content)
+                            .setBuildToolVersion(toolchain["build_tool_version"]!!.jsonPrimitive.content)
                             .apply { toolchain["kotlin_version"]?.jsonPrimitive?.contentOrNull?.let(::setKotlinVersion) })
                     }
                     component["compiler_configuration"]?.jsonPrimitive?.contentOrNull
@@ -121,7 +121,7 @@ internal object ProtobufManifestAdapter {
                 put("classpath", buildJsonArray { component.classpathFingerprintsList.forEach { add(JsonPrimitive(it)) } })
                 put("toolchain", if (component.hasToolchain()) buildJsonObject {
                     put("jvm_version", component.toolchain.jvmVersion)
-                    put("gradle_version", component.toolchain.gradleVersion)
+                    put("build_tool_version", component.toolchain.buildToolVersion)
                     put("kotlin_version", if (component.toolchain.hasKotlinVersion()) JsonPrimitive(component.toolchain.kotlinVersion) else JsonNull)
                 } else JsonNull)
                 put("compiler_configuration", if (component.hasCompilerConfigurationFingerprint()) JsonPrimitive(component.compilerConfigurationFingerprint) else JsonNull)

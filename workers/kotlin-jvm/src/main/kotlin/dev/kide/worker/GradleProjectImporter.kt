@@ -295,7 +295,7 @@ internal object GradleProjectImporter {
             put("classpath", buildJsonArray { externalArtifacts.forEach { add(JsonPrimitive(it)) } })
             put("toolchain", buildJsonObject {
                 put("jvm_version", gradleJvmVersion(environment))
-                put("gradle_version", environment.gradle.gradleVersion)
+                put("build_tool_version", environment.gradle.gradleVersion)
                 // Tooling API exposes the Gradle JVM, not the Kotlin plugin version.
                 put("kotlin_version", JsonPrimitive(KotlinVersion.CURRENT.toString()))
             })

@@ -98,6 +98,11 @@ KIDE persists the manifest. Gradle, Maven, Cargo, Bazel, or another importer is
 only restarted when its inputs have changed or the manifest is missing or
 incompatible.
 
+The Maven equivalent follows the versioned
+[Maven Project Import Contract v1](../contracts/maven-project-import-v1.md):
+it resolves a supported effective reactor model outside Core and emits the same
+canonical manifest, never Maven-specific Core records.
+
 ### Language worker
 
 A language worker consumes source units plus their component context and emits
