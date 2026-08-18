@@ -18,6 +18,11 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let directory = tempdir().expect("temporary workspace");
     let workspace = directory.path().join("spring-boot-crud");
     copy_fixture(&fixture_root(), &workspace);
+    write_query(
+        &workspace,
+        "spring.repositories.kql",
+        "command spring.repositories() {\n  from subtype_of(qualified-symbol(\"org.springframework.data.jpa.repository.JpaRepository\"))\n  where kind == interface\n  return symbol\n  limit 100\n}\n",
+    );
 
     let cold = measure("cold_index", || {
         run_json(
@@ -172,6 +177,18 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let controller_names = controllers.iter().map(|record| record["symbol"]["name"].as_str().expect("symbol name")).collect::<Vec<_>>();
     assert!(controller_names.contains(&"BookController"));
     assert!(controller_names.contains(&"JavaBookAuditController"));
+    let repositories = run_json_lines(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "query",
+            "spring.repositories",
+        ],
+    );
+    assert!(repositories.iter().any(|record| {
+        record["symbol"]["qualified_name"] == "dev.kide.fixture.book.BookRepository"
+    }));
     let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
     let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")
@@ -248,6 +265,11 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     let directory = tempdir().expect("temporary workspace");
     let workspace = directory.path().join("java-semantic");
     copy_fixture(&java_fixture_root(), &workspace);
+    write_query(
+        &workspace,
+        "api.implementations.kql",
+        "command api.implementations(api: symbol-id) {\n  from implements($api)\n  where kind == class\n  where language == java\n  return symbol\n  limit 100\n}\n",
+    );
 
     let (cold, cold_ms, peak_rss_kib) = run_json_measured(
         &workspace,
@@ -269,6 +291,20 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "definition", api_id])["status"], "ok");
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", api_id])["status"], "ok");
     assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "implementations", api_id])["status"], "ok");
+    let implementations = run_json_lines(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "query",
+            "api.implementations",
+            "--param",
+            &format!("api={api_id}"),
+        ],
+    );
+    assert!(implementations.iter().any(|record| {
+        record["symbol"]["qualified_name"] == "fixture.Impl"
+    }));
 
     let name = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "name"]);
     let api_name_id = name["result"]["symbols"].as_array().expect("name symbols").iter()
@@ -330,6 +366,12 @@ fn copy_fixture(source: &Path, destination: &Path) {
             fs::copy(entry.path(), target).expect("copies fixture file");
         }
     }
+}
+
+fn write_query(workspace: &Path, name: &str, contents: &str) {
+    let directory = workspace.join(".kide/queries");
+    fs::create_dir_all(&directory).expect("creates fixture query directory");
+    fs::write(directory.join(name), contents).expect("writes fixture query");
 }
 
 fn run_json<const N: usize>(workspace: &Path, args: [&str; N]) -> Value {

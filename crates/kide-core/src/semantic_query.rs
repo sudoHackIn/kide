@@ -29,6 +29,9 @@ pub struct QueryProgram {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryFrom {
     AppliedSymbol(QuerySymbol),
+    /// Direct implementation/subtype relation; traversal is intentionally not
+    /// part of this MVP.
+    SubtypeOf(QuerySymbol),
 }
 
 /// A conjunction of filters applied after the bounded starting posting.
@@ -78,6 +81,7 @@ pub type QueryParameters = BTreeMap<String, QueryValue>;
 pub struct CompiledQuery {
     pub selector: Selector,
     pub starting_symbol: SymbolId,
+    pub selector_plan: crate::selector::SelectorPlan,
     pub limit: u32,
 }
 
@@ -111,8 +115,8 @@ pub enum QueryCompileError {
     Selector(#[from] SelectorError),
 }
 
-/// Resolves typed parameters and compiles a program to the existing bounded
-/// selector. No scan is possible: `AppliedSymbol` is mandatory in `QueryFrom`.
+/// Resolves typed parameters and compiles a program to an indexed bounded
+/// selector. Every `QueryFrom` variant supplies its starting posting.
 pub fn compile(
     store: &IndexStore,
     program: &QueryProgram,
@@ -121,13 +125,32 @@ pub fn compile(
     if program.limit == 0 || program.limit > MAX_RESULT_LIMIT {
         return Err(QueryCompileError::InvalidLimit);
     }
-    let starting_symbol = match &program.from {
-        QueryFrom::AppliedSymbol(symbol) => resolve_symbol(store, symbol, parameters)?,
+    let (starting_symbol, starting_predicate, selector_plan) = match &program.from {
+        QueryFrom::AppliedSymbol(symbol) => {
+            let symbol = resolve_symbol(store, symbol, parameters)?;
+            (
+                symbol.clone(),
+                SelectorPredicate::AppliedSymbol(symbol.clone()),
+                crate::selector::SelectorPlan::AppliedSymbolPosting {
+                    applied_symbol: symbol,
+                },
+            )
+        }
+        QueryFrom::SubtypeOf(symbol) => {
+            let symbol = resolve_symbol(store, symbol, parameters)?;
+            (
+                symbol.clone(),
+                SelectorPredicate::SubtypeOf(symbol.clone()),
+                crate::selector::SelectorPlan::HierarchyPosting {
+                    supertype_symbol: symbol,
+                },
+            )
+        }
     };
-    let mut predicates = vec![SelectorPredicate::AppliedSymbol(starting_symbol.clone())];
+    let mut predicates = vec![starting_predicate];
     for predicate in &program.predicates {
         predicates.push(match predicate {
-            QueryPredicate::Kind(kind) => SelectorPredicate::Kind(kind.clone()),
+            QueryPredicate::Kind(kind) => SelectorPredicate::Kind(*kind),
             QueryPredicate::Language(language) => SelectorPredicate::Language(language.clone()),
             QueryPredicate::Component(component) => {
                 SelectorPredicate::Component(resolve_component(component, parameters)?)
@@ -143,6 +166,7 @@ pub fn compile(
             predicates,
         },
         starting_symbol,
+        selector_plan,
         limit: program.limit,
     })
 }

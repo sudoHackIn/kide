@@ -35,6 +35,24 @@ returns both Kotlin `BookController` and Java `JavaBookAuditController`.
 The macro resolves the external Spring annotation through the dependency
 classpath; agents do not need to materialize the Spring JAR before querying.
 
+Queries may also start from the persisted direct hierarchy posting. Use
+`subtype_of(...)` or its equivalent `implements(...)` spelling; both are
+direct-only and require the same `symbol-id` or `qualified-symbol` values as
+`applies(...)`:
+
+```text
+command spring.repositories() {
+  from subtype_of(qualified-symbol("org.springframework.data.jpa.repository.JpaRepository"))
+  where kind == interface
+  return symbol
+  limit 100
+}
+```
+
+Qualified dependency interfaces resolve through the artifact catalog without
+materializing their declarations. The resulting implementations are ordinary
+JSONL `SelectorRecord`s and can be piped into navigation commands.
+
 ## Result and failure handling
 
 The process exit status is meaningful:

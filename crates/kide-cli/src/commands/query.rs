@@ -8,7 +8,7 @@ use anyhow::Result;
 use kide_core::{
     query_package::{PackageRegistry, PackageSource},
     project_query::ProjectQuery,
-    selector::{records, SelectorPlan, SelectorResult, SelectorState},
+    selector::{records, SelectorResult, SelectorState},
     semantic_query::{execute, QueryResult},
     IndexStore, QueryStatus,
 };
@@ -111,9 +111,7 @@ fn load_with_macros(workspace: &Path, path: &Path) -> Result<ProjectQuery> {
 fn print_records(result: &QueryResult) -> Result<()> {
     let selected = SelectorResult {
         state: result.state,
-        plan: SelectorPlan::AppliedSymbolPosting {
-            applied_symbol: result.plan.starting_symbol.clone(),
-        },
+        plan: result.plan.selector_plan.clone(),
         symbols: result.symbols.clone(),
     };
     for record in records(&selected) {

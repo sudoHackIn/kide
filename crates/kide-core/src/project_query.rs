@@ -91,12 +91,15 @@ impl ProjectQuery {
         let mut predicates = Vec::new();
         let mut limit = None;
         for line in &lines[1..lines.len() - 1] {
-            if let Some(value) = line
-                .strip_prefix("from applies(")
-                .and_then(|value| value.strip_suffix(')'))
-            {
+            if let Some((relation, value)) = parse_from(line) {
                 if from
-                    .replace(QueryFrom::AppliedSymbol(parse_symbol(value)?))
+                    .replace(match relation {
+                        "applies" => QueryFrom::AppliedSymbol(parse_symbol(value)?),
+                        "subtype_of" | "implements" => {
+                            QueryFrom::SubtypeOf(parse_symbol(value)?)
+                        }
+                        _ => unreachable!("parse_from only returns supported relations"),
+                    })
                     .is_some()
                 {
                     return Err(invalid("only one `from` is allowed"));
@@ -115,7 +118,9 @@ impl ProjectQuery {
             }
         }
         let program = QueryProgram {
-            from: from.ok_or_else(|| invalid("`from applies(...)` is required"))?,
+            from: from.ok_or_else(|| {
+                invalid("a bounded `from applies(...)`, `from subtype_of(...)`, or `from implements(...)` relation is required")
+            })?,
             predicates,
             limit: limit.ok_or_else(|| invalid("`limit` is required"))?,
         };
@@ -216,8 +221,18 @@ fn parse_symbol(value: &str) -> Result<QuerySymbol, ProjectQueryError> {
         return Ok(QuerySymbol::QualifiedName(unquote(value)?));
     }
     Err(invalid(
-        "applies accepts `$parameter`, symbol-id(\"…\"), or qualified-symbol(\"…\")",
+        "starting relations accept `$parameter`, symbol-id(\"…\"), or qualified-symbol(\"…\")",
     ))
+}
+
+fn parse_from(line: &str) -> Option<(&str, &str)> {
+    ["applies", "subtype_of", "implements"]
+        .into_iter()
+        .find_map(|relation| {
+            line.strip_prefix(&format!("from {relation}("))
+                .and_then(|value| value.strip_suffix(')'))
+                .map(|value| (relation, value))
+        })
 }
 
 fn parse_predicates(value: &str) -> Result<Vec<QueryPredicate>, ProjectQueryError> {
@@ -279,4 +294,23 @@ fn valid_name(value: &str) -> bool {
 }
 fn invalid(message: impl Into<String>) -> ProjectQueryError {
     ProjectQueryError::Invalid(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_direct_subtype_relation_and_implements_alias() {
+        for relation in ["subtype_of", "implements"] {
+            let query = ProjectQuery::parse(&format!(
+                "command api.implementations(api: qualified-symbol) {{\n  from {relation}($api)\n  where kind == class\n  return symbol\n  limit 25\n}}"
+            ))
+            .expect("parses hierarchy-rooted command");
+            assert_eq!(
+                query.program.from,
+                QueryFrom::SubtypeOf(QuerySymbol::Parameter("api".to_owned()))
+            );
+        }
+    }
 }

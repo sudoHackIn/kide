@@ -20,6 +20,9 @@ pub enum LanguageView {
 pub enum SelectorPredicate {
     Kind(SymbolKind),
     AppliedSymbol(SymbolId),
+    /// Direct persisted `subtype -> supertype` relation. The supertype is the
+    /// key of the bounded reverse-hierarchy posting.
+    SubtypeOf(SymbolId),
     QualifiedNamePrefix(String),
     Language(Language),
     Component(ComponentId),
@@ -36,6 +39,7 @@ pub struct Selector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorPlan {
     AppliedSymbolPosting { applied_symbol: SymbolId },
+    HierarchyPosting { supertype_symbol: SymbolId },
 }
 
 /// A bounded composed application pattern. The names are relations, not
@@ -65,29 +69,57 @@ pub struct SelectorResult {
 
 #[derive(Debug, Error)]
 pub enum SelectorError {
-    #[error("selector requires a resolved annotation predicate to bound its indexed starting set")]
+    #[error("selector requires a resolved indexed relation to bound its starting set")]
     Unbounded,
     #[error("index lookup failed: {0}")]
     Store(#[from] IndexStoreError),
 }
 
-/// Compiles and executes a bounded selector. The resolved applied-symbol posting
-/// is mandatory for this MVP, so evaluation never starts by decoding every
-/// symbol blob. Remaining predicates are applied only to posting candidates.
+/// Compiles and executes a bounded selector. A resolved applied-symbol or
+/// reverse-hierarchy posting is mandatory, so evaluation never starts by
+/// decoding every symbol blob. Remaining predicates apply only to candidates.
 pub fn select(store: &IndexStore, selector: &Selector) -> Result<SelectorResult, SelectorError> {
     let predicates = normalized_predicates(selector);
+    let hierarchy = predicates
+        .iter()
+        .filter_map(|predicate| match predicate {
+            SelectorPredicate::SubtypeOf(symbol) => Some(symbol.clone()),
+            _ => None,
+        })
+        .min_by(|left, right| left.as_str().cmp(right.as_str()));
     let annotation = predicates
         .iter()
         .filter_map(|predicate| match predicate {
             SelectorPredicate::AppliedSymbol(symbol) => Some(symbol.clone()),
             _ => None,
         })
-        .min_by(|left, right| left.as_str().cmp(right.as_str()))
-        .ok_or(SelectorError::Unbounded)?;
-    let plan = SelectorPlan::AppliedSymbolPosting {
-        applied_symbol: annotation.clone(),
+        .min_by(|left, right| left.as_str().cmp(right.as_str()));
+    let (plan, mut symbols) = if let Some(supertype) = hierarchy {
+        let symbols = store
+            .implementations_of(&supertype)?
+            .into_iter()
+            .map(|edge| store.symbol(&edge.subtype))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        (
+            SelectorPlan::HierarchyPosting {
+                supertype_symbol: supertype,
+            },
+            symbols,
+        )
+    } else if let Some(annotation) = annotation {
+        let symbols = store.symbols_with_applied_symbol(&annotation)?;
+        (
+            SelectorPlan::AppliedSymbolPosting {
+                applied_symbol: annotation,
+            },
+            symbols,
+        )
+    } else {
+        return Err(SelectorError::Unbounded);
     };
-    let mut symbols = store.symbols_with_applied_symbol(&annotation)?;
     symbols.retain(|symbol| {
         predicates
             .iter()
@@ -182,6 +214,9 @@ fn matches(symbol: &SymbolRecord, predicate: &SelectorPredicate) -> bool {
     match predicate {
         SelectorPredicate::Kind(kind) => symbol.kind == *kind,
         SelectorPredicate::AppliedSymbol(annotation) => symbol.applied_symbols.contains(annotation),
+        // The reverse hierarchy posting supplies these candidates. The typed
+        // query language permits exactly one starting relation.
+        SelectorPredicate::SubtypeOf(_) => true,
         SelectorPredicate::QualifiedNamePrefix(prefix) => symbol
             .qualified_name
             .as_deref()

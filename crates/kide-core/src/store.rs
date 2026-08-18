@@ -1626,6 +1626,44 @@ mod tests {
     }
 
     #[test]
+    fn semantic_query_starts_from_direct_hierarchy_posting() {
+        let directory = tempdir().expect("temporary index directory");
+        let source = source_unit("sha256:hierarchy-query-v1");
+        let snapshot = snapshot(source.clone());
+        let supertype = snapshot.hierarchy[0].supertype.clone();
+        let expected = snapshot.symbols.clone();
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        store
+            .replace_snapshot(&source, &snapshot)
+            .expect("stores hierarchy");
+
+        let result = crate::semantic_query::execute(
+            &store,
+            &crate::semantic_query::QueryProgram {
+                from: crate::semantic_query::QueryFrom::SubtypeOf(
+                    crate::semantic_query::QuerySymbol::Id(supertype.clone()),
+                ),
+                predicates: vec![crate::semantic_query::QueryPredicate::Kind(
+                    SymbolKind::Class,
+                )],
+                limit: 10,
+            },
+            &crate::semantic_query::QueryParameters::new(),
+        )
+        .expect("executes direct hierarchy posting");
+
+        assert_eq!(result.state, SelectorState::Complete);
+        assert_eq!(result.symbols, expected);
+        assert_eq!(
+            result.plan.selector_plan,
+            crate::selector::SelectorPlan::HierarchyPosting {
+                supertype_symbol: supertype
+            }
+        );
+    }
+
+    #[test]
     fn rejected_snapshot_keeps_the_previous_committed_snapshot() {
         let directory = tempdir().expect("temporary index directory");
         let mut store =
