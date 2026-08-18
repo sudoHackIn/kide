@@ -1647,6 +1647,7 @@ mod tests {
                 predicates: vec![crate::semantic_query::QueryPredicate::Kind(
                     SymbolKind::Class,
                 )],
+                capability_steps: vec![],
                 limit: 10,
             },
             &crate::semantic_query::QueryParameters::new(),
@@ -1886,6 +1887,7 @@ mod tests {
                     crate::semantic_query::QueryString::Literal("demo.Payment".to_owned()),
                 ),
             ],
+            capability_steps: vec![],
             limit: 1,
         };
         let executed = crate::semantic_query::execute(

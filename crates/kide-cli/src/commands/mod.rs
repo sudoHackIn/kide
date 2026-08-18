@@ -13,7 +13,9 @@ use kide_core::QueryStatus;
 
 pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
     match cli.command {
-        Command::Query { args, params } => query::run(&cli.workspace, args, params, human_output),
+        Command::Query { args, params } => {
+            query::run(&cli.workspace, args, params, human_output, cli.verbose)
+        }
         Command::Index {
             path,
             force,

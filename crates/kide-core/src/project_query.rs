@@ -5,11 +5,12 @@ use std::{collections::BTreeMap, fs, path::Path};
 use thiserror::Error;
 
 use crate::{
-    semantic_query::{
-        QueryComponent, QueryFrom, QueryParameters, QueryPredicate, QueryProgram, QueryString,
-        QuerySymbol, QueryValue,
-    },
     ComponentId, Language, SymbolId, SymbolKind,
+    semantic_query::{
+        QueryCapabilityArgument, QueryCapabilityStep, QueryCapabilityValue, QueryComponent,
+        QueryFrom, QueryParameters, QueryPredicate, QueryProgram, QueryString, QuerySymbol,
+        QueryValue,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,15 +90,14 @@ impl ProjectQuery {
         }
         let mut from = None;
         let mut predicates = Vec::new();
+        let mut capability_steps = Vec::new();
         let mut limit = None;
         for line in &lines[1..lines.len() - 1] {
             if let Some((relation, value)) = parse_from(line) {
                 if from
                     .replace(match relation {
                         "applies" => QueryFrom::AppliedSymbol(parse_symbol(value)?),
-                        "subtype_of" | "implements" => {
-                            QueryFrom::SubtypeOf(parse_symbol(value)?)
-                        }
+                        "subtype_of" | "implements" => QueryFrom::SubtypeOf(parse_symbol(value)?),
                         _ => unreachable!("parse_from only returns supported relations"),
                     })
                     .is_some()
@@ -106,6 +106,8 @@ impl ProjectQuery {
                 }
             } else if let Some(value) = line.strip_prefix("where ") {
                 predicates.extend(parse_predicates(value)?);
+            } else if let Some(value) = line.strip_prefix("using capability ") {
+                capability_steps.push(parse_capability_step(value)?);
             } else if *line == "return symbol" {
             } else if let Some(value) = line.strip_prefix("limit ") {
                 limit = Some(
@@ -122,6 +124,7 @@ impl ProjectQuery {
                 invalid("a bounded `from applies(...)`, `from subtype_of(...)`, or `from implements(...)` relation is required")
             })?,
             predicates,
+            capability_steps,
             limit: limit.ok_or_else(|| invalid("`limit` is required"))?,
         };
         Ok(Self {
@@ -275,6 +278,72 @@ fn parse_predicates(value: &str) -> Result<Vec<QueryPredicate>, ProjectQueryErro
         .collect()
 }
 
+fn parse_capability_step(value: &str) -> Result<QueryCapabilityStep, ProjectQueryError> {
+    let (name, arguments) = value
+        .split_once('(')
+        .ok_or_else(|| invalid("capability steps use `name(arguments)`"))?;
+    let arguments = arguments
+        .strip_suffix(')')
+        .ok_or_else(|| invalid("unterminated capability arguments"))?;
+    if !valid_name(name) {
+        return Err(invalid("capability name must be ASCII lower-case dotted"));
+    }
+    let arguments = if arguments.trim().is_empty() {
+        Vec::new()
+    } else {
+        arguments
+            .split(',')
+            .map(|argument| {
+                let (name, value) = argument
+                    .trim()
+                    .split_once('=')
+                    .ok_or_else(|| invalid("capability arguments use `name=value`"))?;
+                let name = name.trim();
+                if !valid_name(name) || name.contains('.') {
+                    return Err(invalid("capability argument name must be ASCII lower-case"));
+                }
+                Ok(QueryCapabilityArgument {
+                    name: name.to_owned(),
+                    value: parse_capability_value(value.trim())?,
+                })
+            })
+            .collect::<Result<Vec<_>, ProjectQueryError>>()?
+    };
+    Ok(QueryCapabilityStep {
+        name: name.to_owned(),
+        arguments,
+    })
+}
+
+fn parse_capability_value(value: &str) -> Result<QueryCapabilityValue, ProjectQueryError> {
+    if let Some(name) = value.strip_prefix('$') {
+        return Ok(QueryCapabilityValue::Parameter(name.to_owned()));
+    }
+    if let Some(value) = value
+        .strip_prefix("symbol-id(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Ok(QueryCapabilityValue::SymbolId(SymbolId::new(unquote(
+            value,
+        )?)));
+    }
+    if let Some(value) = value
+        .strip_prefix("component-id(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Ok(QueryCapabilityValue::ComponentId(ComponentId::new(
+            unquote(value)?,
+        )));
+    }
+    if value.starts_with('"') {
+        return Ok(QueryCapabilityValue::String(unquote(value)?));
+    }
+    value
+        .parse::<i64>()
+        .map(QueryCapabilityValue::Integer)
+        .map_err(|_| invalid("unsupported capability argument value"))
+}
+
 fn unquote(value: &str) -> Result<String, ProjectQueryError> {
     value
         .trim()
@@ -312,5 +381,15 @@ mod tests {
                 QueryFrom::SubtypeOf(QuerySymbol::Parameter("api".to_owned()))
             );
         }
+    }
+
+    #[test]
+    fn parses_explicit_capability_refinement() {
+        let query = ProjectQuery::parse(
+            "command api.children(api: symbol-id) {\n  from subtype_of($api)\n  using capability hierarchy.direct(supertype=$api)\n  return symbol\n  limit 25\n}",
+        )
+        .expect("parses capability step");
+        assert_eq!(query.program.capability_steps.len(), 1);
+        assert_eq!(query.program.capability_steps[0].name, "hierarchy.direct");
     }
 }

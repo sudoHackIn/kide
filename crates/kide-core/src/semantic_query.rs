@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 use crate::{
-    selector::{select, Selector, SelectorError, SelectorPredicate, SelectorState},
     ComponentId, IndexStore, IndexStoreError, Language, SymbolId, SymbolKind, SymbolRecord,
+    selector::{Selector, SelectorError, SelectorPredicate, SelectorState, select},
 };
 
 /// Core policy cap. Packages may request lower limits, never a larger result
@@ -22,7 +22,31 @@ pub const MAX_RESULT_LIMIT: u32 = 1_000;
 pub struct QueryProgram {
     pub from: QueryFrom,
     pub predicates: Vec<QueryPredicate>,
+    /// Explicit worker-backed refinement steps. Package requirements alone do
+    /// not cause a worker call; a selected DSL path must name the capability.
+    pub capability_steps: Vec<QueryCapabilityStep>,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCapabilityStep {
+    pub name: String,
+    pub arguments: Vec<QueryCapabilityArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryCapabilityArgument {
+    pub name: String,
+    pub value: QueryCapabilityValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryCapabilityValue {
+    Parameter(String),
+    SymbolId(SymbolId),
+    ComponentId(ComponentId),
+    String(String),
+    Integer(i64),
 }
 
 /// v1 requires an indexed positive starting relation.
@@ -284,6 +308,7 @@ mod tests {
         let program = QueryProgram {
             from: QueryFrom::AppliedSymbol(QuerySymbol::Id(SymbolId::new("annotation"))),
             predicates: Vec::new(),
+            capability_steps: Vec::new(),
             limit: MAX_RESULT_LIMIT + 1,
         };
         assert_eq!(program.limit, 1_001);

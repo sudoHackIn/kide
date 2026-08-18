@@ -145,7 +145,10 @@ pub(super) fn index(
     Ok(QueryStatus::Ok)
 }
 
-fn kotlin_worker_installation(workspace: &Path, verbosity: u8) -> Result<WorkerInstallation> {
+pub(super) fn kotlin_worker_installation(
+    workspace: &Path,
+    verbosity: u8,
+) -> Result<WorkerInstallation> {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let worker = repository.join("workers/kotlin-jvm");
     let executable = worker.join("build/install/kide-kotlin-jvm-worker/bin/kide-kotlin-jvm-worker");
