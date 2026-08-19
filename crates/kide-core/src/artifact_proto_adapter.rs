@@ -89,7 +89,8 @@ pub fn decode_symbol_postings(
         .into_iter()
         .map(|posting| {
             let mut symbol = posting.symbol.ok_or(ArtifactProtoError::LengthMismatch)?;
-            symbol.provenance_index = Some(0);
+            // A posting inherits its descriptor's snapshot provenance.
+            symbol.provenance_index = None;
             let snapshot = decode_snapshot(artifact_proto::GraphSnapshot {
                 source_unit: Some(source_unit(worker_proto_adapter::source_unit(
                     descriptor_source,
@@ -102,6 +103,7 @@ pub fn decode_symbol_postings(
                 }],
                 symbols: vec![symbol],
                 completeness: "partial".to_owned(),
+                provenance_index: Some(0),
                 ..Default::default()
             })?;
             snapshot
@@ -156,7 +158,7 @@ pub fn decode_symbol_detail(
         freshness: detail.freshness.clone().unwrap_or(defaults.freshness),
         completeness: detail.completeness.clone().unwrap_or(defaults.completeness),
         component_id: detail.component_id.clone().unwrap_or(defaults.component_id),
-        provenance_index: Some(0),
+        provenance_index: None,
     };
     let snapshot = decode_snapshot(artifact_proto::GraphSnapshot {
         source_unit: Some(source_unit),
@@ -182,13 +184,13 @@ fn snapshot(
         structural_fingerprint: proto.structural_fingerprint,
         public_api_fingerprint: proto.public_api_fingerprint,
         provenances: proto.provenances.into_iter().map(provenance).collect(),
-        symbols: proto.symbols.into_iter().map(symbol).collect(),
-        occurrences: proto.occurrences.into_iter().map(occurrence).collect(),
+        symbols: proto.symbols.into_iter().map(|value| symbol(value, proto.provenance_index)).collect(),
+        occurrences: proto.occurrences.into_iter().map(|value| occurrence(value, proto.provenance_index)).collect(),
         references: proto.references.into_iter().map(reference).collect(),
         calls: proto.calls.into_iter().map(call).collect(),
-        hierarchy: proto.hierarchy.into_iter().map(hierarchy).collect(),
-        types: proto.types.into_iter().map(ty).collect(),
-        diagnostics: proto.diagnostics.into_iter().map(diagnostic).collect(),
+        hierarchy: proto.hierarchy.into_iter().map(|value| hierarchy(value, proto.provenance_index)).collect(),
+        types: proto.types.into_iter().map(|value| ty(value, proto.provenance_index)).collect(),
+        diagnostics: proto.diagnostics.into_iter().map(|value| diagnostic(value, proto.provenance_index)).collect(),
         completeness: proto.completeness,
         provenance_index: Some(proto.provenance_index),
     })
@@ -197,6 +199,9 @@ fn snapshot(
 fn decode_snapshot(
     value: artifact_proto::GraphSnapshot,
 ) -> Result<FileAnalysisSnapshot, ArtifactProtoError> {
+    let snapshot_provenance_index = value
+        .provenance_index
+        .ok_or(ArtifactProtoError::LengthMismatch)?;
     worker_proto_adapter::decode_file_analysis_snapshot(worker_proto::FileAnalysisSnapshot {
         source_unit: value.source_unit.map(decode_source_unit),
         structural_fingerprint: value.structural_fingerprint,
@@ -206,24 +211,24 @@ fn decode_snapshot(
             .into_iter()
             .map(decode_provenance)
             .collect(),
-        symbols: value.symbols.into_iter().map(decode_symbol).collect(),
+        symbols: value.symbols.into_iter().map(|symbol| decode_symbol(symbol, snapshot_provenance_index)).collect(),
         applications: vec![],
         occurrences: value
             .occurrences
             .into_iter()
-            .map(decode_occurrence)
+            .map(|occurrence| decode_occurrence(occurrence, snapshot_provenance_index))
             .collect(),
         references: value.references.into_iter().map(decode_reference).collect(),
         calls: value.calls.into_iter().map(decode_call).collect(),
-        hierarchy: value.hierarchy.into_iter().map(decode_hierarchy).collect(),
-        types: value.types.into_iter().map(decode_type).collect(),
+        hierarchy: value.hierarchy.into_iter().map(|edge| decode_hierarchy(edge, snapshot_provenance_index)).collect(),
+        types: value.types.into_iter().map(|record| decode_type(record, snapshot_provenance_index)).collect(),
         diagnostics: value
             .diagnostics
             .into_iter()
-            .map(decode_diagnostic)
+            .map(|diagnostic| decode_diagnostic(diagnostic, snapshot_provenance_index))
             .collect(),
         completeness: value.completeness,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: snapshot_provenance_index,
     })
     .map_err(Into::into)
 }
@@ -290,7 +295,11 @@ fn decode_location(value: artifact_proto::ArtifactLocation) -> worker_proto::Sou
         range: value.range.map(decode_range),
     }
 }
-fn symbol(value: worker_proto::SymbolDeclaration) -> artifact_proto::ArtifactSymbol {
+fn inherited_provenance_index(value: u32, snapshot: u32) -> Option<u32> {
+    (value != snapshot).then_some(value)
+}
+
+fn symbol(value: worker_proto::SymbolDeclaration, snapshot_provenance_index: u32) -> artifact_proto::ArtifactSymbol {
     artifact_proto::ArtifactSymbol {
         id: value.id,
         backend_key: value.backend_key,
@@ -308,14 +317,14 @@ fn symbol(value: worker_proto::SymbolDeclaration) -> artifact_proto::ArtifactSym
         freshness: value.freshness,
         completeness: value.completeness,
         component_id: value.component_id,
-        provenance_index: Some(value.provenance_index),
+        provenance_index: inherited_provenance_index(value.provenance_index, snapshot_provenance_index),
     }
 }
-fn decode_symbol(value: artifact_proto::ArtifactSymbol) -> worker_proto::SymbolDeclaration {
+fn decode_symbol(value: artifact_proto::ArtifactSymbol, snapshot_provenance_index: u32) -> worker_proto::SymbolDeclaration {
     worker_proto::SymbolDeclaration {
         id: value.id,
         source_unit_index: 0,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: value.provenance_index.unwrap_or(snapshot_provenance_index),
         backend_key: value.backend_key,
         backend_schema_version: value.backend_schema_version,
         language: value.language,
@@ -333,7 +342,7 @@ fn decode_symbol(value: artifact_proto::ArtifactSymbol) -> worker_proto::SymbolD
         component_id: value.component_id,
     }
 }
-fn occurrence(value: worker_proto::Occurrence) -> artifact_proto::ArtifactOccurrence {
+fn occurrence(value: worker_proto::Occurrence, snapshot_provenance_index: u32) -> artifact_proto::ArtifactOccurrence {
     artifact_proto::ArtifactOccurrence {
         location: value.location.map(location),
         kind: value.kind,
@@ -343,10 +352,10 @@ fn occurrence(value: worker_proto::Occurrence) -> artifact_proto::ArtifactOccurr
         precision: value.precision,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: Some(value.provenance_index),
+        provenance_index: inherited_provenance_index(value.provenance_index, snapshot_provenance_index),
     }
 }
-fn decode_occurrence(value: artifact_proto::ArtifactOccurrence) -> worker_proto::Occurrence {
+fn decode_occurrence(value: artifact_proto::ArtifactOccurrence, snapshot_provenance_index: u32) -> worker_proto::Occurrence {
     worker_proto::Occurrence {
         location: value.location.map(decode_location),
         kind: value.kind,
@@ -356,7 +365,7 @@ fn decode_occurrence(value: artifact_proto::ArtifactOccurrence) -> worker_proto:
         precision: value.precision,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: value.provenance_index.unwrap_or(snapshot_provenance_index),
     }
 }
 fn reference(value: worker_proto::ReferenceEdge) -> artifact_proto::ArtifactReference {
@@ -389,23 +398,23 @@ fn decode_call(value: artifact_proto::ArtifactCall) -> worker_proto::CallEdge {
         precision: value.precision,
     }
 }
-fn hierarchy(value: worker_proto::HierarchyEdge) -> artifact_proto::ArtifactHierarchy {
+fn hierarchy(value: worker_proto::HierarchyEdge, snapshot_provenance_index: u32) -> artifact_proto::ArtifactHierarchy {
     artifact_proto::ArtifactHierarchy {
         subtype_symbol_id: value.subtype_symbol_id,
         supertype_symbol_id: value.supertype_symbol_id,
         precision: value.precision,
-        provenance_index: Some(value.provenance_index),
+        provenance_index: inherited_provenance_index(value.provenance_index, snapshot_provenance_index),
     }
 }
-fn decode_hierarchy(value: artifact_proto::ArtifactHierarchy) -> worker_proto::HierarchyEdge {
+fn decode_hierarchy(value: artifact_proto::ArtifactHierarchy, snapshot_provenance_index: u32) -> worker_proto::HierarchyEdge {
     worker_proto::HierarchyEdge {
         subtype_symbol_id: value.subtype_symbol_id,
         supertype_symbol_id: value.supertype_symbol_id,
         precision: value.precision,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: value.provenance_index.unwrap_or(snapshot_provenance_index),
     }
 }
-fn ty(value: worker_proto::TypeRecord) -> artifact_proto::ArtifactType {
+fn ty(value: worker_proto::TypeRecord, snapshot_provenance_index: u32) -> artifact_proto::ArtifactType {
     artifact_proto::ArtifactType {
         id: value.id,
         language: value.language,
@@ -414,10 +423,10 @@ fn ty(value: worker_proto::TypeRecord) -> artifact_proto::ArtifactType {
         backend_schema_version: value.backend_schema_version,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: Some(value.provenance_index),
+        provenance_index: inherited_provenance_index(value.provenance_index, snapshot_provenance_index),
     }
 }
-fn decode_type(value: artifact_proto::ArtifactType) -> worker_proto::TypeRecord {
+fn decode_type(value: artifact_proto::ArtifactType, snapshot_provenance_index: u32) -> worker_proto::TypeRecord {
     worker_proto::TypeRecord {
         id: value.id,
         language: value.language,
@@ -426,10 +435,10 @@ fn decode_type(value: artifact_proto::ArtifactType) -> worker_proto::TypeRecord 
         backend_schema_version: value.backend_schema_version,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: value.provenance_index.unwrap_or(snapshot_provenance_index),
     }
 }
-fn diagnostic(value: worker_proto::Diagnostic) -> artifact_proto::ArtifactDiagnostic {
+fn diagnostic(value: worker_proto::Diagnostic, snapshot_provenance_index: u32) -> artifact_proto::ArtifactDiagnostic {
     artifact_proto::ArtifactDiagnostic {
         source_unit_index: value.source_unit_index,
         range: value.range.map(range),
@@ -438,10 +447,10 @@ fn diagnostic(value: worker_proto::Diagnostic) -> artifact_proto::ArtifactDiagno
         message: value.message,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: Some(value.provenance_index),
+        provenance_index: inherited_provenance_index(value.provenance_index, snapshot_provenance_index),
     }
 }
-fn decode_diagnostic(value: artifact_proto::ArtifactDiagnostic) -> worker_proto::Diagnostic {
+fn decode_diagnostic(value: artifact_proto::ArtifactDiagnostic, snapshot_provenance_index: u32) -> worker_proto::Diagnostic {
     worker_proto::Diagnostic {
         source_unit_index: value.source_unit_index,
         range: value.range.map(decode_range),
@@ -450,6 +459,61 @@ fn decode_diagnostic(value: artifact_proto::ArtifactDiagnostic) -> worker_proto:
         message: value.message,
         freshness: value.freshness,
         completeness: value.completeness,
-        provenance_index: value.provenance_index.unwrap_or(0),
+        provenance_index: value.provenance_index.unwrap_or(snapshot_provenance_index),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+
+    use super::*;
+
+    fn graph(provenance_index: Option<u32>) -> artifact_proto::GraphArtifact {
+        artifact_proto::GraphArtifact {
+            snapshots: vec![artifact_proto::GraphSnapshot {
+                source_unit: Some(artifact_proto::ArtifactSourceUnit {
+                    id: "jvm:sha256:fixture".into(), component: "fixture:main".into(),
+                    path: ".kide/dependencies/fixture.jar".into(), language: "java".into(),
+                    origin: "dependency".into(), content_fingerprint: "sha256:fixture".into(),
+                    context_fingerprint: "sha256:context".into(),
+                }),
+                provenances: vec![artifact_proto::ArtifactProvenance {
+                    backend: "fixture".into(), backend_version: "1".into(),
+                    worker_protocol_version: 1, analysis_options_fingerprint: "sha256:options".into(),
+                }],
+                symbols: (0..512).map(|ordinal| artifact_proto::ArtifactSymbol {
+                    id: format!("java:fixture.Symbol{ordinal}"), backend_key: format!("fixture.Symbol{ordinal}"),
+                    backend_schema_version: 1, language: "java".into(), kind: "class".into(),
+                    name: format!("Symbol{ordinal}"), qualified_name: Some(format!("fixture.Symbol{ordinal}")),
+                    declaration: Some(artifact_proto::ArtifactRange { start: ordinal, end: ordinal + 1 }),
+                    name_range: Some(artifact_proto::ArtifactRange { start: ordinal, end: ordinal + 1 }),
+                    freshness: "fresh".into(), completeness: "complete".into(), component_id: "fixture:main".into(),
+                    provenance_index, ..Default::default()
+                }).collect(),
+                completeness: "complete".into(), provenance_index: Some(0), ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn dependency_facts_inherit_snapshot_provenance_and_shrink_graph_bytes() {
+        let compact = graph(None);
+        let redundant = graph(Some(0));
+
+        let compact_bytes = compact.encode_to_vec();
+        let redundant_bytes = redundant.encode_to_vec();
+        assert!(compact_bytes.len() < redundant_bytes.len());
+        eprintln!(
+            "artifact provenance compaction: {} -> {} bytes ({:.1}% smaller)",
+            redundant_bytes.len(),
+            compact_bytes.len(),
+            (1.0 - compact_bytes.len() as f64 / redundant_bytes.len() as f64) * 100.0,
+        );
+        assert!(redundant_bytes.len() - compact_bytes.len() >= 1_000, "compact={} redundant={}", compact_bytes.len(), redundant_bytes.len());
+
+        let decoded = decode_graph_artifact(compact).expect("compact graph decodes");
+        assert!(decoded[0].symbols.iter().all(|symbol| symbol.provenance == decoded[0].provenance));
+        assert_eq!(decode_graph_artifact(redundant).expect("explicit overrides decode"), decoded);
     }
 }

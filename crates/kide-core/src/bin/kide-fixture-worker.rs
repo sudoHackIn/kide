@@ -130,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             analysis_options_fingerprint: "sha256:fixture".into(),
                         }],
                         completeness: "partial".into(),
+                        provenance_index: Some(0),
                         ..Default::default()
                     }],
                 })
