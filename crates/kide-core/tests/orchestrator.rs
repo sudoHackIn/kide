@@ -2,10 +2,12 @@ use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
     cache_catalog_artifact, index_batch, index_batch_with_artifact_cache_and_provenance,
-    materialize_catalog_artifact, ArtifactBlobCache, ArtifactBlobKey, ArtifactDescriptor,
-    BuildSystem, Component, ComponentId, Fingerprint, IndexStore, Language, MaterializationBudget,
-    MaterializationOutcome, ProjectManifest, Provenance, SourceOrigin, SourceUnit, SourceUnitId,
-    WorkerLaunch, WorkerSupervisor, WorkspaceId, WorkspacePath,
+    index_selected_batches, materialize_catalog_artifact, ArtifactBlobCache, ArtifactBlobKey,
+    ArtifactDescriptor, BuildSystem, Component, ComponentId, DiscoveredWorker, Fingerprint,
+    IndexStore, Language, MaterializationBudget, MaterializationOutcome, ProjectManifest,
+    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkerBatch, WorkerCapabilities,
+    WorkerCapability, WorkerIdentity, WorkerInstallation, WorkerLaunch, WorkerSelection,
+    WorkerSupervisor, WorkspaceId, WorkspacePath,
 };
 use tempfile::tempdir;
 
@@ -29,6 +31,45 @@ fn indexes_a_cold_batch_then_reuses_unchanged_snapshots() {
     assert_eq!(second.analyzed, 0);
     assert_eq!(second.reused, 2);
     assert_eq!(second.worker_starts, 0);
+}
+
+#[test]
+fn selected_source_shards_reuse_one_worker_for_an_index_run() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let manifest = manifest();
+    let worker = discovered_worker(launch());
+    let selection = WorkerSelection {
+        batches: vec![
+            WorkerBatch {
+                worker: worker.clone(),
+                component: ComponentId::new("fixture:main"),
+                language: Language::Kotlin,
+                source_units: vec![source("One.kt", "sha256:one")],
+            },
+            WorkerBatch {
+                worker,
+                component: ComponentId::new("fixture:main"),
+                language: Language::Kotlin,
+                source_units: vec![source("Two.kt", "sha256:two")],
+            },
+        ],
+        unsupported: Vec::new(),
+    };
+
+    let run = index_selected_batches(
+        &mut store,
+        &manifest,
+        &[
+            source("One.kt", "sha256:one"),
+            source("Two.kt", "sha256:two"),
+        ],
+        &selection,
+    )
+    .expect("indexes selected shards");
+
+    assert_eq!(run.analyzed, 2);
+    assert_eq!(run.worker_starts, 1);
 }
 
 #[test]
@@ -317,6 +358,29 @@ fn launch() -> WorkerLaunch {
     launch.idle_timeout = Duration::from_millis(10);
     launch.request_timeout = Duration::from_secs(2);
     launch
+}
+
+fn discovered_worker(launch: WorkerLaunch) -> DiscoveredWorker {
+    DiscoveredWorker {
+        installation: WorkerInstallation {
+            name: "fixture".to_owned(),
+            launch,
+            build_systems: vec![BuildSystem::Filesystem],
+        },
+        capabilities: WorkerCapabilities {
+            identity: WorkerIdentity {
+                backend: "kide-fixture-worker".to_owned(),
+                backend_version: "0.1.0".to_owned(),
+            },
+            protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
+            languages: vec![Language::Kotlin],
+            capabilities: vec![
+                WorkerCapability::Handshake,
+                WorkerCapability::FileAnalysisSnapshot,
+            ],
+            semantic_query_capabilities: Vec::new(),
+        },
+    }
 }
 
 fn materializing_launch() -> WorkerLaunch {

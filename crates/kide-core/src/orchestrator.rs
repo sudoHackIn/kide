@@ -65,10 +65,11 @@ pub enum IndexOrchestratorError {
     },
 }
 
-/// Applies one global invalidation plan, then runs each selected cold worker
-/// only for its component/language batch.  The global plan is important: a
-/// per-batch invalidation pass would incorrectly delete another language's
-/// persisted source units.
+/// Applies one global invalidation plan, then runs each selected worker for
+/// its component/language batch. Identical worker launches stay alive for the
+/// duration of this index run, avoiding a JVM cold start for every source
+/// shard. The global plan is important: a per-batch invalidation pass would
+/// incorrectly delete another language's persisted source units.
 pub fn index_selected_batches(
     store: &mut IndexStore,
     manifest: &ProjectManifest,
@@ -107,6 +108,10 @@ pub fn index_selected_batches(
             }
         }
     }
+    // A worker is disposable at the boundary of an index run, but reuse it
+    // within that run. This keeps memory bounded while making a cold index
+    // with many source shards pay the JVM startup cost only once per launch.
+    let mut supervisors = Vec::<(WorkerLaunch, WorkerSupervisor)>::new();
     for (index, batch) in selection.batches.iter().enumerate() {
         let requested = batch
             .source_units
@@ -117,19 +122,53 @@ pub fn index_selected_batches(
         if requested.is_empty() {
             continue;
         }
-        analyze_selected_batch(store, manifest, batch, requested, index, &mut run)?;
+        let supervisor = if let Some(position) = supervisors
+            .iter()
+            .position(|(launch, _)| launch == &batch.worker.installation.launch)
+        {
+            &mut supervisors[position].1
+        } else {
+            supervisors.push((
+                batch.worker.installation.launch.clone(),
+                WorkerSupervisor::new(batch.worker.installation.launch.clone()),
+            ));
+            &mut supervisors
+                .last_mut()
+                .expect("a supervisor was just added")
+                .1
+        };
+        analyze_selected_batch(
+            store, manifest, batch, requested, index, supervisor, &mut run,
+        )?;
     }
     if !reanalyze.is_empty() {
         let catalog_batch = selection
             .batches
             .first()
             .expect("a supported selection has at least one batch");
-        let mut supervisor =
-            WorkerSupervisor::new(catalog_batch.worker.installation.launch.clone());
-        supervisor.handshake("index-dependency-catalog")?;
-        index_dependency_catalog(store, &mut supervisor)?;
-        run.worker_starts += supervisor.start_count();
+        let supervisor = if let Some(position) = supervisors
+            .iter()
+            .position(|(launch, _)| launch == &catalog_batch.worker.installation.launch)
+        {
+            &mut supervisors[position].1
+        } else {
+            supervisors.push((
+                catalog_batch.worker.installation.launch.clone(),
+                WorkerSupervisor::new(catalog_batch.worker.installation.launch.clone()),
+            ));
+            let supervisor = &mut supervisors
+                .last_mut()
+                .expect("a supervisor was just added")
+                .1;
+            supervisor.handshake("index-dependency-catalog")?;
+            supervisor
+        };
+        index_dependency_catalog(store, supervisor)?;
     }
+    run.worker_starts = supervisors
+        .iter()
+        .map(|(_, supervisor)| supervisor.start_count())
+        .sum();
     store.put_manifest(manifest)?;
     Ok(run)
 }
@@ -140,21 +179,25 @@ fn analyze_selected_batch(
     batch: &WorkerBatch,
     requested: Vec<SourceUnit>,
     batch_index: usize,
+    supervisor: &mut WorkerSupervisor,
     run: &mut IndexRun,
 ) -> Result<(), IndexOrchestratorError> {
-    let mut supervisor = WorkerSupervisor::new(batch.worker.installation.launch.clone());
-    let handshake = supervisor.handshake(format!("index-handshake-{batch_index}"))?;
-    let compatible = handshake.capabilities.languages.contains(&batch.language)
-        && handshake
-            .capabilities
-            .capabilities
-            .contains(&WorkerCapability::FileAnalysisSnapshot);
-    if !compatible {
-        return Err(IndexOrchestratorError::WorkerNoLongerCompatible {
-            worker: batch.worker.installation.name.clone(),
-            component: batch.component.as_str().to_owned(),
-            language: batch.language.clone(),
-        });
+    // `is_running` also reaps an exited or idle process. A restarted worker
+    // must handshake again before it can receive a batch.
+    if !supervisor.is_running() {
+        let handshake = supervisor.handshake(format!("index-handshake-{batch_index}"))?;
+        let compatible = handshake.capabilities.languages.contains(&batch.language)
+            && handshake
+                .capabilities
+                .capabilities
+                .contains(&WorkerCapability::FileAnalysisSnapshot);
+        if !compatible {
+            return Err(IndexOrchestratorError::WorkerNoLongerCompatible {
+                worker: batch.worker.installation.name.clone(),
+                component: batch.component.as_str().to_owned(),
+                language: batch.language.clone(),
+            });
+        }
     }
     let response = supervisor.request(WorkerEnvelope::new(
         format!("index-batch-{batch_index}"),
@@ -182,7 +225,6 @@ fn analyze_selected_batch(
         store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
         run.analyzed += 1;
     }
-    run.worker_starts += supervisor.start_count();
     Ok(())
 }
 
