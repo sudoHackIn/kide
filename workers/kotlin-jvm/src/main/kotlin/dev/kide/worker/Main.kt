@@ -13,7 +13,7 @@ import kotlinx.serialization.json.put
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-/** Worker-local artifact location. Paths never cross the worker protocol. */
+/** Run-local resolved artifact. Its path crosses only as an opaque locator. */
 internal data class ResolvedJvmArtifact(val path: Path, val component: String, val context: String) {
     val cursor: String get() = path.toAbsolutePath().normalize().toString()
 }
@@ -114,7 +114,14 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
             val maxArtifacts = discoveryRequest.maxArtifacts
             if (maxArtifacts !in 1..64) return unsupported(request.requestId, "max_artifacts must be between 1 and 64")
             try {
-                val json = artifactDescriptors(resolveWorkspacePath(workspaceRoot), maxArtifacts, if (discoveryRequest.hasCursor()) discoveryRequest.cursor else null)
+                val json = artifactDescriptors(
+                    resolveWorkspacePath(workspaceRoot),
+                    maxArtifacts,
+                    if (discoveryRequest.hasCursor()) discoveryRequest.cursor else null,
+                    discoveryRequest.artifactCandidatesList.map { candidate ->
+                        ResolvedJvmArtifact(Path.of(candidate.locator), candidate.componentId, candidate.contextFingerprint)
+                    },
+                )
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder().addAllArtifacts(json["artifacts"]!!.jsonArray.map { ProtobufArtifactDiscoveryAdapter.descriptor(it.jsonObject) }).apply { json["next_cursor"]?.jsonPrimitive?.contentOrNull?.let(::setNextCursor) }).build()
             } catch (error: Exception) {
@@ -187,8 +194,13 @@ internal fun artifactBatch(workspaceRoot: Path, maxArtifacts: Int, cursor: Strin
     put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
 }
 
-internal fun artifactDescriptors(workspaceRoot: Path, maxArtifacts: Int, cursor: String?) = buildJsonObject {
-    val artifacts = resolvedArtifacts(workspaceRoot)
+internal fun artifactDescriptors(
+    workspaceRoot: Path,
+    maxArtifacts: Int,
+    cursor: String?,
+    artifactCandidates: List<ResolvedJvmArtifact> = emptyList(),
+) = buildJsonObject {
+    val artifacts = artifactCandidates.ifEmpty { resolvedArtifacts(workspaceRoot) }
     val start = cursor?.let { previous -> artifacts.indexOfFirst { it.cursor == previous }.takeIf { it >= 0 }?.plus(1)
         ?: error("artifact cursor is not valid for this workspace") } ?: 0
     val batch = artifacts.drop(start).take(maxArtifacts)
@@ -214,6 +226,9 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
     if (language == "java") return buildJsonObject {
         put("snapshots", buildJsonArray { JavaSemanticExtractor.analyze(sourceUnits, workspaceRoot).forEach(::add) })
         put("timings", buildJsonArray { JavaSemanticExtractor.consumeTimings().forEach { (phase, elapsed) -> add(buildJsonObject { put("phase", phase); put("elapsed_millis", elapsed) }) } })
+        put("artifact_candidates", buildJsonArray { JavaSemanticExtractor.artifactCandidates().forEach { candidate ->
+            add(buildJsonObject { put("locator", candidate.path.toString()); put("component", candidate.component); put("context", candidate.context) })
+        } })
     }
     require(language == "kotlin") { "kide-kotlin-jvm does not support $language source units" }
     return buildJsonObject { KotlinStructuralExtractor().use { extractor ->

@@ -39,8 +39,10 @@ import kotlinx.serialization.json.put
  */
 internal object JavaSemanticExtractor {
     private var lastTimings: List<Pair<String, Long>> = emptyList()
+    private var lastArtifactCandidates: List<ResolvedJvmArtifact> = emptyList()
     private var stagingMillis: Long = 0
     fun consumeTimings(): List<Pair<String, Long>> = lastTimings.also { lastTimings = emptyList() }
+    fun artifactCandidates(): List<ResolvedJvmArtifact> = lastArtifactCandidates.also { lastArtifactCandidates = emptyList() }
     /**
      * A worker serves requests sequentially. Keep compiled sibling sources for
      * its lifetime so a cold index pays one full-module javac pass rather than
@@ -63,6 +65,11 @@ internal object JavaSemanticExtractor {
         val importStarted = System.nanoTime()
         val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot, projectContext)
         timings += "context_import" to (System.nanoTime() - importStarted) / 1_000_000
+        lastArtifactCandidates = contexts.flatMap { context ->
+            context.classpath.map { path -> ResolvedJvmArtifact(path, context.component, context.artifactContext) }
+        }.filter { candidate -> candidate.context.isNotEmpty() }
+            .distinctBy { candidate -> candidate.path.toAbsolutePath().normalize() }
+            .sortedBy { candidate -> candidate.path.toString() }
         val sourceIdentities = sourceIdentities(selected, contexts, workspaceRoot)
         val analyzeStarted = System.nanoTime()
         return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard -> analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities) }

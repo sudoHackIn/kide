@@ -144,6 +144,7 @@ message SymbolDeclaration {
 message AnalysisBatchResponse {
   repeated FileAnalysisSnapshot snapshots = 1;
   repeated PhaseTiming timings = 2;
+  repeated ArtifactCandidate artifact_candidates = 3;
 }
 message PhaseTiming {
   string phase = 1;
@@ -255,6 +256,14 @@ message ArtifactDiscoveryRequest {
   string workspace_root = 1;
   uint32 max_artifacts = 2;
   optional string cursor = 3;
+  repeated ArtifactCandidate artifact_candidates = 4;
+}
+// Run-local location from a build/source worker. It is never persistent Core
+// state and lets an artifact worker read the JAR without re-importing Maven.
+message ArtifactCandidate {
+  string locator = 1;
+  string component_id = 2;
+  string context_fingerprint = 3;
 }
 message ArtifactDescriptor {
   string source_unit_id = 1;

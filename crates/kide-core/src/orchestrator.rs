@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
-    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
     ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
     IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
     WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
@@ -137,6 +137,7 @@ pub fn index_selected_batches(
     // within that run. This keeps memory bounded while making a cold index
     // with many source shards pay the JVM startup cost only once per launch.
     let mut supervisors = Vec::<(WorkerLaunch, WorkerSupervisor)>::new();
+    let mut artifact_candidates = BTreeMap::new();
     for (index, batch) in selection.batches.iter().enumerate() {
         let requested = batch
             .source_units
@@ -163,7 +164,7 @@ pub fn index_selected_batches(
                 .1
         };
         analyze_selected_batch(
-            store, manifest, batch, requested, index, supervisor, &mut run,
+            store, manifest, batch, requested, index, supervisor, &mut run, &mut artifact_candidates,
         )?;
     }
     if !reanalyze.is_empty() {
@@ -189,7 +190,7 @@ pub fn index_selected_batches(
             supervisor
         };
         let catalog_started = Instant::now();
-        index_dependency_catalog(store, supervisor)?;
+        index_dependency_catalog(store, supervisor, artifact_candidates.into_values().collect())?;
         run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     }
     run.worker_starts = supervisors
@@ -208,6 +209,7 @@ fn analyze_selected_batch(
     batch_index: usize,
     supervisor: &mut WorkerSupervisor,
     run: &mut IndexRun,
+    artifact_candidates: &mut BTreeMap<String, ArtifactCandidate>,
 ) -> Result<(), IndexOrchestratorError> {
     // `is_running` also reaps an exited or idle process. A restarted worker
     // must handshake again before it can receive a batch.
@@ -259,6 +261,9 @@ fn analyze_selected_batch(
             received: Box::new(response.message),
         });
     };
+    for candidate in &response.artifact_candidates {
+        artifact_candidates.entry(candidate.locator.clone()).or_insert_with(|| candidate.clone());
+    }
     let snapshots = validate_batch(&requested, response.snapshots)?;
     let mut worker_phases = BTreeMap::new();
     for timing in response.timings {
@@ -596,7 +601,7 @@ fn index_batch_with_optional_cache(
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
     let catalog_started = Instant::now();
-    index_dependency_catalog(store, &mut supervisor)?;
+    index_dependency_catalog(store, &mut supervisor, response.artifact_candidates.clone())?;
     run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
@@ -651,6 +656,7 @@ fn index_batch_with_optional_cache(
 fn index_dependency_catalog(
     store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
+    artifact_candidates: Vec<ArtifactCandidate>,
 ) -> Result<(), IndexOrchestratorError> {
     let mut cursor = None;
     let mut page = 0_u64;
@@ -662,6 +668,7 @@ fn index_dependency_catalog(
                 workspace_root: WorkspacePath::new("."),
                 max_artifacts: 64,
                 cursor: cursor.clone(),
+                artifact_candidates: artifact_candidates.clone(),
             }),
         ))?;
         let WorkerMessage::ArtifactDiscoveryResponse(response) = response.message else {

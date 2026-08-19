@@ -94,6 +94,8 @@
           "analysis_options": "sha256:default"
         }
       }
-    ]
+    ],
+    "timings": [],
+    "artifact_candidates": []
   }
 }

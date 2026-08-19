@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApplicationFact, CallEdge, Completeness, DiagnosticRecord, Fingerprint, HierarchyEdge,
+    ApplicationFact, CallEdge, Completeness, ComponentId, DiagnosticRecord, Fingerprint, HierarchyEdge,
     Language, ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId,
     SymbolRecord, TypeRecord, WorkspaceId, WorkspacePath,
 };
@@ -199,12 +199,22 @@ pub struct AnalysisBatchResponse {
     pub snapshots: Vec<FileAnalysisSnapshot>,
     #[serde(default)]
     pub timings: Vec<PhaseTiming>,
+    #[serde(default)]
+    pub artifact_candidates: Vec<ArtifactCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseTiming {
     pub phase: String,
     pub elapsed_millis: u64,
+}
+
+/// Ephemeral resolved-artifact input. Core must never persist `locator`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCandidate {
+    pub locator: String,
+    pub component: ComponentId,
+    pub context: Fingerprint,
 }
 
 /// Requests analysis of the resolved binary artifacts for one workspace. Their
@@ -247,6 +257,8 @@ pub struct ArtifactDiscoveryRequest {
     pub workspace_root: WorkspacePath,
     pub max_artifacts: u32,
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub artifact_candidates: Vec<ArtifactCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -218,12 +218,23 @@ internal object ProtobufAnalysisSnapshotAdapter {
                     .setElapsedMillis(json["elapsed_millis"]!!.jsonPrimitive.long)
                     .build()
             }.orEmpty())
+            .addAllArtifactCandidates(value["artifact_candidates"]?.jsonArray?.map { candidate ->
+                val json = candidate.jsonObject
+                Worker.ArtifactCandidate.newBuilder()
+                    .setLocator(json["locator"]!!.jsonPrimitive.content)
+                    .setComponentId(json["component"]!!.jsonPrimitive.content)
+                    .setContextFingerprint(json["context"]!!.jsonPrimitive.content)
+                    .build()
+            }.orEmpty())
             .build()
 
     fun json(value: Worker.AnalysisBatchResponse): JsonObject = buildJsonObject {
         put("snapshots", buildJsonArray { value.snapshotsList.forEach { add(json(it)) } })
         put("timings", buildJsonArray { value.timingsList.forEach { timing -> add(buildJsonObject {
             put("phase", timing.phase); put("elapsed_millis", timing.elapsedMillis)
+        }) } })
+        put("artifact_candidates", buildJsonArray { value.artifactCandidatesList.forEach { candidate -> add(buildJsonObject {
+            put("locator", candidate.locator); put("component", candidate.componentId); put("context", candidate.contextFingerprint)
         }) } })
     }
 

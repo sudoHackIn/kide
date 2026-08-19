@@ -125,6 +125,10 @@ internal object GradleProjectImporter {
                     sourceRoots = javaSourceRoots(module),
                     classpath = libraries,
                     jdkHome = environment.java.javaHome.toPath().toAbsolutePath().normalize(),
+                    artifactContext = fingerprint(listOf(
+                        "gradle=${environment.gradle.gradleVersion}".encodeToByteArray(),
+                        "module=${module.gradleProject.path}".encodeToByteArray(),
+                    )),
                     ),
                 )
             }

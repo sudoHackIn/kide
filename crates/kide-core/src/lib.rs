@@ -141,6 +141,7 @@ mod worker_framing_tests {
                     workspace_root: ".".to_owned(),
                     max_artifacts: 8,
                     cursor: Some("cursor-7".to_owned()),
+                    artifact_candidates: Vec::new(),
                 },
             )),
         };
@@ -434,6 +435,11 @@ mod worker_framing_tests {
         let response = crate::AnalysisBatchResponse {
             snapshots: vec![snapshot.clone()],
             timings: Vec::new(),
+            artifact_candidates: vec![crate::ArtifactCandidate {
+                locator: "/tmp/example.jar".into(),
+                component: ComponentId::new("maven:app:main"),
+                context: Fingerprint::new("sha256:context"),
+            }],
         };
         let encoded = crate::worker_proto_adapter::analysis_batch_response(&response)
             .expect("response encodes");

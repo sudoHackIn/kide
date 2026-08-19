@@ -100,6 +100,7 @@ internal object MavenProjectImporter {
                 jdkHome = Path.of(System.getProperty("java.home")),
                 languageLevel = javaLanguageLevel(module.model),
                 unresolvedDependencies = resolution.unresolvedCoordinates,
+                artifactContext = fingerprint(listOf(Files.readAllBytes(module.pom))),
             )
         }
     }

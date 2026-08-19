@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     worker_proto, AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
     ApplicationArgument, ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
-    ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactAnalysisResponse, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
     ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
     BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
     DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
@@ -475,6 +475,7 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
                 workspace_root: WorkspacePath::new(request.workspace_root),
                 max_artifacts: request.max_artifacts,
                 cursor: request.cursor,
+                artifact_candidates: request.artifact_candidates.into_iter().map(decode_artifact_candidate).collect::<Result<Vec<_>, _>>()?,
             })
         }
         Message::ArtifactDiscoveryResponse(response) => {
@@ -1329,6 +1330,7 @@ pub fn analysis_batch_response(
             .map(file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
         timings: value.timings.iter().map(|timing| worker_proto::PhaseTiming { phase: timing.phase.clone(), elapsed_millis: timing.elapsed_millis }).collect(),
+        artifact_candidates: value.artifact_candidates.iter().map(artifact_candidate).collect(),
     })
 }
 
@@ -1342,6 +1344,7 @@ pub fn decode_analysis_batch_response(
             .map(decode_file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
         timings: value.timings.into_iter().map(|timing| PhaseTiming { phase: timing.phase, elapsed_millis: timing.elapsed_millis }).collect(),
+        artifact_candidates: value.artifact_candidates.into_iter().map(decode_artifact_candidate).collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -1513,7 +1516,29 @@ pub fn discovery_request(
         workspace_root: request.workspace_root.as_str().to_owned(),
         max_artifacts: request.max_artifacts,
         cursor: request.cursor.clone(),
+        artifact_candidates: request.artifact_candidates.iter().map(artifact_candidate).collect(),
     }
+}
+
+fn artifact_candidate(value: &ArtifactCandidate) -> worker_proto::ArtifactCandidate {
+    worker_proto::ArtifactCandidate {
+        locator: value.locator.clone(),
+        component_id: value.component.as_str().to_owned(),
+        context_fingerprint: value.context.as_str().to_owned(),
+    }
+}
+
+fn decode_artifact_candidate(
+    value: worker_proto::ArtifactCandidate,
+) -> Result<ArtifactCandidate, AdapterError> {
+    if value.locator.is_empty() || value.component_id.is_empty() || value.context_fingerprint.is_empty() {
+        return Err(AdapterError::Invalid("artifact candidate"));
+    }
+    Ok(ArtifactCandidate {
+        locator: value.locator,
+        component: ComponentId::new(value.component_id),
+        context: Fingerprint::new(value.context_fingerprint),
+    })
 }
 
 pub fn discovery_response(

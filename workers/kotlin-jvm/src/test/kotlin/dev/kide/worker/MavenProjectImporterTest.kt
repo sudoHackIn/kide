@@ -140,6 +140,10 @@ class MavenProjectImporterTest {
             ),
             root,
         ).map { it.jsonObject }
+        assertTrue(
+            JavaSemanticExtractor.artifactCandidates().any { it.path.fileName.toString().startsWith("spring-web-") },
+            "source analysis must retain resolved artifacts for dependency cataloging",
+        )
         val book = snapshots.flatMap { it["symbols"]!!.jsonArray }.single { symbol ->
             symbol.jsonObject["qualified_name"]!!.jsonPrimitive.content == "dev.kide.fixture.domain.Book"
         }.jsonObject["id"]!!.jsonPrimitive.content

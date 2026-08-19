@@ -20,6 +20,8 @@ internal data class JavaCompilationContext(
     val jdkHome: Path,
     val languageLevel: String? = null,
     val unresolvedDependencies: List<String> = emptyList(),
+    /** Build-derived fingerprint retained for run-local artifact hand-off. */
+    val artifactContext: String = "",
 )
 
 internal object JavaCompilationPlanner {
