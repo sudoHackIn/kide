@@ -38,10 +38,24 @@ import kotlinx.serialization.json.put
  * one request and emits only canonical JSON facts before returning.
  */
 internal object JavaSemanticExtractor {
+    /**
+     * A worker serves requests sequentially. Keep compiled sibling sources for
+     * its lifetime so a cold index pays one full-module javac pass rather than
+     * one per transport shard. The process boundary remains the memory bound.
+     */
+    private val stagedContexts = mutableMapOf<String, StagedContext>()
+
+    private data class StagedContext(
+        val output: Path,
+        val declarationIds: Map<String, String>,
+    )
+
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
-        val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot)
         require(selected.isNotEmpty()) { "Java analysis requires source files" }
+        val projectContext = selected.values.map { it.jsonObject.requiredString("context") }.distinct().singleOrNull()
+            ?: error("Java batch must contain one project context fingerprint")
+        val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot, projectContext)
         val sourceIdentities = sourceIdentities(selected, contexts, workspaceRoot)
         return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard ->
             analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities)
@@ -78,12 +92,12 @@ internal object JavaSemanticExtractor {
         workspaceRoot: Path,
         sourceIdentities: Map<Path, JsonObject>,
     ): List<JsonElement> {
-        // Exact Java references require declaration ASTs for same-component
-        // types. The context is already bounded to this component and its
-        // project dependencies; a future two-phase declaration index can make
-        // this file-sharded without weakening reference ownership.
-        val allSources = (context.sourceFiles + selected.keys)
-            .map(::canonical).distinct().sortedBy(Path::toString)
+        val staged = stagedContext(context, sourceIdentities)
+        // The staged output provides every non-selected source as bytecode.
+        // If staging is unavailable (for example an incomplete Maven
+        // classpath in best-effort mode), retain the previous exact fallback.
+        val allSources = if (staged == null) (context.sourceFiles + selected.keys)
+            .map(::canonical).distinct().sortedBy(Path::toString) else selected.keys.sortedBy(Path::toString)
         val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler()) { "a JDK with javac is required for Java indexing" }
         val diagnostics = DiagnosticCollector<JavaFileObject>()
         compiler.getStandardFileManager(diagnostics, null, Charsets.UTF_8).use { fileManager ->
@@ -94,11 +108,11 @@ internal object JavaSemanticExtractor {
                     add("--release")
                     add(release)
                 }
-                context.sourceRoots.takeIf { roots -> roots.isNotEmpty() }?.let { roots ->
+                context.sourceRoots.takeIf { roots -> staged == null && roots.isNotEmpty() }?.let { roots ->
                     add("-sourcepath")
                     add(roots.joinToString(System.getProperty("path.separator")))
                 }
-                val classpath = context.classpath.distinct().filter(Files::exists)
+                val classpath = (context.classpath + listOfNotNull(staged?.output)).distinct().filter(Files::exists)
                 if (classpath.isNotEmpty()) {
                     add("-classpath")
                     add(classpath.joinToString(System.getProperty("path.separator")))
@@ -109,7 +123,7 @@ internal object JavaSemanticExtractor {
             val analysisFailure = runCatching { task.analyze() }.exceptionOrNull()
             if (analysisFailure != null && !MavenExternalResolver.bestEffortEnabled) throw analysisFailure
             val trees = Trees.instance(task)
-            val collector = FactCollector(trees, selected, sourceIdentities, allSources)
+            val collector = FactCollector(trees, selected, sourceIdentities, allSources, staged?.declarationIds.orEmpty())
             if (analysisFailure == null) {
                 collector.collectDeclarations(parsed)
                 collector.collectReferences(parsed)
@@ -122,13 +136,59 @@ internal object JavaSemanticExtractor {
             val externalKeys = snapshots.flatMap { snapshot -> snapshot.jsonObject["symbols"]!!.jsonArray.flatMap { symbol ->
                 symbol.jsonObject["applied_symbols"]!!.jsonArray.mapNotNull { value -> value.jsonPrimitive.content.removePrefix("jvm:type:").takeIf { value.jsonPrimitive.content.startsWith("jvm:type:") }?.let { "class:$it" } }
             } }.toSortedSet()
-            val resolved = JvmBytecodeExtractor.resolvedTargetIds(context.classpath.distinct(), externalKeys)
+            val resolved = JvmBytecodeExtractor.resolvedTargetIds((context.classpath + listOfNotNull(staged?.output)).distinct(), externalKeys)
             val unresolvedDependencies = context.unresolvedDependencies.distinct().sorted()
             return snapshots.map { snapshot -> remapExternalAnnotations(snapshot.jsonObject, resolved) }
                 .let { snapshots ->
                     if (unresolvedDependencies.isEmpty()) snapshots
                     else snapshots.map { snapshot -> markPartial(withUnresolvedDependencyDiagnostics(snapshot, unresolvedDependencies)) }
                 }
+        }
+    }
+
+    /** Compiles a context once and records source-derived IDs before javac erases source trees. */
+    private fun stagedContext(
+        context: JavaCompilationContext,
+        sourceIdentities: Map<Path, JsonObject>,
+    ): StagedContext? {
+        val sources = context.sourceFiles.map(::canonical).distinct().sortedBy(Path::toString)
+        if (sources.isEmpty()) return null
+        val key = buildString {
+            append(context.component).append('\u0000').append(context.languageLevel)
+            context.classpath.distinct().sortedBy(Path::toString).forEach { append('\u0000').append(it) }
+            sources.forEach { source ->
+                append('\u0000').append(source).append(':').append(fingerprint(Files.readAllBytes(source)))
+            }
+        }
+        stagedContexts[key]?.let { return it }
+
+        val compiler = ToolProvider.getSystemJavaCompiler() ?: return null
+        val output = Files.createTempDirectory("kide-java-stage-")
+        val diagnostics = DiagnosticCollector<JavaFileObject>()
+        return try {
+            compiler.getStandardFileManager(diagnostics, null, Charsets.UTF_8).use { fileManager ->
+                val options = buildList {
+                    add("-proc:none"); add("-d"); add(output.toString())
+                    context.languageLevel?.let { release -> add("--release"); add(release) }
+                    val classpath = context.classpath.distinct().filter(Files::exists)
+                    if (classpath.isNotEmpty()) { add("-classpath"); add(classpath.joinToString(System.getProperty("path.separator"))) }
+                }
+                val task = compiler.getTask(null, fileManager, diagnostics, options, null, fileManager.getJavaFileObjectsFromPaths(sources)) as JavacTask
+                val parsed = task.parse().toList()
+                val failure = runCatching { task.analyze() }.exceptionOrNull()
+                if (failure != null) {
+                    if (!MavenExternalResolver.bestEffortEnabled) throw failure
+                    return null
+                }
+                val allSelected = sources.associateWith { source -> sourceIdentities[source] ?: return null }
+                val collector = FactCollector(Trees.instance(task), allSelected, sourceIdentities, sources)
+                collector.collectDeclarations(parsed)
+                task.generate()
+                StagedContext(output, collector.declarationIds()).also { stagedContexts[key] = it }
+            }
+        } catch (failure: Throwable) {
+            if (!MavenExternalResolver.bestEffortEnabled) throw failure
+            null
         }
     }
 
@@ -200,6 +260,7 @@ internal object JavaSemanticExtractor {
         private val selected: Map<Path, JsonElement>,
         private val sourceIdentities: Map<Path, JsonObject>,
         allSources: List<Path>,
+        private val stagedDeclarationIds: Map<String, String> = emptyMap(),
     ) : TreePathScanner<Unit, Unit>() {
         private val symbols = linkedMapOf<Path, MutableList<Symbol>>()
         private val occurrences = linkedMapOf<Path, MutableList<Occurrence>>()
@@ -265,9 +326,9 @@ internal object JavaSemanticExtractor {
             val owner = element.enclosingElement?.let(::elementId)
             if (path in selected) symbols.getOrPut(path, ::mutableListOf) += Symbol(id, element, start, end, nameStart, nameStart + name.length, owner)
             if (path in selected && element is TypeElement) {
-                element.superclass?.let { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(elementIds::get) }
+                element.superclass?.let { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(::elementId) }
                     ?.let { superId -> hierarchy.getOrPut(path, ::mutableListOf) += id to superId }
-                element.interfaces.mapNotNull { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(elementIds::get) }
+                element.interfaces.mapNotNull { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(::elementId) }
                     .forEach { superId -> hierarchy.getOrPut(path, ::mutableListOf) += id to superId }
             }
         }
@@ -310,12 +371,15 @@ internal object JavaSemanticExtractor {
             }
         }
 
+        fun declarationIds(): Map<String, String> = elementIds.entries.associate { (element, id) -> elementKey(element) to id }
+
         /**
-         * SOURCE_PATH lets javac load a reactor type without making it an
-         * explicit batch input. Derive the same stable ID lazily so references
-         * from the shard still point at that type's eventual snapshot.
+         * Prefer source-derived IDs captured during staging. The source-path
+         * fallback covers contexts that cannot be staged in best-effort mode.
          */
-        private fun elementId(element: Element): String? = elementIds[element] ?: trees.getPath(element)?.let { path ->
+        private fun elementId(element: Element): String? = elementIds[element]
+            ?: stagedDeclarationIds[elementKey(element)]
+            ?: trees.getPath(element)?.let { path ->
             val sourcePath = sourcePath(path.compilationUnit) ?: return@let null
             val positions = trees.sourcePositions
             val start = positions.getStartPosition(path.compilationUnit, path.leaf).toInt()
@@ -331,6 +395,8 @@ internal object JavaSemanticExtractor {
             val nameStart = nameOffset(text, name, start, end)
             return "java:${source.requiredString("component")}:${source.requiredString("path")}#${kind(element)}:$name:$nameStart"
         }
+
+        private fun elementKey(element: Element) = "${element.kind}|${qualifiedName(element)}|$element"
 
         private fun symbolJson(symbol: Symbol, source: JsonObject, text: String, provenance: JsonElement) = buildJsonObject {
             put("id", symbol.id); put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", symbol.element.toString()) })
@@ -368,7 +434,7 @@ internal object JavaSemanticExtractor {
         private fun nameOffset(text: String, name: String, start: Int, end: Int): Int = Regex("\\b${Regex.escape(name)}\\b").find(text, start)?.range?.first?.takeIf { it < end } ?: start
         private fun kind(element: Element): String = when (element.kind) { ElementKind.CLASS -> "class"; ElementKind.INTERFACE -> "interface"; ElementKind.ENUM -> "enum"; ElementKind.ANNOTATION_TYPE -> "interface"; ElementKind.CONSTRUCTOR -> "constructor"; ElementKind.METHOD -> "method"; ElementKind.FIELD, ElementKind.ENUM_CONSTANT -> "field"; else -> "property" }
         private fun appliedSymbols(element: Element): List<String> = element.annotationMirrors
-            .map { annotation -> elementIds[annotation.annotationType.asElement()] ?: "jvm:type:${qualifiedName(annotation.annotationType.asElement())}" }
+            .map { annotation -> elementId(annotation.annotationType.asElement()) ?: "jvm:type:${qualifiedName(annotation.annotationType.asElement())}" }
             .distinct()
             .sorted()
         private fun qualifiedName(element: Element): String = when (element) { is TypeElement -> element.qualifiedName.toString(); else -> "${element.enclosingElement?.let(::qualifiedName).orEmpty()}.${element.simpleName}".trim('.') }

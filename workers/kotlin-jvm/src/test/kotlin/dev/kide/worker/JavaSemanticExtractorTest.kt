@@ -3,6 +3,8 @@ package dev.kide.worker
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import kotlin.test.assertSame
+import kotlin.test.assertNotSame
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -10,6 +12,20 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 class JavaSemanticExtractorTest {
+    @Test
+    fun cachesCompilationContextsByCoreProjectFingerprint() {
+        val root = Files.createTempDirectory("kide-java-context-")
+        Files.writeString(root.resolve("settings.gradle.kts"), "rootProject.name = \"java-context\"")
+        Files.writeString(root.resolve("build.gradle.kts"), "plugins { java }")
+
+        val first = JavaCompilationContexts.forWorkspace(root, "sha256:one")
+        val reused = JavaCompilationContexts.forWorkspace(root, "sha256:one")
+        val invalidated = JavaCompilationContexts.forWorkspace(root, "sha256:two")
+
+        assertSame(first, reused)
+        assertNotSame(first, invalidated)
+    }
+
     @Test
     fun emitsExactJavaFactsAcrossSourceFiles() {
         val root = Files.createTempDirectory("kide-java-semantic-")
@@ -27,6 +43,7 @@ class JavaSemanticExtractorTest {
         val allSymbols = snapshots.flatMap { it.jsonObject["symbols"]!!.jsonArray }
         assertTrue(allSymbols.any { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api") }, snapshots.toString())
         val api = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api") }.jsonObject["id"]!!.toString()
+        val apiName = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api.name") }.jsonObject["id"]!!.toString()
         val marker = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Marker") }.jsonObject["id"]!!.toString()
         val implementation = allSymbols.first { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Impl") }.jsonObject
         val use = snapshots.single { it.jsonObject["source_unit"]!!.jsonObject["path"]!!.toString().contains("Use.java") }.jsonObject
@@ -42,6 +59,10 @@ class JavaSemanticExtractorTest {
         assertTrue(incremental["references"]!!.jsonArray.isNotEmpty(), incremental.toString())
         assertTrue(incremental["calls"]!!.jsonArray.isNotEmpty(), incremental.toString())
         assertTrue(incremental["types"]!!.jsonArray.isNotEmpty(), incremental.toString())
+        val incrementalTargets = (incremental["references"]!!.jsonArray + incremental["calls"]!!.jsonArray)
+            .map { it.jsonObject["target"]!!.toString() }
+        assertTrue(incrementalTargets.contains(api), incremental.toString())
+        assertTrue(incrementalTargets.contains(apiName), incremental.toString())
     }
 
     private fun sourceUnit(path: String) = buildJsonObject {
