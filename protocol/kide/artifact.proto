@@ -54,7 +54,7 @@ message ArtifactSymbolPostings {
 }
 message ArtifactSymbolPosting {
   uint32 source_unit_index = 1;
-  ArtifactSymbol symbol = 2;
+  uint32 symbol_ordinal = 2;
 }
 
 // Direct hierarchy is an independent query projection. It routes a direct
@@ -95,6 +95,7 @@ message ArtifactSymbolSnapshotDefaults {
   string completeness = 5;
   string component_id = 6;
   optional uint32 provenance_index = 7;
+  repeated string string_table = 8;
 }
 message ArtifactSymbolDetail {
   string id = 1;
@@ -114,6 +115,14 @@ message ArtifactSymbolDetail {
   optional string completeness = 15;
   optional string component_id = 16;
   optional uint32 provenance_index = 17;
+  optional uint32 backend_key_string_index = 18;
+  optional uint32 kind_string_index = 19;
+  optional uint32 name_string_index = 20;
+  optional uint32 qualified_name_string_index = 21;
+  optional uint32 signature_string_index = 22;
+  optional uint32 owner_id_string_index = 23;
+  repeated uint32 modifier_string_indexes = 24;
+  repeated uint32 applied_symbol_string_indexes = 25;
 }
 
 message GraphArtifact {
@@ -175,6 +184,7 @@ message ArtifactSymbol {
   string completeness = 15;
   string component_id = 16;
   optional uint32 provenance_index = 17;
+  optional uint32 owner_symbol_ordinal = 18;
   repeated string applied_symbol_ids = 13;
 }
 
@@ -188,10 +198,12 @@ message ArtifactOccurrence {
   string freshness = 7;
   string completeness = 8;
   optional uint32 provenance_index = 9;
+  optional uint32 enclosing_symbol_ordinal = 10;
+  optional uint32 target_symbol_ordinal = 11;
 }
 
-message ArtifactReference { uint32 source_occurrence_index = 1; string target_symbol_id = 2; string precision = 3; }
-message ArtifactCall { uint32 source_occurrence_index = 1; string target_symbol_id = 2; optional string caller_symbol_id = 3; string precision = 4; }
-message ArtifactHierarchy { string subtype_symbol_id = 1; string supertype_symbol_id = 2; string precision = 3; optional uint32 provenance_index = 4; }
+message ArtifactReference { uint32 source_occurrence_index = 1; string target_symbol_id = 2; string precision = 3; optional uint32 target_symbol_ordinal = 4; }
+message ArtifactCall { uint32 source_occurrence_index = 1; string target_symbol_id = 2; optional string caller_symbol_id = 3; string precision = 4; optional uint32 target_symbol_ordinal = 5; optional uint32 caller_symbol_ordinal = 6; }
+message ArtifactHierarchy { string subtype_symbol_id = 1; string supertype_symbol_id = 2; string precision = 3; optional uint32 provenance_index = 4; optional uint32 subtype_symbol_ordinal = 5; optional uint32 supertype_symbol_ordinal = 6; }
 message ArtifactType { string id = 1; string language = 2; string display = 3; optional string backend_key = 4; uint32 backend_schema_version = 5; string freshness = 6; string completeness = 7; optional uint32 provenance_index = 8; }
 message ArtifactDiagnostic { uint32 source_unit_index = 1; optional ArtifactRange range = 2; string severity = 3; optional string code = 4; string message = 5; string freshness = 6; string completeness = 7; optional uint32 provenance_index = 8; }

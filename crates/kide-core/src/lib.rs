@@ -588,6 +588,8 @@ mod worker_framing_tests {
                     supertype_symbol_id: "java:example.Widget".into(),
                     precision: "exact".into(),
                     provenance_index: Some(0),
+                    subtype_symbol_ordinal: None,
+                    supertype_symbol_ordinal: None,
                 }],
                 completeness: "partial".into(),
                 ..Default::default()
@@ -605,14 +607,7 @@ mod worker_framing_tests {
         .expect("dictionary protobuf decodes");
         assert_eq!(dictionary.entries[0].id, "java:example.Widget");
         let postings = validated.symbol_postings().expect("postings decode");
-        assert_eq!(
-            postings.entries[0]
-                .symbol
-                .as_ref()
-                .expect("posting has symbol")
-                .name,
-            "Widget"
-        );
+        assert_eq!(postings.entries[0].symbol_ordinal, 0);
         assert_eq!(
             validated
                 .graph_facts()
@@ -746,6 +741,8 @@ mod worker_framing_tests {
                     supertype_symbol_id: "java:example.Widget".into(),
                     precision: "exact".into(),
                     provenance_index: Some(0),
+                    subtype_symbol_ordinal: None,
+                    supertype_symbol_ordinal: None,
                 }],
                 completeness: "partial".into(),
                 ..Default::default()
@@ -791,18 +788,19 @@ mod worker_framing_tests {
                 .symbol_postings(&mut blob)
                 .expect("reads postings")
                 .entries[0]
-                .symbol
-                .as_ref()
-                .expect("posting has symbol")
-                .name,
-            "Widget"
+                .symbol_ordinal,
+            0
         );
         let postings = sections.symbol_postings(&mut blob).expect("reads postings");
-        let symbols =
-            crate::artifact_proto_adapter::decode_symbol_postings(postings, &source, &provenance)
-                .expect("decodes canonical symbol");
-        assert_eq!(symbols[0].id.as_str(), "java:example.Widget");
-        assert_eq!(symbols[0].declaration.source_unit, source.id);
+        let symbol = crate::artifact_proto_adapter::decode_symbol_detail(
+            sections
+                .symbol_detail_block(&mut blob, postings.entries[0].symbol_ordinal)
+                .expect("reads bounded detail block"),
+            postings.entries[0].symbol_ordinal,
+        )
+        .expect("decodes canonical symbol");
+        assert_eq!(symbol.id.as_str(), "java:example.Widget");
+        assert_eq!(symbol.declaration.source_unit, source.id);
         assert_eq!(
             crate::artifact_query::direct_implementations(
                 &cache,

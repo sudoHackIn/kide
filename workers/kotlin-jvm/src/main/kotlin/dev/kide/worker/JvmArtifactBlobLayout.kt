@@ -15,8 +15,9 @@ internal object JvmArtifactBlobLayout {
     private const val HEADER_SIZE = 28
 
     fun encode(artifact: Artifact.GraphArtifact): ByteArray {
+        val graph = ordinalizeLocalGraphFacts(artifact)
         val dictionary = Artifact.ArtifactSymbolDictionary.newBuilder()
-            .addAllEntries(artifact.snapshotsList.flatMap { snapshot ->
+            .addAllEntries(graph.snapshotsList.flatMap { snapshot ->
                 snapshot.symbolsList.map { symbol ->
                     Artifact.ArtifactSymbolDictionaryEntry.newBuilder()
                         .setId(symbol.id)
@@ -27,12 +28,13 @@ internal object JvmArtifactBlobLayout {
             .build()
         val postings = Artifact.ArtifactSymbolPostings.newBuilder()
             .apply {
-                artifact.snapshotsList.forEachIndexed { sourceUnitIndex, snapshot ->
-                    snapshot.symbolsList.forEach { symbol ->
+                var symbolOrdinal = 0
+                graph.snapshotsList.forEachIndexed { sourceUnitIndex, snapshot ->
+                    snapshot.symbolsList.forEach {
                         addEntries(
                             Artifact.ArtifactSymbolPosting.newBuilder()
                                 .setSourceUnitIndex(sourceUnitIndex)
-                                .setSymbol(symbol)
+                                .setSymbolOrdinal(symbolOrdinal++)
                                 .build(),
                         )
                     }
@@ -56,7 +58,7 @@ internal object JvmArtifactBlobLayout {
             .build()
         val qualifiedSymbolDirectory = Artifact.ArtifactQualifiedSymbolDirectory.newBuilder()
             .addAllEntries(
-                artifact.snapshotsList.flatMap { it.symbolsList }
+                graph.snapshotsList.flatMap { it.symbolsList }
                     .mapIndexedNotNull { ordinal, symbol ->
                         symbol.takeIf { it.hasQualifiedName() }?.let {
                             Artifact.ArtifactQualifiedSymbolEntry.newBuilder()
@@ -70,7 +72,7 @@ internal object JvmArtifactBlobLayout {
             .build()
         val detailSections = buildList {
             var firstOrdinal = 0
-            artifact.snapshotsList.forEach { snapshot ->
+            graph.snapshotsList.forEach { snapshot ->
                 if (snapshot.symbolsCount > 0) {
                     snapshot.symbolsList.chunked(DETAIL_BLOCK_ENTRY_CAPACITY).forEachIndexed { chunkIndex, symbols ->
                         fun common(value: (Artifact.ArtifactSymbol) -> String) =
@@ -122,7 +124,7 @@ internal object JvmArtifactBlobLayout {
             Section(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_SYMBOL_POSTINGS, postings.toByteArray(), 0),
             Section(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_HIERARCHY_POSTINGS, hierarchyPostings.toByteArray(), 0),
             Section(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_QUALIFIED_SYMBOL_DIRECTORY, qualifiedSymbolDirectory.toByteArray(), 0),
-        ) + detailSections + Section(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_GRAPH_FACTS, gzip(artifact.toByteArray()), 1)
+        ) + detailSections + Section(Artifact.ArtifactBlobSectionKind.ARTIFACT_BLOB_SECTION_KIND_GRAPH_FACTS, gzip(graph.toByteArray()), 1)
         var toc = Artifact.ArtifactBlobToc.newBuilder().setLayoutVersion(VERSION).build()
         while (true) {
             var offset = (HEADER_SIZE + toc.serializedSize).toLong()
@@ -163,6 +165,48 @@ internal object JvmArtifactBlobLayout {
     }
 
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    /** Replaces references to declarations within this artifact by global symbol ordinals. */
+    private fun ordinalizeLocalGraphFacts(artifact: Artifact.GraphArtifact): Artifact.GraphArtifact {
+        val ordinals = artifact.snapshotsList.flatMap { it.symbolsList }
+            .mapIndexed { ordinal, symbol -> symbol.id to ordinal }
+            .toMap()
+        return Artifact.GraphArtifact.newBuilder().addAllSnapshots(artifact.snapshotsList.map { snapshot ->
+            snapshot.toBuilder()
+                .clearSymbols()
+                .addAllSymbols(snapshot.symbolsList.map { symbol -> symbol.toBuilder().apply {
+                    if (symbol.hasOwnerId()) ordinals[symbol.ownerId]?.let { ordinal ->
+                        clearOwnerId(); setOwnerSymbolOrdinal(ordinal)
+                    }
+                }.build() })
+                .clearOccurrences()
+                .addAllOccurrences(snapshot.occurrencesList.map { occurrence -> occurrence.toBuilder().apply {
+                    if (occurrence.hasEnclosingSymbolId()) ordinals[occurrence.enclosingSymbolId]?.let { ordinal ->
+                        clearEnclosingSymbolId(); setEnclosingSymbolOrdinal(ordinal)
+                    }
+                    if (occurrence.hasTargetSymbolId()) ordinals[occurrence.targetSymbolId]?.let { ordinal ->
+                        clearTargetSymbolId(); setTargetSymbolOrdinal(ordinal)
+                    }
+                }.build() })
+                .clearReferences()
+                .addAllReferences(snapshot.referencesList.map { edge -> edge.toBuilder().apply {
+                    ordinals[edge.targetSymbolId]?.let { ordinal -> clearTargetSymbolId(); setTargetSymbolOrdinal(ordinal) }
+                }.build() })
+                .clearCalls()
+                .addAllCalls(snapshot.callsList.map { edge -> edge.toBuilder().apply {
+                    ordinals[edge.targetSymbolId]?.let { ordinal -> clearTargetSymbolId(); setTargetSymbolOrdinal(ordinal) }
+                    if (edge.hasCallerSymbolId()) ordinals[edge.callerSymbolId]?.let { ordinal ->
+                        clearCallerSymbolId(); setCallerSymbolOrdinal(ordinal)
+                    }
+                }.build() })
+                .clearHierarchy()
+                .addAllHierarchy(snapshot.hierarchyList.map { edge -> edge.toBuilder().apply {
+                    ordinals[edge.subtypeSymbolId]?.let { ordinal -> clearSubtypeSymbolId(); setSubtypeSymbolOrdinal(ordinal) }
+                    ordinals[edge.supertypeSymbolId]?.let { ordinal -> clearSupertypeSymbolId(); setSupertypeSymbolOrdinal(ordinal) }
+                }.build() })
+                .build()
+        }).build()
+    }
 
     private data class Section(
         val kind: Artifact.ArtifactBlobSectionKind,

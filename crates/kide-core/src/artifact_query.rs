@@ -1,6 +1,6 @@
 //! On-demand semantic queries over one immutable dependency artifact blob.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use thiserror::Error;
 
@@ -80,15 +80,27 @@ pub fn direct_implementations(
             if subtype_ids.is_empty() {
                 return Ok(Vec::new());
             }
-            let symbols = artifact_proto_adapter::decode_symbol_postings(
-                sections.symbol_postings(&mut blob)?,
-                &artifact.source_unit,
-                &artifact.provenance,
-            )?;
-            return Ok(symbols
+            let ordinals = sections
+                .symbol_dictionary(&mut blob)?
+                .entries
                 .into_iter()
-                .filter(|symbol| subtype_ids.contains(symbol.id.as_str()))
-                .collect());
+                .enumerate()
+                .filter_map(|(ordinal, entry)| subtype_ids.contains(&entry.id).then_some(ordinal as u32));
+            let mut by_block = BTreeMap::<u32, Vec<u32>>::new();
+            for ordinal in ordinals {
+                by_block
+                    .entry(sections.symbol_detail_block_start(ordinal)?)
+                    .or_default()
+                    .push(ordinal);
+            }
+            let mut symbols = Vec::new();
+            for (_, ordinals) in by_block {
+                let block = sections.symbol_detail_block(&mut blob, ordinals[0])?;
+                for ordinal in ordinals {
+                    symbols.push(artifact_proto_adapter::decode_symbol_detail(block.clone(), ordinal)?);
+                }
+            }
+            return Ok(symbols);
         }
         Err(ArtifactBlobLayoutError::MissingSection(
             artifact_proto::ArtifactBlobSectionKind::HierarchyPostings,

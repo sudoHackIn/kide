@@ -1,6 +1,6 @@
 //! Fixed-header, section-addressable layout for JVM dependency graph blobs.
 
-use std::io::{Read, Write};
+use std::{collections::BTreeMap, io::{Read, Write}};
 
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use prost::Message;
@@ -17,6 +17,8 @@ pub const ARTIFACT_BLOB_LAYOUT_VERSION: u32 = 1;
 pub const SYMBOL_DETAIL_BLOCK_ENTRY_CAPACITY: usize = 256;
 const MAGIC: [u8; 8] = *b"KIDEJVM1";
 const HEADER_SIZE: usize = 8 + 4 + 8 + 8;
+const STRING_INTERN_MIN_OCCURRENCES: usize = 3;
+const STRING_INTERN_MIN_BYTES: usize = 8;
 
 #[derive(Debug, Error)]
 pub enum ArtifactBlobLayoutError {
@@ -83,6 +85,16 @@ impl ArtifactBlobSections {
         )?)
     }
 
+    pub fn symbol_dictionary(
+        &self,
+        blob: &mut ArtifactBlob,
+    ) -> Result<artifact_proto::ArtifactSymbolDictionary, ArtifactBlobLayoutError> {
+        Ok(artifact_proto::ArtifactSymbolDictionary::decode(
+            self.read_section(blob, ArtifactBlobSectionKind::SymbolDictionary)?
+                .as_slice(),
+        )?)
+    }
+
     pub fn hierarchy_postings(
         &self,
         blob: &mut ArtifactBlob,
@@ -131,6 +143,15 @@ impl ArtifactBlobSections {
         )?)
     }
 
+    /// Stable grouping key for all ordinals stored in the same bounded detail
+    /// block. Query callers can therefore read each block at most once.
+    pub fn symbol_detail_block_start(
+        &self,
+        ordinal: u32,
+    ) -> Result<u32, ArtifactBlobLayoutError> {
+        Ok(self.detail_section(ordinal)?.symbol_ordinal_start)
+    }
+
     fn detail_section(
         &self,
         ordinal: u32,
@@ -173,14 +194,17 @@ impl ArtifactBlobLayout {
                 .snapshots
                 .iter()
                 .enumerate()
-                .flat_map(|(source_unit_index, snapshot)| {
-                    snapshot.symbols.iter().map(move |symbol| {
+                .scan(0u32, |ordinal, (source_unit_index, snapshot)| {
+                    let first_ordinal = *ordinal;
+                    *ordinal += snapshot.symbols.len() as u32;
+                    Some(snapshot.symbols.iter().enumerate().map(move |(offset, _)| {
                         artifact_proto::ArtifactSymbolPosting {
                             source_unit_index: source_unit_index as u32,
-                            symbol: Some(symbol.clone()),
+                            symbol_ordinal: first_ordinal + offset as u32,
                         }
-                    })
+                    }))
                 })
+                .flatten()
                 .collect(),
         };
         let hierarchy_postings = artifact_proto::ArtifactHierarchyPostings {
@@ -264,12 +288,15 @@ impl ArtifactBlobLayout {
                 let chunk_start =
                     first_ordinal + (chunk_index * SYMBOL_DETAIL_BLOCK_ENTRY_CAPACITY) as u32;
                 let defaults = snapshot_defaults(snapshot, entries);
+                let string_table = StringTable::from_symbols(entries);
+                let mut defaults = defaults;
+                defaults.string_table = string_table.values.clone();
                 let block = artifact_proto::ArtifactSymbolDetailBlock {
                     first_symbol_ordinal: chunk_start,
                     defaults: Some(defaults.clone()),
                     entries: entries
                         .iter()
-                        .map(|symbol| symbol_detail(symbol, &defaults))
+                        .map(|symbol| symbol_detail(symbol, &defaults, &string_table))
                         .collect(),
                 };
                 sections.push((
@@ -469,6 +496,7 @@ fn snapshot_defaults(
         completeness: common_symbol_field(symbols, |symbol| &symbol.completeness),
         component_id: common_symbol_field(symbols, |symbol| &symbol.component_id),
         provenance_index: common_symbol_option(symbols, |symbol| symbol.provenance_index),
+        string_table: Vec::new(),
     }
 }
 
@@ -502,20 +530,21 @@ fn common_symbol_option(
 fn symbol_detail(
     symbol: &artifact_proto::ArtifactSymbol,
     defaults: &artifact_proto::ArtifactSymbolSnapshotDefaults,
+    string_table: &StringTable,
 ) -> artifact_proto::ArtifactSymbolDetail {
     artifact_proto::ArtifactSymbolDetail {
         id: symbol.id.clone(),
-        backend_key: symbol.backend_key.clone(),
+        backend_key: string_table.inline(&symbol.backend_key),
         backend_schema_version: symbol.backend_schema_version,
-        kind: symbol.kind.clone(),
-        name: symbol.name.clone(),
-        qualified_name: symbol.qualified_name.clone(),
-        signature: symbol.signature.clone(),
+        kind: string_table.inline(&symbol.kind),
+        name: string_table.inline(&symbol.name),
+        qualified_name: string_table.inline_optional(symbol.qualified_name.as_deref()),
+        signature: string_table.inline_optional(symbol.signature.as_deref()),
         declaration: symbol.declaration.clone(),
         name_range: symbol.name_range.clone(),
-        owner_id: symbol.owner_id.clone(),
-        modifiers: symbol.modifiers.clone(),
-        applied_symbol_ids: symbol.applied_symbol_ids.clone(),
+        owner_id: string_table.inline_optional(symbol.owner_id.as_deref()),
+        modifiers: string_table.inline_many(&symbol.modifiers),
+        applied_symbol_ids: string_table.inline_many(&symbol.applied_symbol_ids),
         language: (symbol.language != defaults.language).then(|| symbol.language.clone()),
         freshness: (symbol.freshness != defaults.freshness).then(|| symbol.freshness.clone()),
         completeness: (symbol.completeness != defaults.completeness)
@@ -525,7 +554,49 @@ fn symbol_detail(
         provenance_index: (symbol.provenance_index != defaults.provenance_index)
             .then_some(symbol.provenance_index)
             .flatten(),
+        backend_key_string_index: string_table.index(&symbol.backend_key),
+        kind_string_index: string_table.index(&symbol.kind),
+        name_string_index: string_table.index(&symbol.name),
+        qualified_name_string_index: symbol.qualified_name.as_deref().and_then(|value| string_table.index(value)),
+        signature_string_index: symbol.signature.as_deref().and_then(|value| string_table.index(value)),
+        owner_id_string_index: symbol.owner_id.as_deref().and_then(|value| string_table.index(value)),
+        modifier_string_indexes: string_table.indexes(&symbol.modifiers),
+        applied_symbol_string_indexes: string_table.indexes(&symbol.applied_symbol_ids),
     }
+}
+
+#[derive(Debug, Default)]
+struct StringTable {
+    values: Vec<String>,
+    indexes: BTreeMap<String, u32>,
+}
+
+impl StringTable {
+    fn from_symbols(symbols: &[artifact_proto::ArtifactSymbol]) -> Self {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for symbol in symbols {
+            for value in [&symbol.backend_key, &symbol.kind, &symbol.name] {
+                *counts.entry(value.clone()).or_default() += 1;
+            }
+            for value in [symbol.qualified_name.as_ref(), symbol.signature.as_ref(), symbol.owner_id.as_ref()].into_iter().flatten() {
+                *counts.entry(value.clone()).or_default() += 1;
+            }
+            for value in symbol.modifiers.iter().chain(&symbol.applied_symbol_ids) {
+                *counts.entry(value.clone()).or_default() += 1;
+            }
+        }
+        let values = counts.into_iter()
+            .filter_map(|(value, occurrences)| (occurrences >= STRING_INTERN_MIN_OCCURRENCES && value.len() >= STRING_INTERN_MIN_BYTES).then_some(value))
+            .collect::<Vec<_>>();
+        let indexes = values.iter().enumerate().map(|(index, value)| (value.clone(), index as u32)).collect();
+        Self { values, indexes }
+    }
+
+    fn index(&self, value: &str) -> Option<u32> { self.indexes.get(value).copied() }
+    fn indexes(&self, values: &[String]) -> Vec<u32> { values.iter().map(|value| self.index(value)).collect::<Option<Vec<_>>>().unwrap_or_default() }
+    fn inline(&self, value: &str) -> String { self.index(value).is_none().then(|| value.to_owned()).unwrap_or_default() }
+    fn inline_optional(&self, value: Option<&str>) -> Option<String> { value.and_then(|value| self.index(value).is_none().then(|| value.to_owned())) }
+    fn inline_many(&self, values: &[String]) -> Vec<String> { self.indexes(values).is_empty().then(|| values.to_vec()).unwrap_or_default() }
 }
 
 fn decompress_section(bytes: &[u8], compression: i32) -> Result<Vec<u8>, ArtifactBlobLayoutError> {
