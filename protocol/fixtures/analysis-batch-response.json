@@ -96,6 +96,7 @@
       }
     ],
     "timings": [],
-    "artifact_candidates": []
+    "artifact_candidates": [],
+    "metrics": []
   }
 }

@@ -226,6 +226,10 @@ internal object ProtobufAnalysisSnapshotAdapter {
                     .setContextFingerprint(json["context"]!!.jsonPrimitive.content)
                     .build()
             }.orEmpty())
+            .addAllMetrics(value["metrics"]?.jsonArray?.map { metric ->
+                val json = metric.jsonObject
+                Worker.WorkerMetric.newBuilder().setName(json["name"]!!.jsonPrimitive.content).setValue(json["value"]!!.jsonPrimitive.long).build()
+            }.orEmpty())
             .build()
 
     fun json(value: Worker.AnalysisBatchResponse): JsonObject = buildJsonObject {
@@ -236,6 +240,7 @@ internal object ProtobufAnalysisSnapshotAdapter {
         put("artifact_candidates", buildJsonArray { value.artifactCandidatesList.forEach { candidate -> add(buildJsonObject {
             put("locator", candidate.locator); put("component", candidate.componentId); put("context", candidate.contextFingerprint)
         }) } })
+        put("metrics", buildJsonArray { value.metricsList.forEach { metric -> add(buildJsonObject { put("name", metric.name); put("value", metric.value) }) } })
     }
 
     fun delta(value: JsonObject): Worker.AnalysisDelta = Worker.AnalysisDelta.newBuilder()

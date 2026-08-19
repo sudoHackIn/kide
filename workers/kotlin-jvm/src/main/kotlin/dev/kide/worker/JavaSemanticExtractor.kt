@@ -22,6 +22,7 @@ import com.sun.source.util.JavacTask
 import com.sun.source.util.TreePath
 import com.sun.source.util.TreePathScanner
 import com.sun.source.util.Trees
+import org.slf4j.LoggerFactory
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -38,11 +39,15 @@ import kotlinx.serialization.json.put
  * one request and emits only canonical JSON facts before returning.
  */
 internal object JavaSemanticExtractor {
+    private val log = LoggerFactory.getLogger(JavaSemanticExtractor::class.java)
     private var lastTimings: List<Pair<String, Long>> = emptyList()
     private var lastArtifactCandidates: List<ResolvedJvmArtifact> = emptyList()
+    private var lastMetrics: List<Pair<String, Long>> = emptyList()
+    private val metrics = mutableMapOf<String, Long>()
     private var stagingMillis: Long = 0
     fun consumeTimings(): List<Pair<String, Long>> = lastTimings.also { lastTimings = emptyList() }
     fun artifactCandidates(): List<ResolvedJvmArtifact> = lastArtifactCandidates.also { lastArtifactCandidates = emptyList() }
+    fun consumeMetrics(): List<Pair<String, Long>> = lastMetrics.also { lastMetrics = emptyList() }
     /**
      * A worker serves requests sequentially. Keep compiled sibling sources for
      * its lifetime so a cold index pays one full-module javac pass rather than
@@ -58,6 +63,7 @@ internal object JavaSemanticExtractor {
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
         val timings = mutableListOf<Pair<String, Long>>()
         stagingMillis = 0
+        metrics.clear()
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
         require(selected.isNotEmpty()) { "Java analysis requires source files" }
         val projectContext = selected.values.map { it.jsonObject.requiredString("context") }.distinct().singleOrNull()
@@ -73,7 +79,7 @@ internal object JavaSemanticExtractor {
         val sourceIdentities = sourceIdentities(selected, contexts, workspaceRoot)
         val analyzeStarted = System.nanoTime()
         return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard -> analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities) }
-            .also { timings += "stage_compile" to stagingMillis; timings += "shard_analyze" to (System.nanoTime() - analyzeStarted) / 1_000_000; lastTimings = timings }
+            .also { timings += "stage_compile" to stagingMillis; timings += "shard_analyze" to (System.nanoTime() - analyzeStarted) / 1_000_000; lastTimings = timings; lastMetrics = metrics.toList() }
     }
 
     private fun sourceIdentities(
@@ -135,14 +141,20 @@ internal object JavaSemanticExtractor {
                 }
             }
             val task = compiler.getTask(null, fileManager, diagnostics, options, null, units) as JavacTask
+            val parseStarted = System.nanoTime()
             val parsed = task.parse().toList()
+            addTiming("semantic_parse", parseStarted)
+            val analyzeStarted = System.nanoTime()
             val analysisFailure = runCatching { task.analyze() }.exceptionOrNull()
+            addTiming("semantic_analyze", analyzeStarted)
             if (analysisFailure != null && !MavenExternalResolver.bestEffortEnabled) throw analysisFailure
             val trees = Trees.instance(task)
             val collector = FactCollector(trees, selected, sourceIdentities, allSources, staged?.declarationIds.orEmpty())
             if (analysisFailure == null) {
+                val factsStarted = System.nanoTime()
                 collector.collectDeclarations(parsed)
                 collector.collectReferences(parsed)
+                addTiming("semantic_facts", factsStarted)
             }
             val snapshots = collector.snapshots(diagnostics.diagnostics).let { snapshots ->
                 analysisFailure?.let { failure ->
@@ -154,6 +166,7 @@ internal object JavaSemanticExtractor {
             } }.toSortedSet()
             val resolved = JvmBytecodeExtractor.resolvedTargetIds((context.classpath + listOfNotNull(staged?.output)).distinct(), externalKeys)
             val unresolvedDependencies = context.unresolvedDependencies.distinct().sorted()
+            metrics["unresolved_dependencies"] = (metrics["unresolved_dependencies"] ?: 0) + unresolvedDependencies.size
             return snapshots.map { snapshot -> remapExternalAnnotations(snapshot.jsonObject, resolved) }
                 .let { snapshots ->
                     if (unresolvedDependencies.isEmpty()) snapshots
@@ -176,9 +189,14 @@ internal object JavaSemanticExtractor {
                 append('\u0000').append(source).append(':').append(fingerprint(Files.readAllBytes(source)))
             }
         }
-        stagedContexts[key]?.let { return it }
+        stagedContexts[key]?.let { metrics["stage_cache_hits"] = (metrics["stage_cache_hits"] ?: 0) + 1; return it }
+        metrics["stage_cache_misses"] = (metrics["stage_cache_misses"] ?: 0) + 1
 
-        val compiler = ToolProvider.getSystemJavaCompiler() ?: return null
+        val compiler = ToolProvider.getSystemJavaCompiler() ?: run {
+            incrementMetric("stage_compile_failed")
+            incrementMetric("stage_failure_no_compiler")
+            return null
+        }
         val output = Files.createTempDirectory("kide-java-stage-")
         val diagnostics = DiagnosticCollector<JavaFileObject>()
         return try {
@@ -194,18 +212,47 @@ internal object JavaSemanticExtractor {
                 val failure = runCatching { task.analyze() }.exceptionOrNull()
                 if (failure != null) {
                     if (!MavenExternalResolver.bestEffortEnabled) throw failure
+                    log.debug(
+                        "Java staged compilation analysis failed component={} sources={} classpath_entries={}",
+                        context.component,
+                        sources.size,
+                        context.classpath.size,
+                        failure,
+                    )
+                    incrementMetric("stage_compile_failed")
+                    incrementMetric("stage_failure_analyze")
                     return null
                 }
                 val allSelected = sources.associateWith { source -> sourceIdentities[source] ?: return null }
                 val collector = FactCollector(Trees.instance(task), allSelected, sourceIdentities, sources)
                 collector.collectDeclarations(parsed)
                 task.generate()
-                StagedContext(output, collector.declarationIds()).also { stagedContexts[key] = it }
+                StagedContext(output, collector.declarationIds()).also {
+                    stagedContexts[key] = it
+                    incrementMetric("stage_compile_success")
+                }
             }
         } catch (failure: Throwable) {
             if (!MavenExternalResolver.bestEffortEnabled) throw failure
+            log.debug(
+                "Java staged compilation failed component={} sources={} classpath_entries={}",
+                context.component,
+                sources.size,
+                context.classpath.size,
+                failure,
+            )
+            incrementMetric("stage_compile_failed")
+            incrementMetric("stage_failure_other")
             null
         }
+    }
+
+    private fun addTiming(name: String, started: Long) {
+        metrics[name] = (metrics[name] ?: 0) + (System.nanoTime() - started) / 1_000_000
+    }
+
+    private fun incrementMetric(name: String) {
+        metrics[name] = (metrics[name] ?: 0) + 1
     }
 
     private fun withUnresolvedDependencyDiagnostics(snapshot: JsonObject, unresolved: List<String>) = buildJsonObject {

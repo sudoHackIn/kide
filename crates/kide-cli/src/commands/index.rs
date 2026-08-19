@@ -141,6 +141,8 @@ pub(super) fn index(
         source_commit_millis = run.source_commit_millis,
         dependency_catalog_millis = run.dependency_catalog_millis,
         dependency_materialization_millis = run.dependency_materialization_millis,
+        worker_phases = ?run.worker_phase_millis,
+        worker_metrics = ?run.worker_metrics,
         "index complete"
     );
     if verbosity > 0 {
@@ -208,7 +210,7 @@ pub(super) fn index(
                     .copied()
                     .unwrap_or_default();
                 eprintln!(
-                    "  batch #{index}: {} {} files={} worker={}ms commit={}ms [import={}ms stage={}ms semantic={}ms]",
+                    "  batch #{index}: {} {} files={} worker={}ms commit={}ms [import={}ms stage={}ms semantic={}ms parse={}ms analyze={}ms facts={}ms cache={}/{} stage-ok={} failed={} unresolved={} response={}B serialize={}ms]",
                     batch.component,
                     batch.language,
                     batch.source_units,
@@ -217,6 +219,16 @@ pub(super) fn index(
                     import,
                     stage,
                     pipeline.saturating_sub(stage),
+                    batch.worker_metrics.get("semantic_parse").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("semantic_analyze").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("semantic_facts").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("stage_cache_hits").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("stage_cache_misses").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("stage_compile_success").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("stage_compile_failed").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("unresolved_dependencies").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("response_bytes").copied().unwrap_or_default(),
+                    batch.worker_metrics.get("serialize_millis").copied().unwrap_or_default(),
                 );
             }
         }
@@ -243,6 +255,7 @@ pub(super) fn index(
             "dependency_catalog": run.dependency_catalog_millis,
             "dependency_materialization": run.dependency_materialization_millis,
             "worker_phases": run.worker_phase_millis,
+            "worker_metrics": run.worker_metrics,
             "batches": run.batches,
         },
         })

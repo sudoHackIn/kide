@@ -201,6 +201,8 @@ pub struct AnalysisBatchResponse {
     pub timings: Vec<PhaseTiming>,
     #[serde(default)]
     pub artifact_candidates: Vec<ArtifactCandidate>,
+    #[serde(default)]
+    pub metrics: Vec<WorkerMetric>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +210,8 @@ pub struct PhaseTiming {
     pub phase: String,
     pub elapsed_millis: u64,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerMetric { pub name: String, pub value: u64 }
 
 /// Ephemeral resolved-artifact input. Core must never persist `locator`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

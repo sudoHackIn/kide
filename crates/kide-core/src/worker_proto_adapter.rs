@@ -10,7 +10,7 @@ use crate::{
     Language, OccurrenceKind, PhaseTiming, Precision, ProjectManifest, Provenance, ReferenceEdge,
     SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
     SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
-    WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
+    WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkerMetric, WorkspaceId,
     WorkspacePath, SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
     SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
     SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseState,
@@ -1331,6 +1331,7 @@ pub fn analysis_batch_response(
             .collect::<Result<Vec<_>, _>>()?,
         timings: value.timings.iter().map(|timing| worker_proto::PhaseTiming { phase: timing.phase.clone(), elapsed_millis: timing.elapsed_millis }).collect(),
         artifact_candidates: value.artifact_candidates.iter().map(artifact_candidate).collect(),
+        metrics: value.metrics.iter().map(|metric| worker_proto::WorkerMetric { name: metric.name.clone(), value: metric.value }).collect(),
     })
 }
 
@@ -1345,6 +1346,7 @@ pub fn decode_analysis_batch_response(
             .collect::<Result<Vec<_>, _>>()?,
         timings: value.timings.into_iter().map(|timing| PhaseTiming { phase: timing.phase, elapsed_millis: timing.elapsed_millis }).collect(),
         artifact_candidates: value.artifact_candidates.into_iter().map(decode_artifact_candidate).collect::<Result<Vec<_>, _>>()?,
+        metrics: value.metrics.into_iter().map(|metric| WorkerMetric { name: metric.name, value: metric.value }).collect(),
     })
 }
 

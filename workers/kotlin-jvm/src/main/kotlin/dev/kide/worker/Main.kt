@@ -89,8 +89,14 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                         })
                     })
                 }
+                val serializeStarted = System.nanoTime()
+                val response = ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(timed)
+                val metrics = response.metricsList.toMutableList().apply {
+                    add(Worker.WorkerMetric.newBuilder().setName("response_bytes").setValue(response.serializedSize.toLong()).build())
+                    add(Worker.WorkerMetric.newBuilder().setName("serialize_millis").setValue((System.nanoTime() - serializeStarted) / 1_000_000).build())
+                }
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
-                    .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(timed)).build()
+                    .setAnalysisBatchResponse(response.toBuilder().clearMetrics().addAllMetrics(metrics).build()).build()
             } catch (error: Exception) {
                 logger().error("Source analysis failed for request {}", request.requestId, error)
                 unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
@@ -228,6 +234,9 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         put("timings", buildJsonArray { JavaSemanticExtractor.consumeTimings().forEach { (phase, elapsed) -> add(buildJsonObject { put("phase", phase); put("elapsed_millis", elapsed) }) } })
         put("artifact_candidates", buildJsonArray { JavaSemanticExtractor.artifactCandidates().forEach { candidate ->
             add(buildJsonObject { put("locator", candidate.path.toString()); put("component", candidate.component); put("context", candidate.context) })
+        } })
+        put("metrics", buildJsonArray { JavaSemanticExtractor.consumeMetrics().forEach { (name, value) ->
+            add(buildJsonObject { put("name", name); put("value", value) })
         } })
     }
     require(language == "kotlin") { "kide-kotlin-jvm does not support $language source units" }

@@ -440,6 +440,7 @@ mod worker_framing_tests {
                 component: ComponentId::new("maven:app:main"),
                 context: Fingerprint::new("sha256:context"),
             }],
+            metrics: Vec::new(),
         };
         let encoded = crate::worker_proto_adapter::analysis_batch_response(&response)
             .expect("response encodes");

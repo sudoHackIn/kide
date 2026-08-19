@@ -87,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_default(),
                     timings: Vec::new(),
                     artifact_candidates: Vec::new(),
+                    metrics: Vec::new(),
                 })
             }
             WorkerMessage::ArtifactAnalysisRequest(_) => {

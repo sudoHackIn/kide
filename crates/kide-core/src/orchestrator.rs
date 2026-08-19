@@ -32,6 +32,7 @@ pub struct IndexRun {
     /// Wall time committing validated source snapshots to SQLite.
     pub source_commit_millis: u128,
     pub worker_phase_millis: BTreeMap<String, u64>,
+    pub worker_metrics: BTreeMap<String, u64>,
     pub batches: Vec<BatchIndexMetrics>,
 }
 
@@ -43,6 +44,7 @@ pub struct BatchIndexMetrics {
     pub worker_millis: u128,
     pub commit_millis: u128,
     pub worker_phases: BTreeMap<String, u64>,
+    pub worker_metrics: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +121,7 @@ pub fn index_selected_batches(
         source_worker_millis: 0,
         source_commit_millis: 0,
         worker_phase_millis: BTreeMap::new(),
+        worker_metrics: BTreeMap::new(),
         batches: Vec::new(),
     };
     for action in actions {
@@ -270,6 +273,11 @@ fn analyze_selected_batch(
         *worker_phases.entry(timing.phase.clone()).or_default() += timing.elapsed_millis;
         *run.worker_phase_millis.entry(timing.phase).or_default() += timing.elapsed_millis;
     }
+    let mut worker_metrics = BTreeMap::new();
+    for metric in response.metrics {
+        *worker_metrics.entry(metric.name.clone()).or_default() += metric.value;
+        *run.worker_metrics.entry(metric.name).or_default() += metric.value;
+    }
     let commit_started = Instant::now();
     let entries = snapshots
         .iter()
@@ -285,6 +293,7 @@ fn analyze_selected_batch(
         worker_millis,
         commit_millis: commit_started.elapsed().as_millis(),
         worker_phases,
+        worker_metrics,
     });
     tracing::debug!(
         target: "kide::index",
@@ -539,6 +548,7 @@ fn index_batch_with_optional_cache(
         source_worker_millis: 0,
         source_commit_millis: 0,
         worker_phase_millis: BTreeMap::new(),
+        worker_metrics: BTreeMap::new(),
         batches: Vec::new(),
     };
     for action in actions {
@@ -597,6 +607,11 @@ fn index_batch_with_optional_cache(
         *worker_phases.entry(timing.phase.clone()).or_default() += timing.elapsed_millis;
         *run.worker_phase_millis.entry(timing.phase).or_default() += timing.elapsed_millis;
     }
+    let mut worker_metrics = BTreeMap::new();
+    for metric in response.metrics {
+        *worker_metrics.entry(metric.name.clone()).or_default() += metric.value;
+        *run.worker_metrics.entry(metric.name).or_default() += metric.value;
+    }
     // Keep the same cold worker alive for its dependency catalog request;
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
@@ -641,6 +656,7 @@ fn index_batch_with_optional_cache(
         worker_millis,
         commit_millis: commit_started.elapsed().as_millis(),
         worker_phases,
+        worker_metrics,
     });
     tracing::debug!(
         target: "kide::index",
