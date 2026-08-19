@@ -599,13 +599,27 @@ impl IndexStore {
         snapshot: &FileAnalysisSnapshot,
     ) -> Result<(), IndexStoreError> {
         validate_snapshot(expected, snapshot)?;
-        let _span = tracing::debug_span!(target: "kide::store", "replace_snapshot", source_unit_id = %expected.id.as_str()).entered();
-        tracing::debug!(target: "kide::store", symbols = snapshot.symbols.len(), "writing snapshot");
         let transaction = self.connection.transaction()?;
         delete_file_owned_facts(&transaction, &expected.id)?;
         insert_snapshot(&transaction, snapshot)?;
         transaction.commit()?;
-        tracing::debug!(target: "kide::store", "snapshot committed");
+        Ok(())
+    }
+
+    /// Atomically replaces every source snapshot in one validated worker batch.
+    pub fn replace_snapshots_batch(
+        &mut self,
+        entries: &[(&SourceUnit, &FileAnalysisSnapshot)],
+    ) -> Result<(), IndexStoreError> {
+        for (expected, snapshot) in entries {
+            validate_snapshot(expected, snapshot)?;
+        }
+        let transaction = self.connection.transaction()?;
+        for (expected, snapshot) in entries {
+            delete_file_owned_facts(&transaction, &expected.id)?;
+            insert_snapshot(&transaction, snapshot)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1583,6 +1597,19 @@ mod tests {
                 .expect("diagnostics lookup"),
             snapshot.diagnostics
         );
+    }
+
+    #[test]
+    fn batch_replace_rolls_back_when_any_snapshot_is_invalid() {
+        let directory = tempdir().expect("temporary index directory");
+        let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        let first = source_unit("sha256:first");
+        let second = SourceUnit { id: SourceUnitId::new("fixture:second"), path: WorkspacePath::new("src/Second.java"), ..first.clone() };
+        let valid = snapshot(first.clone());
+        let invalid = snapshot(first.clone());
+
+        assert!(store.replace_snapshots_batch(&[(&first, &valid), (&second, &invalid)]).is_err());
+        assert!(store.source_unit(&first.id).expect("reads store").is_none());
     }
 
     #[test]

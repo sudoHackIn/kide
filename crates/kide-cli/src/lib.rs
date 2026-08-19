@@ -123,7 +123,7 @@ fn run() -> Result<QueryStatus> {
 fn init_logging(verbosity: u8) {
     let fallback = match verbosity {
         0 => "kide=warn",
-        1 => "kide=info",
+        1 | 2 => "kide=info",
         _ => "kide=debug",
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()

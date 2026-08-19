@@ -25,6 +25,8 @@ pub struct IndexRun {
     pub worker_starts: u64,
     pub dependency_analyzed: usize,
     pub dependency_reused: usize,
+    pub dependency_catalog_millis: u128,
+    pub dependency_materialization_millis: u128,
     /// Wall time spent awaiting source-analysis worker responses.
     pub source_worker_millis: u128,
     /// Wall time committing validated source snapshots to SQLite.
@@ -112,6 +114,8 @@ pub fn index_selected_batches(
         worker_starts: 0,
         dependency_analyzed: 0,
         dependency_reused: 0,
+        dependency_catalog_millis: 0,
+        dependency_materialization_millis: 0,
         source_worker_millis: 0,
         source_commit_millis: 0,
         worker_phase_millis: BTreeMap::new(),
@@ -184,7 +188,9 @@ pub fn index_selected_batches(
             supervisor.handshake("index-dependency-catalog")?;
             supervisor
         };
+        let catalog_started = Instant::now();
         index_dependency_catalog(store, supervisor)?;
+        run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     }
     run.worker_starts = supervisors
         .iter()
@@ -260,10 +266,12 @@ fn analyze_selected_batch(
         *run.worker_phase_millis.entry(timing.phase).or_default() += timing.elapsed_millis;
     }
     let commit_started = Instant::now();
-    for snapshot in snapshots {
-        store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
-        run.analyzed += 1;
-    }
+    let entries = snapshots
+        .iter()
+        .map(|snapshot| (&snapshot.source_unit, snapshot))
+        .collect::<Vec<_>>();
+    store.replace_snapshots_batch(&entries)?;
+    run.analyzed += snapshots.len();
     run.source_commit_millis += commit_started.elapsed().as_millis();
     run.batches.push(BatchIndexMetrics {
         component: batch.component.as_str().to_owned(),
@@ -521,6 +529,8 @@ fn index_batch_with_optional_cache(
         worker_starts: 0,
         dependency_analyzed: 0,
         dependency_reused: 0,
+        dependency_catalog_millis: 0,
+        dependency_materialization_millis: 0,
         source_worker_millis: 0,
         source_commit_millis: 0,
         worker_phase_millis: BTreeMap::new(),
@@ -585,9 +595,12 @@ fn index_batch_with_optional_cache(
     // Keep the same cold worker alive for its dependency catalog request;
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
+    let catalog_started = Instant::now();
     index_dependency_catalog(store, &mut supervisor)?;
+    run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
+    let mut entries = Vec::with_capacity(reanalyze.len());
     let commit_started = Instant::now();
     for expected in &reanalyze {
         let snapshot = snapshots
@@ -599,14 +612,15 @@ fn index_batch_with_optional_cache(
             .find(|input| input.source_unit.id == expected.id)
             .and_then(|input| input.public_api_fingerprint.as_ref());
         let dependents = store.dependent_source_units(&expected.id)?;
-        store.replace_snapshot(expected, snapshot)?;
+        entries.push((expected, snapshot));
         api_dependents.extend(crate::api_dependent_invalidations(
             previous_api,
             snapshot.public_api_fingerprint.as_ref(),
             dependents,
         ));
-        run.analyzed += 1;
     }
+    store.replace_snapshots_batch(&entries)?;
+    run.analyzed += entries.len();
     for dependent in api_dependents {
         if !reanalyze.iter().any(|source| source.id == dependent) {
             store.remove_snapshot(&dependent)?;

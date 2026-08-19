@@ -99,6 +99,7 @@ pub(super) fn index(
         index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
     };
     if warm_dependencies {
+        let materialization_started = Instant::now();
         let mut worker =
             WorkerSupervisor::new(selection.batches[0].worker.installation.launch.clone());
         worker.handshake("warm-dependency-cache")?;
@@ -124,6 +125,7 @@ pub(super) fn index(
             }
         }
         run.worker_starts += worker.start_count();
+        run.dependency_materialization_millis += materialization_started.elapsed().as_millis();
     }
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;
@@ -137,26 +139,85 @@ pub(super) fn index(
         discovery_millis,
         source_worker_millis = run.source_worker_millis,
         source_commit_millis = run.source_commit_millis,
+        dependency_catalog_millis = run.dependency_catalog_millis,
+        dependency_materialization_millis = run.dependency_materialization_millis,
         "index complete"
     );
     if verbosity > 0 {
-        let phase_order = ["context_import", "stage_compile", "shard_analyze", "serialize", "worker_total"];
-        let phases = phase_order
-            .into_iter()
-            .filter_map(|phase| run.worker_phase_millis.get(phase).map(|millis| format!("{phase}={millis}ms")))
-            .chain(run.worker_phase_millis.iter().filter(|(phase, _)| !phase_order.contains(&phase.as_str())).map(|(phase, millis)| format!("{phase}={millis}ms")))
+        let import = run
+            .worker_phase_millis
+            .get("context_import")
+            .copied()
+            .unwrap_or_default();
+        let stage = run
+            .worker_phase_millis
+            .get("stage_compile")
+            .copied()
+            .unwrap_or_default();
+        let pipeline = run
+            .worker_phase_millis
+            .get("shard_analyze")
+            .copied()
+            .unwrap_or_default();
+        let semantic = pipeline.saturating_sub(stage);
+        let total = run
+            .worker_phase_millis
+            .get("worker_total")
+            .copied()
+            .unwrap_or_default();
+        let phase_order = [
+            "context_import",
+            "stage_compile",
+            "shard_analyze",
+            "serialize",
+            "worker_total",
+        ];
+        let phases = run
+            .worker_phase_millis
+            .iter()
+            .filter(|(phase, _)| !phase_order.contains(&phase.as_str()))
+            .map(|(phase, millis)| format!("{phase}={millis}ms"))
             .collect::<Vec<_>>()
             .join(" ");
         eprintln!(
-            "index timings\n  discovery: {discovery_millis}ms\n  worker:    {}ms\n  commit:    {}ms\n  batches:   {}\n  phases:    {}",
+            "index timings\n  discovery: {discovery_millis}ms\n  worker:    {}ms\n  commit:    {}ms\n  batches:   {}\n  worker phases\n    context import: {import}ms\n    shard pipeline: {pipeline}ms\n      stage compile: {stage}ms\n      semantic + facts: {semantic}ms\n    worker total: {total}ms\n  other phases: {}",
             run.source_worker_millis,
             run.source_commit_millis,
             run.batches.len(),
             phases,
         );
+        eprintln!(
+            "  dependency catalog: {}ms\n  dependency materialization: {}ms",
+            run.dependency_catalog_millis, run.dependency_materialization_millis
+        );
         if verbosity > 1 {
             for (index, batch) in run.batches.iter().enumerate() {
-                eprintln!("  batch #{index}: {} {} files={} worker={}ms commit={}ms", batch.component, batch.language, batch.source_units, batch.worker_millis, batch.commit_millis);
+                let import = batch
+                    .worker_phases
+                    .get("context_import")
+                    .copied()
+                    .unwrap_or_default();
+                let stage = batch
+                    .worker_phases
+                    .get("stage_compile")
+                    .copied()
+                    .unwrap_or_default();
+                let pipeline = batch
+                    .worker_phases
+                    .get("shard_analyze")
+                    .copied()
+                    .unwrap_or_default();
+                eprintln!(
+                    "  batch #{index}: {} {} files={} worker={}ms commit={}ms [import={}ms stage={}ms semantic={}ms]",
+                    batch.component,
+                    batch.language,
+                    batch.source_units,
+                    batch.worker_millis,
+                    batch.commit_millis,
+                    import,
+                    stage,
+                    pipeline.saturating_sub(stage),
+                );
             }
         }
     }
@@ -179,6 +240,8 @@ pub(super) fn index(
             "discovery": discovery_millis,
             "source_worker": run.source_worker_millis,
             "source_commit": run.source_commit_millis,
+            "dependency_catalog": run.dependency_catalog_millis,
+            "dependency_materialization": run.dependency_materialization_millis,
             "worker_phases": run.worker_phase_millis,
             "batches": run.batches,
         },
