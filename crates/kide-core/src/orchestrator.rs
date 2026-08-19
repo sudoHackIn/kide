@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    time::Instant,
 };
 
 use thiserror::Error;
@@ -24,6 +25,10 @@ pub struct IndexRun {
     pub worker_starts: u64,
     pub dependency_analyzed: usize,
     pub dependency_reused: usize,
+    /// Wall time spent awaiting source-analysis worker responses.
+    pub source_worker_millis: u128,
+    /// Wall time committing validated source snapshots to SQLite.
+    pub source_commit_millis: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +100,8 @@ pub fn index_selected_batches(
         worker_starts: 0,
         dependency_analyzed: 0,
         dependency_reused: 0,
+        source_worker_millis: 0,
+        source_commit_millis: 0,
     };
     for action in actions {
         match action {
@@ -199,6 +206,7 @@ fn analyze_selected_batch(
             });
         }
     }
+    let worker_started = Instant::now();
     let response = supervisor.request(WorkerEnvelope::new(
         format!("index-batch-{batch_index}"),
         WorkerMessage::AnalyzeBatchRequest(AnalyzeBatchRequest {
@@ -215,16 +223,35 @@ fn analyze_selected_batch(
             source_units: requested.clone(),
         }),
     ))?;
+    run.source_worker_millis += worker_started.elapsed().as_millis();
+    tracing::info!(
+        target: "kide::index",
+        batch_index,
+        component = batch.component.as_str(),
+        language = ?batch.language,
+        source_units = requested.len(),
+        worker_millis = worker_started.elapsed().as_millis(),
+        "source batch analyzed"
+    );
     let WorkerMessage::AnalysisBatchResponse(response) = response.message else {
         return Err(IndexOrchestratorError::InvalidResponse {
             received: Box::new(response.message),
         });
     };
     let snapshots = validate_batch(&requested, response.snapshots)?;
+    let commit_started = Instant::now();
     for snapshot in snapshots {
         store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
         run.analyzed += 1;
     }
+    run.source_commit_millis += commit_started.elapsed().as_millis();
+    tracing::debug!(
+        target: "kide::index",
+        batch_index,
+        source_units = requested.len(),
+        commit_millis = commit_started.elapsed().as_millis(),
+        "source batch committed"
+    );
     Ok(())
 }
 
@@ -466,6 +493,8 @@ fn index_batch_with_optional_cache(
         worker_starts: 0,
         dependency_analyzed: 0,
         dependency_reused: 0,
+        source_worker_millis: 0,
+        source_commit_millis: 0,
     };
     for action in actions {
         match action {
@@ -486,6 +515,7 @@ fn index_batch_with_optional_cache(
     let mut supervisor = WorkerSupervisor::new(launch);
     tracing::debug!(target: "kide::index", "starting worker handshake");
     supervisor.handshake("index-handshake")?;
+    let worker_started = Instant::now();
     let response = supervisor.request(WorkerEnvelope::new(
         "index-batch",
         WorkerMessage::AnalyzeBatchRequest(AnalyzeBatchRequest {
@@ -502,6 +532,13 @@ fn index_batch_with_optional_cache(
             source_units: reanalyze.clone(),
         }),
     ))?;
+    run.source_worker_millis += worker_started.elapsed().as_millis();
+    tracing::info!(
+        target: "kide::index",
+        source_units = reanalyze.len(),
+        worker_millis = worker_started.elapsed().as_millis(),
+        "source batch analyzed"
+    );
     tracing::debug!(target: "kide::index", "received source batch response");
     let WorkerMessage::AnalysisBatchResponse(response) = response.message else {
         return Err(IndexOrchestratorError::InvalidResponse {
@@ -515,6 +552,7 @@ fn index_batch_with_optional_cache(
     index_dependency_catalog(store, &mut supervisor)?;
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
+    let commit_started = Instant::now();
     for expected in &reanalyze {
         let snapshot = snapshots
             .iter()
@@ -539,6 +577,13 @@ fn index_batch_with_optional_cache(
             run.removed += 1;
         }
     }
+    run.source_commit_millis += commit_started.elapsed().as_millis();
+    tracing::debug!(
+        target: "kide::index",
+        source_units = reanalyze.len(),
+        commit_millis = commit_started.elapsed().as_millis(),
+        "source batch committed"
+    );
     store.put_manifest(manifest)?;
     run.worker_starts = supervisor.start_count();
     Ok(run)

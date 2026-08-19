@@ -38,7 +38,9 @@ fn selected_source_shards_reuse_one_worker_for_an_index_run() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
     let manifest = manifest();
-    let worker = discovered_worker(launch());
+    let mut reusable_launch = launch();
+    reusable_launch.idle_timeout = Duration::from_secs(2);
+    let worker = discovered_worker(reusable_launch);
     let selection = WorkerSelection {
         batches: vec![
             WorkerBatch {

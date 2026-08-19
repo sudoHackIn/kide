@@ -1,15 +1,15 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use kide_core::{
-    ArtifactBlobCache, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore, Provenance, QueryStatus,
-    WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkerSupervisor,
     cache_catalog_artifact, collect_workspace_text, discover_workspace,
-    index_batch_with_artifact_cache_and_provenance, index_selected_batches,
+    index_batch_with_artifact_cache_and_provenance, index_selected_batches, ArtifactBlobCache,
+    BuildSystem, IndexStore, Provenance, QueryStatus, WorkerCapability, WorkerInstallation,
+    WorkerLaunch, WorkerRegistry, WorkerSupervisor, CANONICAL_SCHEMA_VERSION,
 };
 
 /// Explicit cache warmup is intentionally bounded. Dependency blobs can be
@@ -23,7 +23,9 @@ pub(super) fn index(
     warm_dependencies: bool,
 ) -> Result<QueryStatus> {
     tracing::debug!(target: "kide::cli", workspace = %path.display(), "discovering workspace");
+    let discovery_started = Instant::now();
     let discovery = discover_workspace(&path)?;
+    let discovery_millis = discovery_started.elapsed().as_millis();
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
     let sources = discovery.source_units;
@@ -125,7 +127,18 @@ pub(super) fn index(
     }
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;
-    tracing::info!(target: "kide::cli", analyzed = run.analyzed, dependency_analyzed = run.dependency_analyzed, "index complete");
+    tracing::info!(
+        target: "kide::index",
+        analyzed = run.analyzed,
+        reused = run.reused,
+        removed = run.removed,
+        worker_starts = run.worker_starts,
+        dependency_analyzed = run.dependency_analyzed,
+        discovery_millis,
+        source_worker_millis = run.source_worker_millis,
+        source_commit_millis = run.source_commit_millis,
+        "index complete"
+    );
     println!(
         "{}",
         serde_json::json!({
@@ -141,6 +154,11 @@ pub(super) fn index(
         "dependency_warm_limit": warm_dependencies.then_some(WARM_DEPENDENCY_ARTIFACT_LIMIT),
         "text_documents": text_inventory.documents.len(),
         "text_skipped": text_inventory.skipped.len(),
+        "timing_millis": {
+            "discovery": discovery_millis,
+            "source_worker": run.source_worker_millis,
+            "source_commit": run.source_commit_millis,
+        },
         })
     );
     Ok(QueryStatus::Ok)
@@ -154,8 +172,12 @@ fn source_batch_limit() -> Result<usize> {
             .parse::<usize>()
             .ok()
             .filter(|limit| *limit > 0)
-            .ok_or_else(|| anyhow::anyhow!("KIDE_MAX_SOURCE_UNITS_PER_WORKER_BATCH must be a positive integer")),
-        Err(std::env::VarError::NotPresent) => Ok(kide_core::DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH),
+            .ok_or_else(|| {
+                anyhow::anyhow!("KIDE_MAX_SOURCE_UNITS_PER_WORKER_BATCH must be a positive integer")
+            }),
+        Err(std::env::VarError::NotPresent) => {
+            Ok(kide_core::DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -198,6 +220,10 @@ pub(super) fn kotlin_worker_installation(
     Ok(WorkerInstallation {
         name: "kotlin-jvm".to_owned(),
         launch,
-        build_systems: vec![BuildSystem::Gradle, BuildSystem::Maven, BuildSystem::Filesystem],
+        build_systems: vec![
+            BuildSystem::Gradle,
+            BuildSystem::Maven,
+            BuildSystem::Filesystem,
+        ],
     })
 }

@@ -323,6 +323,9 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(cold["status"], "ok");
     assert_eq!(cold["analyzed"], 3);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
+    assert!(cold["timing_millis"]["discovery"].is_number());
+    assert!(cold["timing_millis"]["source_worker"].as_u64().unwrap_or_default() > 0);
+    assert!(cold["timing_millis"]["source_commit"].is_number());
     assert!(peak_rss_kib > 0, "could not observe CLI RSS while indexing");
 
     let status = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "status"]);
