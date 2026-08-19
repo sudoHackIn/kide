@@ -15,6 +15,9 @@ use crate::{
     WorkerCapability, WorkerLaunch, WorkerSupervisor, WorkerSupervisorError,
 };
 
+/// Default for callers that have not yet supplied workspace scheduling policy.
+pub const DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryCapabilityStatus {
     Supported,
@@ -134,17 +137,59 @@ impl WorkerRegistry {
         sources: Vec<SourceUnit>,
         required: &[WorkerCapability],
     ) -> Result<WorkerSelection, WorkerRegistryError> {
+        self.select_with_batch_limit(
+            manifest,
+            sources,
+            required,
+            DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH,
+        )
+    }
+
+    /// The batch limit is caller-owned scheduling policy. It deliberately is
+    /// not part of the worker protocol, so a future workspace config can tune
+    /// it without changing worker compatibility.
+    pub fn select_with_batch_limit(
+        &self,
+        manifest: &ProjectManifest,
+        sources: Vec<SourceUnit>,
+        required: &[WorkerCapability],
+        max_source_units_per_batch: usize,
+    ) -> Result<WorkerSelection, WorkerRegistryError> {
+        assert!(max_source_units_per_batch > 0, "worker batch limit must be positive");
         let discovered = self.discover()?;
-        Ok(select_discovered(manifest, sources, required, discovered))
+        Ok(select_discovered_with_batch_limit(
+            manifest,
+            sources,
+            required,
+            discovered,
+            max_source_units_per_batch,
+        ))
     }
 }
 
 pub fn select_discovered(
     manifest: &ProjectManifest,
+    sources: Vec<SourceUnit>,
+    required: &[WorkerCapability],
+    workers: Vec<DiscoveredWorker>,
+) -> WorkerSelection {
+    select_discovered_with_batch_limit(
+        manifest,
+        sources,
+        required,
+        workers,
+        DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH,
+    )
+}
+
+pub fn select_discovered_with_batch_limit(
+    manifest: &ProjectManifest,
     mut sources: Vec<SourceUnit>,
     required: &[WorkerCapability],
     mut workers: Vec<DiscoveredWorker>,
+    max_source_units_per_batch: usize,
 ) -> WorkerSelection {
+    assert!(max_source_units_per_batch > 0, "worker batch limit must be positive");
     sources.sort_by_key(|source| {
         (
             source.component.as_str().to_owned(),
@@ -191,11 +236,13 @@ pub fn select_discovered(
                     .all(|capability| worker.capabilities.capabilities.contains(capability))
         });
         match worker {
-            Some(worker) => selection.batches.push(WorkerBatch {
-                worker: worker.clone(),
-                component,
-                language,
-                source_units,
+            Some(worker) => source_units.chunks(max_source_units_per_batch).for_each(|chunk| {
+                selection.batches.push(WorkerBatch {
+                    worker: worker.clone(),
+                    component: component.clone(),
+                    language: language.clone(),
+                    source_units: chunk.to_vec(),
+                });
             }),
             None => selection.unsupported.push(UnsupportedBatch {
                 component,
@@ -426,6 +473,28 @@ mod tests {
             )],
         );
         assert_eq!(selection.unsupported.len(), 1);
+    }
+
+    #[test]
+    fn shards_large_component_language_batches_deterministically() {
+        let limit = 2;
+        let sources = (0..(limit + 1))
+            .map(|index| source("gradle:kotlin", Language::Kotlin, &format!("src/File{index}.kt")))
+            .collect::<Vec<_>>();
+        let selection = select_discovered_with_batch_limit(
+            &manifest(),
+            sources,
+            &[WorkerCapability::FileAnalysisSnapshot],
+            vec![worker("kotlin", vec![Language::Kotlin], vec![BuildSystem::Gradle])],
+            limit,
+        );
+
+        assert!(selection.unsupported.is_empty());
+        assert_eq!(selection.batches.len(), 2);
+        assert_eq!(selection.batches[0].source_units.len(), limit);
+        assert_eq!(selection.batches[1].source_units.len(), 1);
+        assert_eq!(selection.batches[0].source_units[0].path.as_str(), "src/File0.kt");
+        assert_eq!(selection.batches[1].source_units[0].path.as_str(), "src/File2.kt");
     }
 
     #[test]

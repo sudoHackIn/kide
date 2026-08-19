@@ -43,10 +43,11 @@ pub(super) fn index(
         &discovery.root,
         verbosity,
     )?]);
-    let selection = registry.select(
+    let selection = registry.select_with_batch_limit(
         &discovery.manifest,
         sources.clone(),
         &[WorkerCapability::FileAnalysisSnapshot],
+        source_batch_limit()?,
     )?;
     if !selection.unsupported.is_empty() {
         let unsupported = selection
@@ -143,6 +144,20 @@ pub(super) fn index(
         })
     );
     Ok(QueryStatus::Ok)
+}
+
+/// Temporary external scheduling override. Workspace configuration will own
+/// this same policy once the config schema includes index execution limits.
+fn source_batch_limit() -> Result<usize> {
+    match std::env::var("KIDE_MAX_SOURCE_UNITS_PER_WORKER_BATCH") {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|limit| *limit > 0)
+            .ok_or_else(|| anyhow::anyhow!("KIDE_MAX_SOURCE_UNITS_PER_WORKER_BATCH must be a positive integer")),
+        Err(std::env::VarError::NotPresent) => Ok(kide_core::DEFAULT_MAX_SOURCE_UNITS_PER_WORKER_BATCH),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn kotlin_worker_installation(

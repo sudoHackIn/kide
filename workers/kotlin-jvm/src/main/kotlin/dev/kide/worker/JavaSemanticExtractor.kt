@@ -40,40 +40,65 @@ import kotlinx.serialization.json.put
 internal object JavaSemanticExtractor {
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
-        val mavenWorkspace = Files.isRegularFile(workspaceRoot.resolve("pom.xml"))
-        val contexts = if (mavenWorkspace) {
-            MavenProjectImporter.javaCompilationContexts(workspaceRoot)
-        } else {
-            GradleProjectImporter.javaCompilationContexts(workspaceRoot).values.toList()
+        val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot)
+        require(selected.isNotEmpty()) { "Java analysis requires source files" }
+        val sourceIdentities = sourceIdentities(selected, contexts, workspaceRoot)
+        return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard ->
+            analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities)
         }
-        val allSources = (contexts.flatMap { it.sourceFiles } + selected.keys).map(::canonical).distinct().sortedBy(Path::toString)
-        val fallbackContext = selected.values.firstOrNull()?.jsonObject?.requiredString("context")
-        val sourceIdentities = buildMap<Path, JsonObject> {
+    }
+
+    private fun sourceIdentities(
+        selected: Map<Path, JsonElement>,
+        contexts: List<JavaCompilationContext>,
+        workspaceRoot: Path,
+    ): Map<Path, JsonObject> {
+        val fallbackContext = selected.values.first().jsonObject.requiredString("context")
+        return buildMap {
             selected.forEach { (path, sourceUnit) -> put(path, sourceUnit.jsonObject) }
-            if (fallbackContext != null) contexts.forEach { compilation ->
-                compilation.sourceFiles.forEach { sourceFile ->
-                    val path = canonical(sourceFile)
-                    if (path !in this) {
-                        val relativePath = workspaceRoot.relativize(path).toString()
-                        put(path, buildJsonObject {
-                            put("id", "java:${compilation.component}:$relativePath")
-                            put("path", relativePath)
-                            put("language", "java")
-                            put("component", compilation.component)
-                            put("context", fallbackContext)
-                        })
-                    }
+            contexts.forEach { compilation -> compilation.ownedSourceFiles.forEach { sourceFile ->
+                val path = canonical(sourceFile)
+                if (path !in this) {
+                    val relativePath = workspaceRoot.relativize(path).toString()
+                    put(path, buildJsonObject {
+                        put("id", "java:${compilation.component}:$relativePath")
+                        put("path", relativePath)
+                        put("language", "java")
+                        put("component", compilation.component)
+                        put("context", fallbackContext)
+                    })
                 }
-            }
+            } }
         }
-        require(allSources.isNotEmpty()) { "Java analysis requires source files" }
+    }
+
+    private fun analyzePartition(
+        selected: Map<Path, JsonElement>,
+        context: JavaCompilationContext,
+        workspaceRoot: Path,
+        sourceIdentities: Map<Path, JsonObject>,
+    ): List<JsonElement> {
+        // Exact Java references require declaration ASTs for same-component
+        // types. The context is already bounded to this component and its
+        // project dependencies; a future two-phase declaration index can make
+        // this file-sharded without weakening reference ownership.
+        val allSources = (context.sourceFiles + selected.keys)
+            .map(::canonical).distinct().sortedBy(Path::toString)
         val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler()) { "a JDK with javac is required for Java indexing" }
         val diagnostics = DiagnosticCollector<JavaFileObject>()
         compiler.getStandardFileManager(diagnostics, null, Charsets.UTF_8).use { fileManager ->
             val units = fileManager.getJavaFileObjectsFromPaths(allSources)
             val options = buildList {
                 add("-proc:none")
-                val classpath = contexts.flatMap { it.classpath }.distinct().filter(Files::exists)
+                context.languageLevel?.let { release ->
+                    add("--release")
+                    add(release)
+                }
+                context.sourceRoots.takeIf { roots -> roots.isNotEmpty() }?.let { roots ->
+                    add("-sourcepath")
+                    add(roots.joinToString(System.getProperty("path.separator")))
+                }
+                val classpath = context.classpath.distinct().filter(Files::exists)
                 if (classpath.isNotEmpty()) {
                     add("-classpath")
                     add(classpath.joinToString(System.getProperty("path.separator")))
@@ -81,17 +106,24 @@ internal object JavaSemanticExtractor {
             }
             val task = compiler.getTask(null, fileManager, diagnostics, options, null, units) as JavacTask
             val parsed = task.parse().toList()
-            task.analyze()
+            val analysisFailure = runCatching { task.analyze() }.exceptionOrNull()
+            if (analysisFailure != null && !MavenExternalResolver.bestEffortEnabled) throw analysisFailure
             val trees = Trees.instance(task)
             val collector = FactCollector(trees, selected, sourceIdentities, allSources)
-            collector.collectDeclarations(parsed)
-            collector.collectReferences(parsed)
-            val snapshots = collector.snapshots(diagnostics.diagnostics)
+            if (analysisFailure == null) {
+                collector.collectDeclarations(parsed)
+                collector.collectReferences(parsed)
+            }
+            val snapshots = collector.snapshots(diagnostics.diagnostics).let { snapshots ->
+                analysisFailure?.let { failure ->
+                    snapshots.map { snapshot -> markPartial(withAnalysisFailureDiagnostic(snapshot.jsonObject, failure)) }
+                } ?: snapshots
+            }
             val externalKeys = snapshots.flatMap { snapshot -> snapshot.jsonObject["symbols"]!!.jsonArray.flatMap { symbol ->
                 symbol.jsonObject["applied_symbols"]!!.jsonArray.mapNotNull { value -> value.jsonPrimitive.content.removePrefix("jvm:type:").takeIf { value.jsonPrimitive.content.startsWith("jvm:type:") }?.let { "class:$it" } }
             } }.toSortedSet()
-            val resolved = JvmBytecodeExtractor.resolvedTargetIds(contexts.flatMap { it.classpath }.distinct(), externalKeys)
-            val unresolvedDependencies = contexts.flatMap { it.unresolvedDependencies }.distinct().sorted()
+            val resolved = JvmBytecodeExtractor.resolvedTargetIds(context.classpath.distinct(), externalKeys)
+            val unresolvedDependencies = context.unresolvedDependencies.distinct().sorted()
             return snapshots.map { snapshot -> remapExternalAnnotations(snapshot.jsonObject, resolved) }
                 .let { snapshots ->
                     if (unresolvedDependencies.isEmpty()) snapshots
@@ -114,6 +146,24 @@ internal object JavaSemanticExtractor {
                     put("completeness", "partial")
                     put("provenance", provenance)
                 }) }
+            })
+        }
+    }
+
+    private fun withAnalysisFailureDiagnostic(snapshot: JsonObject, failure: Throwable) = buildJsonObject {
+        snapshot.forEach { (key, value) ->
+            if (key != "diagnostics") put(key, value) else put(key, buildJsonArray {
+                value.jsonArray.forEach(::add)
+                val source = snapshot.getValue("source_unit").jsonObject.requiredString("id")
+                val provenance = snapshot.getValue("provenance")
+                add(buildJsonObject {
+                    put("source_unit", source)
+                    put("message", "Java semantic analysis failed for this Maven module and was skipped in best-effort mode: ${failure::class.simpleName}")
+                    put("severity", "warning")
+                    put("freshness", "fresh")
+                    put("completeness", "partial")
+                    put("provenance", provenance)
+                })
             })
         }
     }
@@ -210,9 +260,9 @@ internal object JavaSemanticExtractor {
             if (start < 0 || end < start) return
             val name = element.simpleName.toString()
             val nameStart = nameOffset(text, name, start, end)
-            val id = "java:${source.requiredString("component")}:${source.requiredString("path")}#${kind(element)}:$name:$nameStart"
+            val id = elementId(element, path, start, end) ?: return
             elementIds[element] = id
-            val owner = element.enclosingElement?.let(elementIds::get)
+            val owner = element.enclosingElement?.let(::elementId)
             if (path in selected) symbols.getOrPut(path, ::mutableListOf) += Symbol(id, element, start, end, nameStart, nameStart + name.length, owner)
             if (path in selected && element is TypeElement) {
                 element.superclass?.let { mirror -> (mirror as? javax.lang.model.type.DeclaredType)?.asElement()?.let(elementIds::get) }
@@ -227,7 +277,7 @@ internal object JavaSemanticExtractor {
             val sourcePath = sourcePath(path.compilationUnit) ?: return
             if (sourcePath !in selected) return
             val target = trees.getElement(path) ?: return
-            val targetId = elementIds[target] ?: return
+            val targetId = elementId(target) ?: return
             val text = contents.getValue(sourcePath)
             val start = trees.sourcePositions.getStartPosition(path.compilationUnit, tree).toInt()
             val end = trees.sourcePositions.getEndPosition(path.compilationUnit, tree).toInt()
@@ -260,6 +310,28 @@ internal object JavaSemanticExtractor {
             }
         }
 
+        /**
+         * SOURCE_PATH lets javac load a reactor type without making it an
+         * explicit batch input. Derive the same stable ID lazily so references
+         * from the shard still point at that type's eventual snapshot.
+         */
+        private fun elementId(element: Element): String? = elementIds[element] ?: trees.getPath(element)?.let { path ->
+            val sourcePath = sourcePath(path.compilationUnit) ?: return@let null
+            val positions = trees.sourcePositions
+            val start = positions.getStartPosition(path.compilationUnit, path.leaf).toInt()
+            val end = positions.getEndPosition(path.compilationUnit, path.leaf).toInt()
+            elementId(element, sourcePath, start, end)
+        }
+
+        private fun elementId(element: Element, path: Path, start: Int, end: Int): String? {
+            if (start < 0 || end < start) return null
+            val source = sourceIdentity(path) ?: return null
+            val text = contents[path] ?: return null
+            val name = element.simpleName.toString()
+            val nameStart = nameOffset(text, name, start, end)
+            return "java:${source.requiredString("component")}:${source.requiredString("path")}#${kind(element)}:$name:$nameStart"
+        }
+
         private fun symbolJson(symbol: Symbol, source: JsonObject, text: String, provenance: JsonElement) = buildJsonObject {
             put("id", symbol.id); put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", symbol.element.toString()) })
             put("language", "java"); put("kind", kind(symbol.element)); put("name", symbol.element.simpleName.toString()); put("qualified_name", qualifiedName(symbol.element)); put("signature", symbol.element.toString())
@@ -279,7 +351,14 @@ internal object JavaSemanticExtractor {
         private fun diagnosticJson(diagnostic: javax.tools.Diagnostic<out JavaFileObject>, source: JsonObject, text: String, provenance: JsonElement) = buildJsonObject {
             val start = diagnostic.startPosition.toInt().coerceAtLeast(0)
             val end = diagnostic.endPosition.toInt().coerceAtLeast(start)
-            put("source_unit", source.requiredString("id")); put("message", diagnostic.getMessage(null)); put("severity", diagnostic.kind.name.lowercase()); put("range", buildJsonObject { put("start", utf8(text, start)); put("end", utf8(text, end)) }); put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
+            put("source_unit", source.requiredString("id")); put("message", diagnostic.getMessage(null)); put("severity", diagnosticSeverity(diagnostic.kind)); put("range", buildJsonObject { put("start", utf8(text, start)); put("end", utf8(text, end)) }); put("freshness", "fresh"); put("completeness", "complete"); put("provenance", provenance)
+        }
+
+        private fun diagnosticSeverity(kind: javax.tools.Diagnostic.Kind): String = when (kind) {
+            javax.tools.Diagnostic.Kind.ERROR -> "error"
+            javax.tools.Diagnostic.Kind.WARNING, javax.tools.Diagnostic.Kind.MANDATORY_WARNING -> "warning"
+            javax.tools.Diagnostic.Kind.NOTE -> "information"
+            javax.tools.Diagnostic.Kind.OTHER -> "hint"
         }
 
         private fun sourcePath(unit: CompilationUnitTree): Path? = runCatching { canonical(Path.of(unit.sourceFile.toUri())) }.getOrNull()

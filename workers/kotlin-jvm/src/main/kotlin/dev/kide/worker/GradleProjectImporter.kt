@@ -44,15 +44,6 @@ internal object GradleProjectImporter {
         val projectDependencyModuleNames: Set<String> = emptySet(),
     )
 
-    /** Worker-local javac inputs. They deliberately never cross the worker boundary. */
-    data class JavaCompilationContext(
-        val component: String,
-        val sourceFiles: List<Path>,
-        val classpath: List<Path>,
-        val jdkHome: Path,
-        val unresolvedDependencies: List<String> = emptyList(),
-    )
-
     fun import(workspace: Path): JsonElement {
         require(Files.isDirectory(workspace)) { "workspace root is not a directory: $workspace" }
         val canonicalRoot = workspace.toRealPath()
@@ -113,17 +104,45 @@ internal object GradleProjectImporter {
         connector(root).connect().use { connection ->
             val environment = connection.getModel(BuildEnvironment::class.java)
             val project = connection.getModel(IdeaProject::class.java)
-            return project.modules.associate { module ->
+            data class ModuleContext(
+                val moduleName: String,
+                val dependencies: Set<String>,
+                val context: JavaCompilationContext,
+            )
+            val modules = project.modules.map { module ->
                 val libraries = module.dependencies.filterIsInstance<IdeaSingleEntryLibraryDependency>()
                     .map { dependency -> dependency.file.toPath().toAbsolutePath().normalize() }
                     .filter(Files::exists)
                     .distinct()
                     .sortedBy(Path::toString)
-                componentId(module) to JavaCompilationContext(
+                ModuleContext(
+                    module.name,
+                    module.dependencies.filterIsInstance<IdeaModuleDependency>().map(IdeaModuleDependency::getTargetModuleName).toSet(),
+                    JavaCompilationContext(
                     component = componentId(module),
                     sourceFiles = javaSourceFiles(module),
+                    ownedSourceFiles = javaSourceFiles(module),
+                    sourceRoots = javaSourceRoots(module),
                     classpath = libraries,
                     jdkHome = environment.java.javaHome.toPath().toAbsolutePath().normalize(),
+                    ),
+                )
+            }
+            val byModuleName = modules.associateBy(ModuleContext::moduleName)
+            fun closure(module: ModuleContext): List<ModuleContext> {
+                val visited = linkedSetOf<ModuleContext>()
+                fun visit(candidate: ModuleContext) {
+                    if (!visited.add(candidate)) return
+                    candidate.dependencies.mapNotNull(byModuleName::get).forEach(::visit)
+                }
+                visit(module)
+                return visited.toList()
+            }
+            return modules.associate { module ->
+                val dependencies = closure(module).map(ModuleContext::context)
+                module.context.component to module.context.copy(
+                    sourceFiles = dependencies.flatMap { it.ownedSourceFiles }.distinct().sortedBy(Path::toString),
+                    sourceRoots = dependencies.flatMap { it.sourceRoots }.distinct().sortedBy(Path::toString),
                 )
             }
         }
@@ -154,6 +173,14 @@ internal object GradleProjectImporter {
             }
         }
         .map { path -> path.toAbsolutePath().normalize() }
+        .distinct()
+        .sortedBy(Path::toString)
+
+    private fun javaSourceRoots(module: IdeaModule): List<Path> = module.contentRoots
+        .flatMap { root -> root.sourceDirectories + root.testDirectories }
+        .filterNot { directory -> directory.isGenerated }
+        .map { directory -> directory.directory.toPath().toAbsolutePath().normalize() }
+        .filter(Files::isDirectory)
         .distinct()
         .sortedBy(Path::toString)
 

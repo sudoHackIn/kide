@@ -63,25 +63,56 @@ internal object MavenProjectImporter {
     /** Resolve Maven's test classpath per reactor module; only regular JARs enter the catalog. */
     fun resolvedArtifacts(workspace: Path): List<ResolvedArtifact> = resolvedArtifacts(workspace, System.getenv())
 
-    fun javaCompilationContexts(workspace: Path): List<GradleProjectImporter.JavaCompilationContext> {
+    fun javaCompilationContexts(workspace: Path): List<JavaCompilationContext> {
         val root = workspace.toRealPath()
         val maven = selectMaven(root, System.getenv())
         val modules = effectiveReactor(root, canonicalPath(root, root.resolve("pom.xml"), "Maven workspace POM"), maven, System.getenv())
         val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        val sourcesByModule = modules.associateWith { module -> javaSources(root, module) }
+        val sourceRootsByModule = modules.associateWith { module -> javaSourceRoots(root, module) }
+        val modulesByCoordinate = modules.associateBy { module -> modelKey(module.model) }
+        fun reactorClosure(module: Module): List<Module> {
+            val visited = linkedSetOf<Module>()
+            fun visit(candidate: Module) {
+                if (!visited.add(candidate)) return
+                candidate.model.dependencies.orEmpty()
+                    .mapNotNull { dependency -> modulesByCoordinate["${dependency.groupId}:${dependency.artifactId}"] }
+                    .forEach(::visit)
+            }
+            visit(module)
+            return visited.toList()
+        }
         return modules.map { module ->
-            val sources = sourceSets(root, module).flatMap { sourceSet -> sourceSet.roots }
-                .flatMap { relative -> Files.walk(root.resolve(relative)).use { paths -> paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".java") }.toList() } }
+            val ownedSources = sourcesByModule.getValue(module)
+            val compilationSources = reactorClosure(module)
+                .flatMap { dependency -> sourcesByModule.getValue(dependency) }
+                .distinct().sortedBy(Path::toString)
+            val compilationRoots = reactorClosure(module)
+                .flatMap { dependency -> sourceRootsByModule.getValue(dependency) }
                 .distinct().sortedBy(Path::toString)
             val resolution = MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates)
-            GradleProjectImporter.JavaCompilationContext(
-                componentId(root, module),
-                sources,
-                resolution.paths,
-                Path.of(System.getProperty("java.home")),
-                resolution.unresolvedCoordinates,
+            JavaCompilationContext(
+                component = componentId(root, module),
+                sourceFiles = compilationSources,
+                ownedSourceFiles = ownedSources,
+                sourceRoots = compilationRoots,
+                classpath = resolution.paths,
+                jdkHome = Path.of(System.getProperty("java.home")),
+                languageLevel = javaLanguageLevel(module.model),
+                unresolvedDependencies = resolution.unresolvedCoordinates,
             )
         }
     }
+
+    private fun javaSources(root: Path, module: Module): List<Path> = sourceSets(root, module).flatMap { sourceSet -> sourceSet.roots }
+        .flatMap { relative -> Files.walk(root.resolve(relative)).use { paths -> paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".java") }.toList() } }
+        .distinct().sortedBy(Path::toString)
+
+    private fun javaSourceRoots(root: Path, module: Module): List<Path> = sourceSets(root, module)
+        .flatMap { sourceSet -> sourceSet.roots }
+        .map { relative -> root.resolve(relative) }
+        .filter { path -> Files.isDirectory(path) && Files.walk(path).use { paths -> paths.anyMatch { it.isRegularFile() && it.fileName.toString().endsWith(".java") } } }
+        .distinct().sortedBy(Path::toString)
 
     internal fun resolvedArtifacts(workspace: Path, environment: Map<String, String>): List<ResolvedArtifact> {
         val root = workspace.toRealPath()
@@ -161,6 +192,13 @@ internal object MavenProjectImporter {
             put("compiler_configuration", configuration)
         }
     }
+
+    /** Maven's effective model is the authority for the javac language level. */
+    private fun javaLanguageLevel(model: Model): String? = listOf(
+        model.properties?.getProperty("maven.compiler.release"),
+        model.properties?.getProperty("maven.compiler.source"),
+        model.properties?.getProperty("java.version"),
+    ).firstOrNull { value -> value?.matches(Regex("\\d+")) == true }
 
     private fun sourceSets(root: Path, module: Module): List<SourceSet> = listOf(
         sourceSet(root, module, "main", test = false),

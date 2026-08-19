@@ -6,6 +6,7 @@ import kotlin.io.path.createDirectories
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.jsonArray
@@ -118,9 +119,11 @@ class MavenProjectImporterTest {
             Files.createTempDirectory("kide-maven-artifact-stage-"),
         )
         val contexts = MavenProjectImporter.javaCompilationContexts(root)
-        val domain = contexts.single { context -> context.sourceFiles.any { it.fileName.toString() == "Book.java" } }
-        val app = contexts.single { context -> context.sourceFiles.any { it.fileName.toString() == "BookController.java" } }
-        fun sourceUnit(context: GradleProjectImporter.JavaCompilationContext, path: Path) = buildJsonObject {
+        val domain = contexts.single { context -> context.ownedSourceFiles.any { it.fileName.toString() == "Book.java" } }
+        val app = contexts.single { context -> context.ownedSourceFiles.any { it.fileName.toString() == "BookController.java" } }
+        assertTrue(app.sourceFiles.any { it.fileName.toString() == "Book.java" }, "reactor dependency sources must join the app javac context")
+        assertFalse(app.ownedSourceFiles.any { it.fileName.toString() == "Book.java" }, "dependency sources must retain domain ownership")
+        fun sourceUnit(context: JavaCompilationContext, path: Path) = buildJsonObject {
             val relative = root.relativize(path).toString()
             put("id", "${context.component}:$relative")
             put("component", context.component)
