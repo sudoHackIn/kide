@@ -143,6 +143,11 @@ message SymbolDeclaration {
 }
 message AnalysisBatchResponse {
   repeated FileAnalysisSnapshot snapshots = 1;
+  repeated PhaseTiming timings = 2;
+}
+message PhaseTiming {
+  string phase = 1;
+  uint64 elapsed_millis = 2;
 }
 // Facts are grouped by the immutable source snapshot that owns them. This
 // prevents a worker response from accidentally mixing generations of a file.

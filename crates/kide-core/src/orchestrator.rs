@@ -29,6 +29,18 @@ pub struct IndexRun {
     pub source_worker_millis: u128,
     /// Wall time committing validated source snapshots to SQLite.
     pub source_commit_millis: u128,
+    pub worker_phase_millis: BTreeMap<String, u64>,
+    pub batches: Vec<BatchIndexMetrics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BatchIndexMetrics {
+    pub component: String,
+    pub language: String,
+    pub source_units: usize,
+    pub worker_millis: u128,
+    pub commit_millis: u128,
+    pub worker_phases: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +114,8 @@ pub fn index_selected_batches(
         dependency_reused: 0,
         source_worker_millis: 0,
         source_commit_millis: 0,
+        worker_phase_millis: BTreeMap::new(),
+        batches: Vec::new(),
     };
     for action in actions {
         match action {
@@ -223,14 +237,15 @@ fn analyze_selected_batch(
             source_units: requested.clone(),
         }),
     ))?;
-    run.source_worker_millis += worker_started.elapsed().as_millis();
+    let worker_millis = worker_started.elapsed().as_millis();
+    run.source_worker_millis += worker_millis;
     tracing::info!(
         target: "kide::index",
         batch_index,
         component = batch.component.as_str(),
         language = ?batch.language,
         source_units = requested.len(),
-        worker_millis = worker_started.elapsed().as_millis(),
+        worker_millis,
         "source batch analyzed"
     );
     let WorkerMessage::AnalysisBatchResponse(response) = response.message else {
@@ -239,12 +254,25 @@ fn analyze_selected_batch(
         });
     };
     let snapshots = validate_batch(&requested, response.snapshots)?;
+    let mut worker_phases = BTreeMap::new();
+    for timing in response.timings {
+        *worker_phases.entry(timing.phase.clone()).or_default() += timing.elapsed_millis;
+        *run.worker_phase_millis.entry(timing.phase).or_default() += timing.elapsed_millis;
+    }
     let commit_started = Instant::now();
     for snapshot in snapshots {
         store.replace_snapshot(&snapshot.source_unit, &snapshot)?;
         run.analyzed += 1;
     }
     run.source_commit_millis += commit_started.elapsed().as_millis();
+    run.batches.push(BatchIndexMetrics {
+        component: batch.component.as_str().to_owned(),
+        language: format!("{:?}", batch.language).to_lowercase(),
+        source_units: requested.len(),
+        worker_millis,
+        commit_millis: commit_started.elapsed().as_millis(),
+        worker_phases,
+    });
     tracing::debug!(
         target: "kide::index",
         batch_index,
@@ -495,6 +523,8 @@ fn index_batch_with_optional_cache(
         dependency_reused: 0,
         source_worker_millis: 0,
         source_commit_millis: 0,
+        worker_phase_millis: BTreeMap::new(),
+        batches: Vec::new(),
     };
     for action in actions {
         match action {
@@ -532,11 +562,12 @@ fn index_batch_with_optional_cache(
             source_units: reanalyze.clone(),
         }),
     ))?;
-    run.source_worker_millis += worker_started.elapsed().as_millis();
+    let worker_millis = worker_started.elapsed().as_millis();
+    run.source_worker_millis += worker_millis;
     tracing::info!(
         target: "kide::index",
         source_units = reanalyze.len(),
-        worker_millis = worker_started.elapsed().as_millis(),
+        worker_millis,
         "source batch analyzed"
     );
     tracing::debug!(target: "kide::index", "received source batch response");
@@ -546,6 +577,11 @@ fn index_batch_with_optional_cache(
         });
     };
     let snapshots = validate_batch(&reanalyze, response.snapshots)?;
+    let mut worker_phases = BTreeMap::new();
+    for timing in response.timings {
+        *worker_phases.entry(timing.phase.clone()).or_default() += timing.elapsed_millis;
+        *run.worker_phase_millis.entry(timing.phase).or_default() += timing.elapsed_millis;
+    }
     // Keep the same cold worker alive for its dependency catalog request;
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
@@ -578,6 +614,15 @@ fn index_batch_with_optional_cache(
         }
     }
     run.source_commit_millis += commit_started.elapsed().as_millis();
+    let source = reanalyze.first().expect("non-empty batch");
+    run.batches.push(BatchIndexMetrics {
+        component: source.component.as_str().to_owned(),
+        language: format!("{:?}", source.language).to_lowercase(),
+        source_units: reanalyze.len(),
+        worker_millis,
+        commit_millis: commit_started.elapsed().as_millis(),
+        worker_phases,
+    });
     tracing::debug!(
         target: "kide::index",
         source_units = reanalyze.len(),

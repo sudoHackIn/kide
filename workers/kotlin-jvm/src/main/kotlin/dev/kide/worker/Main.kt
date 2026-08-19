@@ -77,8 +77,20 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
         Worker.Envelope.MessageCase.ANALYZE_BATCH_REQUEST -> {
             try {
                 workerPhase("analyze-batch: ${request.analyzeBatchRequest.sourceUnitsCount} source units")
+                val startedAt = System.nanoTime()
+                val batch = structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot())
+                val timed = buildJsonObject {
+                    batch.forEach { (key, value) -> put(key, value) }
+                    put("timings", buildJsonArray {
+                        batch["timings"]?.jsonArray?.forEach(::add)
+                        add(buildJsonObject {
+                        put("phase", "worker_total")
+                        put("elapsed_millis", (System.nanoTime() - startedAt) / 1_000_000)
+                        })
+                    })
+                }
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
-                    .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot()))).build()
+                    .setAnalysisBatchResponse(ProtobufAnalysisSnapshotAdapter.analysisBatchResponse(timed)).build()
             } catch (error: Exception) {
                 logger().error("Source analysis failed for request {}", request.requestId, error)
                 unsupported(request.requestId, failureMessage(error, "Kotlin structural analysis failed"))
@@ -201,6 +213,7 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
     }
     if (language == "java") return buildJsonObject {
         put("snapshots", buildJsonArray { JavaSemanticExtractor.analyze(sourceUnits, workspaceRoot).forEach(::add) })
+        put("timings", buildJsonArray { JavaSemanticExtractor.consumeTimings().forEach { (phase, elapsed) -> add(buildJsonObject { put("phase", phase); put("elapsed_millis", elapsed) }) } })
     }
     require(language == "kotlin") { "kide-kotlin-jvm does not support $language source units" }
     return buildJsonObject { KotlinStructuralExtractor().use { extractor ->

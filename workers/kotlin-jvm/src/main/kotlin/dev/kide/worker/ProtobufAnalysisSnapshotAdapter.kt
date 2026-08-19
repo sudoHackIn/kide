@@ -211,10 +211,20 @@ internal object ProtobufAnalysisSnapshotAdapter {
     fun analysisBatchResponse(value: JsonObject): Worker.AnalysisBatchResponse =
         Worker.AnalysisBatchResponse.newBuilder()
             .addAllSnapshots(value["snapshots"]!!.jsonArray.map { snapshot(it.jsonObject) })
+            .addAllTimings(value["timings"]?.jsonArray?.map { timing ->
+                val json = timing.jsonObject
+                Worker.PhaseTiming.newBuilder()
+                    .setPhase(json["phase"]!!.jsonPrimitive.content)
+                    .setElapsedMillis(json["elapsed_millis"]!!.jsonPrimitive.long)
+                    .build()
+            }.orEmpty())
             .build()
 
     fun json(value: Worker.AnalysisBatchResponse): JsonObject = buildJsonObject {
         put("snapshots", buildJsonArray { value.snapshotsList.forEach { add(json(it)) } })
+        put("timings", buildJsonArray { value.timingsList.forEach { timing -> add(buildJsonObject {
+            put("phase", timing.phase); put("elapsed_millis", timing.elapsedMillis)
+        }) } })
     }
 
     fun delta(value: JsonObject): Worker.AnalysisDelta = Worker.AnalysisDelta.newBuilder()

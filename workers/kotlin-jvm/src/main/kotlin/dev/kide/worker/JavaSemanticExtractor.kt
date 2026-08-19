@@ -38,6 +38,9 @@ import kotlinx.serialization.json.put
  * one request and emits only canonical JSON facts before returning.
  */
 internal object JavaSemanticExtractor {
+    private var lastTimings: List<Pair<String, Long>> = emptyList()
+    private var stagingMillis: Long = 0
+    fun consumeTimings(): List<Pair<String, Long>> = lastTimings.also { lastTimings = emptyList() }
     /**
      * A worker serves requests sequentially. Keep compiled sibling sources for
      * its lifetime so a cold index pays one full-module javac pass rather than
@@ -51,15 +54,19 @@ internal object JavaSemanticExtractor {
     )
 
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
+        val timings = mutableListOf<Pair<String, Long>>()
+        stagingMillis = 0
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
         require(selected.isNotEmpty()) { "Java analysis requires source files" }
         val projectContext = selected.values.map { it.jsonObject.requiredString("context") }.distinct().singleOrNull()
             ?: error("Java batch must contain one project context fingerprint")
+        val importStarted = System.nanoTime()
         val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot, projectContext)
+        timings += "context_import" to (System.nanoTime() - importStarted) / 1_000_000
         val sourceIdentities = sourceIdentities(selected, contexts, workspaceRoot)
-        return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard ->
-            analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities)
-        }
+        val analyzeStarted = System.nanoTime()
+        return JavaCompilationPlanner.shards(selected, contexts).flatMap { shard -> analyzePartition(shard.selected, shard.context, workspaceRoot, sourceIdentities) }
+            .also { timings += "stage_compile" to stagingMillis; timings += "shard_analyze" to (System.nanoTime() - analyzeStarted) / 1_000_000; lastTimings = timings }
     }
 
     private fun sourceIdentities(
@@ -92,7 +99,9 @@ internal object JavaSemanticExtractor {
         workspaceRoot: Path,
         sourceIdentities: Map<Path, JsonObject>,
     ): List<JsonElement> {
+        val stageStarted = System.nanoTime()
         val staged = stagedContext(context, sourceIdentities)
+        stagingMillis += (System.nanoTime() - stageStarted) / 1_000_000
         // The staged output provides every non-selected source as bytecode.
         // If staging is unavailable (for example an incomplete Maven
         // classpath in best-effort mode), retain the previous exact fallback.

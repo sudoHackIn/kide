@@ -139,6 +139,27 @@ pub(super) fn index(
         source_commit_millis = run.source_commit_millis,
         "index complete"
     );
+    if verbosity > 0 {
+        let phase_order = ["context_import", "stage_compile", "shard_analyze", "serialize", "worker_total"];
+        let phases = phase_order
+            .into_iter()
+            .filter_map(|phase| run.worker_phase_millis.get(phase).map(|millis| format!("{phase}={millis}ms")))
+            .chain(run.worker_phase_millis.iter().filter(|(phase, _)| !phase_order.contains(&phase.as_str())).map(|(phase, millis)| format!("{phase}={millis}ms")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "index timings\n  discovery: {discovery_millis}ms\n  worker:    {}ms\n  commit:    {}ms\n  batches:   {}\n  phases:    {}",
+            run.source_worker_millis,
+            run.source_commit_millis,
+            run.batches.len(),
+            phases,
+        );
+        if verbosity > 1 {
+            for (index, batch) in run.batches.iter().enumerate() {
+                eprintln!("  batch #{index}: {} {} files={} worker={}ms commit={}ms", batch.component, batch.language, batch.source_units, batch.worker_millis, batch.commit_millis);
+            }
+        }
+    }
     println!(
         "{}",
         serde_json::json!({
@@ -158,6 +179,8 @@ pub(super) fn index(
             "discovery": discovery_millis,
             "source_worker": run.source_worker_millis,
             "source_commit": run.source_commit_millis,
+            "worker_phases": run.worker_phase_millis,
+            "batches": run.batches,
         },
         })
     );
@@ -211,6 +234,7 @@ pub(super) fn kotlin_worker_installation(
         OsString::from(match verbosity {
             0 => "warn",
             1 => "info",
+            2 => "info",
             _ => "debug",
         }),
     );

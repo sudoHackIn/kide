@@ -197,6 +197,14 @@ pub struct FileAnalysisSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalysisBatchResponse {
     pub snapshots: Vec<FileAnalysisSnapshot>,
+    #[serde(default)]
+    pub timings: Vec<PhaseTiming>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseTiming {
+    pub phase: String,
+    pub elapsed_millis: u64,
 }
 
 /// Requests analysis of the resolved binary artifacts for one workspace. Their

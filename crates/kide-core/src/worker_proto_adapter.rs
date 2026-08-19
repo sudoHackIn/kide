@@ -7,7 +7,7 @@ use crate::{
     ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
     BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
     DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
-    Language, OccurrenceKind, Precision, ProjectManifest, Provenance, ReferenceEdge,
+    Language, OccurrenceKind, PhaseTiming, Precision, ProjectManifest, Provenance, ReferenceEdge,
     SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
     SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
     WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkspaceId,
@@ -1328,6 +1328,7 @@ pub fn analysis_batch_response(
             .iter()
             .map(file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
+        timings: value.timings.iter().map(|timing| worker_proto::PhaseTiming { phase: timing.phase.clone(), elapsed_millis: timing.elapsed_millis }).collect(),
     })
 }
 
@@ -1340,6 +1341,7 @@ pub fn decode_analysis_batch_response(
             .into_iter()
             .map(decode_file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
+        timings: value.timings.into_iter().map(|timing| PhaseTiming { phase: timing.phase, elapsed_millis: timing.elapsed_millis }).collect(),
     })
 }
 

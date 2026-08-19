@@ -433,6 +433,7 @@ mod worker_framing_tests {
 
         let response = crate::AnalysisBatchResponse {
             snapshots: vec![snapshot.clone()],
+            timings: Vec::new(),
         };
         let encoded = crate::worker_proto_adapter::analysis_batch_response(&response)
             .expect("response encodes");
