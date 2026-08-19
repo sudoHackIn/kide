@@ -50,6 +50,7 @@ internal object GradleProjectImporter {
         val sourceFiles: List<Path>,
         val classpath: List<Path>,
         val jdkHome: Path,
+        val unresolvedDependencies: List<String> = emptyList(),
     )
 
     fun import(workspace: Path): JsonElement {

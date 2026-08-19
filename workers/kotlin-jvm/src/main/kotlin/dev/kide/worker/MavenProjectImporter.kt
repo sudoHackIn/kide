@@ -72,11 +72,13 @@ internal object MavenProjectImporter {
             val sources = sourceSets(root, module).flatMap { sourceSet -> sourceSet.roots }
                 .flatMap { relative -> Files.walk(root.resolve(relative)).use { paths -> paths.filter { it.isRegularFile() && it.fileName.toString().endsWith(".java") }.toList() } }
                 .distinct().sortedBy(Path::toString)
+            val resolution = MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates)
             GradleProjectImporter.JavaCompilationContext(
                 componentId(root, module),
                 sources,
-                MavenExternalResolver.resolve(module.model, reactorCoordinates),
+                resolution.paths,
                 Path.of(System.getProperty("java.home")),
+                resolution.unresolvedCoordinates,
             )
         }
     }

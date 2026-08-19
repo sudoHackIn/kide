@@ -23,6 +23,7 @@ import com.sun.source.util.TreePath
 import com.sun.source.util.TreePathScanner
 import com.sun.source.util.Trees
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -39,7 +40,8 @@ import kotlinx.serialization.json.put
 internal object JavaSemanticExtractor {
     fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
-        val contexts = if (Files.isRegularFile(workspaceRoot.resolve("pom.xml"))) {
+        val mavenWorkspace = Files.isRegularFile(workspaceRoot.resolve("pom.xml"))
+        val contexts = if (mavenWorkspace) {
             MavenProjectImporter.javaCompilationContexts(workspaceRoot)
         } else {
             GradleProjectImporter.javaCompilationContexts(workspaceRoot).values.toList()
@@ -89,8 +91,41 @@ internal object JavaSemanticExtractor {
                 symbol.jsonObject["applied_symbols"]!!.jsonArray.mapNotNull { value -> value.jsonPrimitive.content.removePrefix("jvm:type:").takeIf { value.jsonPrimitive.content.startsWith("jvm:type:") }?.let { "class:$it" } }
             } }.toSortedSet()
             val resolved = JvmBytecodeExtractor.resolvedTargetIds(contexts.flatMap { it.classpath }.distinct(), externalKeys)
+            val unresolvedDependencies = contexts.flatMap { it.unresolvedDependencies }.distinct().sorted()
             return snapshots.map { snapshot -> remapExternalAnnotations(snapshot.jsonObject, resolved) }
+                .let { snapshots ->
+                    if (unresolvedDependencies.isEmpty()) snapshots
+                    else snapshots.map { snapshot -> markPartial(withUnresolvedDependencyDiagnostics(snapshot, unresolvedDependencies)) }
+                }
         }
+    }
+
+    private fun withUnresolvedDependencyDiagnostics(snapshot: JsonObject, unresolved: List<String>) = buildJsonObject {
+        snapshot.forEach { (key, value) ->
+            if (key != "diagnostics") put(key, value) else put(key, buildJsonArray {
+                value.jsonArray.forEach(::add)
+                val source = snapshot.getValue("source_unit").jsonObject.requiredString("id")
+                val provenance = snapshot.getValue("provenance")
+                unresolved.forEach { coordinate -> add(buildJsonObject {
+                    put("source_unit", source)
+                    put("message", "Maven dependency is unavailable and was excluded from the analysis classpath: $coordinate")
+                    put("severity", "warning")
+                    put("freshness", "fresh")
+                    put("completeness", "partial")
+                    put("provenance", provenance)
+                }) }
+            })
+        }
+    }
+
+    private fun markPartial(value: JsonElement): JsonElement = when (value) {
+        is JsonObject -> buildJsonObject {
+            value.forEach { (key, nested) ->
+                put(key, if (key == "completeness") JsonPrimitive("partial") else markPartial(nested))
+            }
+        }
+        is JsonArray -> buildJsonArray { value.forEach { add(markPartial(it)) } }
+        else -> value
     }
 
     private fun remapExternalAnnotations(snapshot: JsonObject, resolved: Map<String, String>) = buildJsonObject {
