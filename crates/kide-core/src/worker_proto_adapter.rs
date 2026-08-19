@@ -8,13 +8,13 @@ use crate::{
     BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
     DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
     Language, OccurrenceKind, PhaseTiming, Precision, ProjectManifest, Provenance, ReferenceEdge,
-    SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId,
-    SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability,
-    WorkerEnvelope, WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkerMetric, WorkspaceId,
-    WorkspacePath, SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
+    SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
     SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
     SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseState,
-    SemanticQueryResultKind,
+    SemanticQueryResultKind, SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit,
+    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord,
+    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerError, WorkerErrorCode,
+    WorkerIdentity, WorkerMessage, WorkerMetric, WorkspaceId, WorkspacePath,
 };
 
 #[derive(Debug, Error)]
@@ -80,9 +80,7 @@ fn semantic_result_kind(value: SemanticQueryResultKind) -> &'static str {
     }
 }
 
-fn decode_semantic_result_kind(
-    value: String,
-) -> Result<SemanticQueryResultKind, AdapterError> {
+fn decode_semantic_result_kind(value: String) -> Result<SemanticQueryResultKind, AdapterError> {
     match value.as_str() {
         "candidate_symbols" => Ok(SemanticQueryResultKind::CandidateSymbols),
         "normalized_facts" => Ok(SemanticQueryResultKind::NormalizedFacts),
@@ -475,7 +473,11 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
                 workspace_root: WorkspacePath::new(request.workspace_root),
                 max_artifacts: request.max_artifacts,
                 cursor: request.cursor,
-                artifact_candidates: request.artifact_candidates.into_iter().map(decode_artifact_candidate).collect::<Result<Vec<_>, _>>()?,
+                artifact_candidates: request
+                    .artifact_candidates
+                    .into_iter()
+                    .map(decode_artifact_candidate)
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         }
         Message::ArtifactDiscoveryResponse(response) => {
@@ -491,14 +493,12 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
                 decode_materialization_response(response)?,
             ))
         }
-        Message::SemanticQueryRequest(request) => WorkerMessage::SemanticQueryRequest(Box::new(
-            decode_semantic_query_request(request)?,
-        )),
-        Message::SemanticQueryResponse(response) => {
-            WorkerMessage::SemanticQueryResponse(Box::new(decode_semantic_query_response(
-                response,
-            )?))
+        Message::SemanticQueryRequest(request) => {
+            WorkerMessage::SemanticQueryRequest(Box::new(decode_semantic_query_request(request)?))
         }
+        Message::SemanticQueryResponse(response) => WorkerMessage::SemanticQueryResponse(Box::new(
+            decode_semantic_query_response(response)?,
+        )),
         Message::AnalysisDelta(delta) => {
             WorkerMessage::AnalysisDelta(Box::new(decode_analysis_delta(delta)?))
         }
@@ -1329,9 +1329,27 @@ pub fn analysis_batch_response(
             .iter()
             .map(file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
-        timings: value.timings.iter().map(|timing| worker_proto::PhaseTiming { phase: timing.phase.clone(), elapsed_millis: timing.elapsed_millis }).collect(),
-        artifact_candidates: value.artifact_candidates.iter().map(artifact_candidate).collect(),
-        metrics: value.metrics.iter().map(|metric| worker_proto::WorkerMetric { name: metric.name.clone(), value: metric.value }).collect(),
+        timings: value
+            .timings
+            .iter()
+            .map(|timing| worker_proto::PhaseTiming {
+                phase: timing.phase.clone(),
+                elapsed_millis: timing.elapsed_millis,
+            })
+            .collect(),
+        artifact_candidates: value
+            .artifact_candidates
+            .iter()
+            .map(artifact_candidate)
+            .collect(),
+        metrics: value
+            .metrics
+            .iter()
+            .map(|metric| worker_proto::WorkerMetric {
+                name: metric.name.clone(),
+                value: metric.value,
+            })
+            .collect(),
     })
 }
 
@@ -1344,9 +1362,27 @@ pub fn decode_analysis_batch_response(
             .into_iter()
             .map(decode_file_analysis_snapshot)
             .collect::<Result<Vec<_>, _>>()?,
-        timings: value.timings.into_iter().map(|timing| PhaseTiming { phase: timing.phase, elapsed_millis: timing.elapsed_millis }).collect(),
-        artifact_candidates: value.artifact_candidates.into_iter().map(decode_artifact_candidate).collect::<Result<Vec<_>, _>>()?,
-        metrics: value.metrics.into_iter().map(|metric| WorkerMetric { name: metric.name, value: metric.value }).collect(),
+        timings: value
+            .timings
+            .into_iter()
+            .map(|timing| PhaseTiming {
+                phase: timing.phase,
+                elapsed_millis: timing.elapsed_millis,
+            })
+            .collect(),
+        artifact_candidates: value
+            .artifact_candidates
+            .into_iter()
+            .map(decode_artifact_candidate)
+            .collect::<Result<Vec<_>, _>>()?,
+        metrics: value
+            .metrics
+            .into_iter()
+            .map(|metric| WorkerMetric {
+                name: metric.name,
+                value: metric.value,
+            })
+            .collect(),
     })
 }
 
@@ -1518,7 +1554,11 @@ pub fn discovery_request(
         workspace_root: request.workspace_root.as_str().to_owned(),
         max_artifacts: request.max_artifacts,
         cursor: request.cursor.clone(),
-        artifact_candidates: request.artifact_candidates.iter().map(artifact_candidate).collect(),
+        artifact_candidates: request
+            .artifact_candidates
+            .iter()
+            .map(artifact_candidate)
+            .collect(),
     }
 }
 
@@ -1533,7 +1573,10 @@ fn artifact_candidate(value: &ArtifactCandidate) -> worker_proto::ArtifactCandid
 fn decode_artifact_candidate(
     value: worker_proto::ArtifactCandidate,
 ) -> Result<ArtifactCandidate, AdapterError> {
-    if value.locator.is_empty() || value.component_id.is_empty() || value.context_fingerprint.is_empty() {
+    if value.locator.is_empty()
+        || value.component_id.is_empty()
+        || value.context_fingerprint.is_empty()
+    {
         return Err(AdapterError::Invalid("artifact candidate"));
     }
     Ok(ArtifactCandidate {
@@ -1693,6 +1736,22 @@ pub fn materialization_response(
         byte_length: value.byte_length,
         sha256: sha256_bytes(&value.sha256)?,
         blob_format_version: value.blob_format_version,
+        timings: value
+            .timings
+            .iter()
+            .map(|timing| worker_proto::PhaseTiming {
+                phase: timing.phase.clone(),
+                elapsed_millis: timing.elapsed_millis,
+            })
+            .collect(),
+        metrics: value
+            .metrics
+            .iter()
+            .map(|metric| worker_proto::WorkerMetric {
+                name: metric.name.clone(),
+                value: metric.value,
+            })
+            .collect(),
     })
 }
 
@@ -1708,6 +1767,22 @@ pub fn decode_materialization_response(
         byte_length: value.byte_length,
         sha256: sha256_fingerprint(value.sha256)?,
         blob_format_version: value.blob_format_version,
+        timings: value
+            .timings
+            .into_iter()
+            .map(|timing| PhaseTiming {
+                phase: timing.phase,
+                elapsed_millis: timing.elapsed_millis,
+            })
+            .collect(),
+        metrics: value
+            .metrics
+            .into_iter()
+            .map(|metric| WorkerMetric {
+                name: metric.name,
+                value: metric.value,
+            })
+            .collect(),
     })
 }
 

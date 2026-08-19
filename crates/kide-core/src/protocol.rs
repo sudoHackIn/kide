@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApplicationFact, CallEdge, Completeness, ComponentId, DiagnosticRecord, Fingerprint, HierarchyEdge,
-    Language, ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId,
-    SymbolRecord, TypeRecord, WorkspaceId, WorkspacePath,
+    ApplicationFact, CallEdge, Completeness, ComponentId, DiagnosticRecord, Fingerprint,
+    HierarchyEdge, Language, ProjectManifest, ReferenceEdge, SourceOccurrence, SourceUnit,
+    SourceUnitId, SymbolId, SymbolRecord, TypeRecord, WorkspaceId, WorkspacePath,
 };
 
 /// Third version separates dependency discovery from expensive fact extraction.
@@ -211,7 +211,10 @@ pub struct PhaseTiming {
     pub elapsed_millis: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerMetric { pub name: String, pub value: u64 }
+pub struct WorkerMetric {
+    pub name: String,
+    pub value: u64,
+}
 
 /// Ephemeral resolved-artifact input. Core must never persist `locator`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +293,10 @@ pub struct ArtifactMaterializationResponse {
     pub byte_length: u64,
     pub sha256: Fingerprint,
     pub blob_format_version: u32,
+    #[serde(default)]
+    pub timings: Vec<PhaseTiming>,
+    #[serde(default)]
+    pub metrics: Vec<WorkerMetric>,
 }
 
 /// A conservative incremental update. `snapshot: None` removes a source unit;

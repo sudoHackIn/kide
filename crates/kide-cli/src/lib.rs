@@ -36,8 +36,12 @@ pub(crate) enum Command {
         path: PathBuf,
         #[arg(long)]
         force: bool,
-        #[arg(long)]
-        warm_dependencies: bool,
+        /// Materialize dependency blobs; omit value for 16, use 0 for all.
+        #[arg(long, num_args = 0..=1, default_missing_value = "16")]
+        warm_dependencies: Option<u32>,
+        /// Use an existing artifact catalog only; never analyze sources.
+        #[arg(long, requires = "warm_dependencies")]
+        materialize_only: bool,
     },
     Status,
     Text {
@@ -83,8 +87,12 @@ pub(crate) enum Command {
 }
 
 fn parse_parameter(value: &str) -> Result<(String, String), String> {
-    let (name, value) = value.split_once('=').ok_or_else(|| "parameters use name=value".to_owned())?;
-    if name.is_empty() { return Err("parameter name is empty".to_owned()); }
+    let (name, value) = value
+        .split_once('=')
+        .ok_or_else(|| "parameters use name=value".to_owned())?;
+    if name.is_empty() {
+        return Err("parameter name is empty".to_owned());
+    }
     Ok((name.to_owned(), value.to_owned()))
 }
 

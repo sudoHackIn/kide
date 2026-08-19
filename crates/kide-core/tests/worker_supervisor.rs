@@ -1,12 +1,12 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, BuildSystem,
-    ComponentId, DiscoveredWorker, Fingerprint, Language, SemanticCapabilityError,
-    SemanticQueryBudget, SemanticQueryResponseState, SourceOrigin, SourceUnit, SourceUnitId,
-    WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry,
-    WorkerSupervisor, WorkerSupervisorError, WorkspaceId, WorkspacePath,
-    execute_semantic_capability, materialize_artifact, plan_semantic_capability,
+    execute_semantic_capability, materialize_artifact, plan_semantic_capability, AnalysisFact,
+    AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, BuildSystem, ComponentId,
+    DiscoveredWorker, Fingerprint, Language, SemanticCapabilityError, SemanticQueryBudget,
+    SemanticQueryResponseState, SourceOrigin, SourceUnit, SourceUnitId, WorkerEnvelope,
+    WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry, WorkerSupervisor,
+    WorkerSupervisorError, WorkspaceId, WorkspacePath,
 };
 use tempfile::tempdir;
 
@@ -124,6 +124,7 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
             "materialize-1"
         )
         .expect("promotes miss")
+        .promoted
     );
     assert!(
         !materialize_artifact(
@@ -135,6 +136,7 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
             "materialize-2"
         )
         .expect("reuses hit")
+        .promoted
     );
     assert!(
         std::fs::read_dir(&staging)
@@ -153,7 +155,10 @@ fn bounded_semantic_capability_succeeds_and_rejects_over_budget_worker_output() 
         "fixture.echo",
         1,
         Vec::new(),
-        vec![kide_core::SymbolId::new("symbol:b"), kide_core::SymbolId::new("symbol:a")],
+        vec![
+            kide_core::SymbolId::new("symbol:b"),
+            kide_core::SymbolId::new("symbol:a"),
+        ],
         Vec::new(),
         SemanticQueryBudget {
             max_candidates: 2,

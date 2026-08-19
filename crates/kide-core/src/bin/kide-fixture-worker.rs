@@ -156,6 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .collect::<String>()
                         )),
                         blob_format_version: 1,
+                        timings: vec![],
+                        metrics: vec![],
                     },
                 ))
             }

@@ -23,5 +23,10 @@ class ArtifactMaterializerTest {
         assertEquals(bytes.size.toLong(), result.byteLength)
         assertEquals(32, result.sha256.size())
         assertEquals(JvmArtifactBlobLayout.VERSION, result.blobFormatVersion)
+        assertTrue(result.timingsList.map { it.phase }.containsAll(listOf(
+            "artifact_extract", "artifact_encode", "artifact_stage_write", "artifact_total",
+        )))
+        assertEquals(bytes.size.toLong(), result.metricsList.single { it.name == "artifact_blob_bytes" }.value)
+        assertTrue(result.metricsList.single { it.name == "artifact_input_bytes" }.value > 0)
     }
 }

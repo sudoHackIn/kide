@@ -20,7 +20,14 @@ pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
             path,
             force,
             warm_dependencies,
-        } => index::index(path, cli.verbose, force, warm_dependencies),
+            materialize_only,
+        } => index::index(
+            path,
+            cli.verbose,
+            force,
+            warm_dependencies,
+            materialize_only,
+        ),
         Command::Status => search::status(&cli.workspace, human_output),
         Command::Text { query } => search::text_search(&cli.workspace, query, human_output),
         Command::Symbols { query, short } => {

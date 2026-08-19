@@ -9,12 +9,12 @@ mod artifact_cache;
 pub mod artifact_proto_adapter;
 pub mod artifact_query;
 pub mod framework_query;
-pub mod query_resolver;
-pub mod query_package;
 pub mod project_query;
+pub mod query_package;
+pub mod query_resolver;
 pub mod selector;
-pub mod semantic_query;
 pub mod semantic_capability;
+pub mod semantic_query;
 pub mod text_index;
 pub mod worker_proto {
     include!(concat!(env!("OUT_DIR"), "/kide.worker.v1.rs"));
@@ -481,6 +481,14 @@ mod worker_framing_tests {
             byte_length: 12,
             sha256: Fingerprint::new(format!("sha256:{}", "ab".repeat(32))),
             blob_format_version: 1,
+            timings: vec![crate::PhaseTiming {
+                phase: "artifact_extract".into(),
+                elapsed_millis: 7,
+            }],
+            metrics: vec![crate::WorkerMetric {
+                name: "artifact_input_bytes".into(),
+                value: 42,
+            }],
         };
         let error = crate::WorkerError {
             code: crate::WorkerErrorCode::AnalysisFailed,
@@ -519,6 +527,8 @@ mod worker_framing_tests {
                     byte_length: 1,
                     sha256: vec![0; 31],
                     blob_format_version: 1,
+                    timings: Vec::new(),
+                    metrics: Vec::new(),
                 }
             )
             .is_err()
@@ -887,8 +897,8 @@ mod worker_registry;
 pub use artifact_cache::*;
 pub use canonical::*;
 pub use discovery::*;
-pub use freshness::*;
 pub use framework_query::*;
+pub use freshness::*;
 pub use orchestrator::*;
 pub use protocol::*;
 pub use query::*;

@@ -10,11 +10,11 @@ use thiserror::Error;
 
 use crate::{
     plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
-    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
-    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
-    WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
-    WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
+    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor,
+    ArtifactDiscoveryRequest, ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint,
+    IndexAction, IndexStore, IndexStoreError, ProjectManifest, Provenance, SourceOrigin,
+    SourceUnit, WorkerBatch, WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage,
+    WorkerSelection, WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,29 @@ pub enum MaterializationOutcome {
     AlreadyMaterialized,
     BudgetExhausted,
     NotCataloged,
+}
+
+/// Worker-side details for one artifact materialization. Core-side cache
+/// promotion is deliberately excluded: it is measured by the caller's wall
+/// time, while these values explain the worker's actual artifact work.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MaterializationMetrics {
+    pub promoted: bool,
+    pub worker_phases: BTreeMap<String, u64>,
+    pub worker_metrics: BTreeMap<String, u64>,
+}
+
+impl IndexRun {
+    /// Includes worker-side dependency materialization measurements in the
+    /// run-level aggregates without treating them as source-analysis time.
+    pub fn record_materialization_metrics(&mut self, metrics: &MaterializationMetrics) {
+        for (phase, millis) in &metrics.worker_phases {
+            *self.worker_phase_millis.entry(phase.clone()).or_default() += millis;
+        }
+        for (name, value) in &metrics.worker_metrics {
+            *self.worker_metrics.entry(name.clone()).or_default() += value;
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -167,7 +190,14 @@ pub fn index_selected_batches(
                 .1
         };
         analyze_selected_batch(
-            store, manifest, batch, requested, index, supervisor, &mut run, &mut artifact_candidates,
+            store,
+            manifest,
+            batch,
+            requested,
+            index,
+            supervisor,
+            &mut run,
+            &mut artifact_candidates,
         )?;
     }
     if !reanalyze.is_empty() {
@@ -193,7 +223,11 @@ pub fn index_selected_batches(
             supervisor
         };
         let catalog_started = Instant::now();
-        index_dependency_catalog(store, supervisor, artifact_candidates.into_values().collect())?;
+        index_dependency_catalog(
+            store,
+            supervisor,
+            artifact_candidates.into_values().collect(),
+        )?;
         run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     }
     run.worker_starts = supervisors
@@ -265,7 +299,9 @@ fn analyze_selected_batch(
         });
     };
     for candidate in &response.artifact_candidates {
-        artifact_candidates.entry(candidate.locator.clone()).or_insert_with(|| candidate.clone());
+        artifact_candidates
+            .entry(candidate.locator.clone())
+            .or_insert_with(|| candidate.clone());
     }
     let snapshots = validate_batch(&requested, response.snapshots)?;
     let mut worker_phases = BTreeMap::new();
@@ -315,11 +351,11 @@ pub fn materialize_artifact(
     artifact: ArtifactDescriptor,
     staging_directory: &Path,
     request_id: impl Into<String>,
-) -> Result<bool, IndexOrchestratorError> {
+) -> Result<MaterializationMetrics, IndexOrchestratorError> {
     let request_id = request_id.into();
     let key = ArtifactBlobKey::new(artifact.source_unit.content.clone(), &artifact.provenance);
     if cache.open_blob(&key)?.is_some() {
-        return Ok(false);
+        return Ok(MaterializationMetrics::default());
     }
     let response = supervisor.request(WorkerEnvelope::new(
         request_id,
@@ -349,7 +385,26 @@ pub fn materialize_artifact(
     // A promoted blob is immutable in the cache. The worker-created file is
     // only a verified hand-off buffer and must not retain a second full copy.
     std::fs::remove_file(staged).map_err(ArtifactBlobCacheError::from)?;
-    Ok(promoted)
+    let worker_phases = response
+        .timings
+        .into_iter()
+        .fold(BTreeMap::new(), |mut phases, timing| {
+            *phases.entry(timing.phase).or_default() += timing.elapsed_millis;
+            phases
+        });
+    let worker_metrics =
+        response
+            .metrics
+            .into_iter()
+            .fold(BTreeMap::new(), |mut metrics, metric| {
+                *metrics.entry(metric.name).or_default() += metric.value;
+                metrics
+            });
+    Ok(MaterializationMetrics {
+        promoted,
+        worker_phases,
+        worker_metrics,
+    })
 }
 
 /// Resolves one catalog descriptor on demand. This is deliberately bounded:
@@ -412,31 +467,55 @@ pub fn cache_catalog_artifact(
     staging_directory: &Path,
     budget: &mut MaterializationBudget,
 ) -> Result<MaterializationOutcome, IndexOrchestratorError> {
+    Ok(cache_catalog_artifact_with_metrics(
+        store,
+        supervisor,
+        cache,
+        workspace_root,
+        source_unit,
+        staging_directory,
+        budget,
+    )?
+    .0)
+}
+
+/// Same bounded cache warmup operation, retaining worker measurements for the
+/// CLI/run aggregator. Cache hits have no worker metrics.
+pub fn cache_catalog_artifact_with_metrics(
+    store: &IndexStore,
+    supervisor: &mut WorkerSupervisor,
+    cache: &ArtifactBlobCache,
+    workspace_root: WorkspacePath,
+    source_unit: &crate::SourceUnitId,
+    staging_directory: &Path,
+    budget: &mut MaterializationBudget,
+) -> Result<(MaterializationOutcome, Option<MaterializationMetrics>), IndexOrchestratorError> {
     let Some(descriptor) = store.artifact_descriptor(source_unit)? else {
-        return Ok(MaterializationOutcome::NotCataloged);
+        return Ok((MaterializationOutcome::NotCataloged, None));
     };
     let key = ArtifactBlobKey::new(
         descriptor.source_unit.content.clone(),
         &descriptor.provenance,
     );
     if cache.open_blob(&key)?.is_some() {
-        return Ok(MaterializationOutcome::AlreadyMaterialized);
+        return Ok((MaterializationOutcome::AlreadyMaterialized, None));
     }
     if budget.remaining_artifacts == 0 {
-        return Ok(MaterializationOutcome::BudgetExhausted);
+        return Ok((MaterializationOutcome::BudgetExhausted, None));
     }
     budget.remaining_artifacts -= 1;
-    if materialize_artifact(
+    let metrics = materialize_artifact(
         supervisor,
         cache,
         workspace_root,
         descriptor,
         staging_directory,
         format!("cache-materialize-{}", source_unit.as_str()),
-    )? {
-        Ok(MaterializationOutcome::Materialized)
+    )?;
+    if metrics.promoted {
+        Ok((MaterializationOutcome::Materialized, Some(metrics)))
     } else {
-        Ok(MaterializationOutcome::AlreadyMaterialized)
+        Ok((MaterializationOutcome::AlreadyMaterialized, Some(metrics)))
     }
 }
 

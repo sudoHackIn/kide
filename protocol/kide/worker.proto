@@ -297,6 +297,10 @@ message ArtifactMaterializationResponse {
   uint64 byte_length = 2;
   bytes sha256 = 3;
   uint32 blob_format_version = 4;
+  // Timings are measured inside the worker, so build-tool resolution and
+  // artifact extraction can be distinguished from Core-side cache promotion.
+  repeated PhaseTiming timings = 5;
+  repeated WorkerMetric metrics = 6;
 }
 message Error {
   string code = 1;

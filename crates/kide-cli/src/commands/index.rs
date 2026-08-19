@@ -6,21 +6,18 @@ use std::{
 
 use anyhow::{bail, Result};
 use kide_core::{
-    cache_catalog_artifact, collect_workspace_text, discover_workspace,
+    cache_catalog_artifact_with_metrics, collect_workspace_text, discover_workspace,
     index_batch_with_artifact_cache_and_provenance, index_selected_batches, ArtifactBlobCache,
-    BuildSystem, IndexStore, Provenance, QueryStatus, WorkerCapability, WorkerInstallation,
-    WorkerLaunch, WorkerRegistry, WorkerSupervisor, CANONICAL_SCHEMA_VERSION,
+    ArtifactBlobKey, BuildSystem, IndexStore, Provenance, QueryStatus, WorkerCapability,
+    WorkerInstallation, WorkerLaunch, WorkerRegistry, WorkerSupervisor, CANONICAL_SCHEMA_VERSION,
 };
-
-/// Explicit cache warmup is intentionally bounded. Dependency blobs can be
-/// large, so a normal index must never turn into an unbounded classpath copy.
-const WARM_DEPENDENCY_ARTIFACT_LIMIT: u32 = 16;
 
 pub(super) fn index(
     path: PathBuf,
     verbosity: u8,
     force: bool,
-    warm_dependencies: bool,
+    warm_dependencies: Option<u32>,
+    materialize_only: bool,
 ) -> Result<QueryStatus> {
     tracing::debug!(target: "kide::cli", workspace = %path.display(), "discovering workspace");
     let discovery_started = Instant::now();
@@ -41,6 +38,72 @@ pub(super) fn index(
     let artifact_cache = ArtifactBlobCache::open(artifact_cache_root)?;
     let staging = discovery.root.join(".kide/staging");
     std::fs::create_dir_all(&staging)?;
+    if materialize_only {
+        let warm_limit = warm_dependencies.expect("clap requires warm dependencies");
+        let descriptors = store.artifact_descriptors()?;
+        let mut worker =
+            WorkerSupervisor::new(kotlin_worker_installation(&discovery.root, verbosity)?.launch);
+        worker.handshake("materialize-only")?;
+        let started = Instant::now();
+        let mut budget = kide_core::MaterializationBudget {
+            remaining_artifacts: if warm_limit == 0 {
+                u32::MAX
+            } else {
+                warm_limit
+            },
+        };
+        let mut materialized = 0_usize;
+        let mut cached = 0_usize;
+        let mut artifacts = Vec::new();
+        for descriptor in descriptors {
+            let artifact_started = Instant::now();
+            let (outcome, metrics) = cache_catalog_artifact_with_metrics(
+                &store,
+                &mut worker,
+                &artifact_cache,
+                discovery.manifest.root.clone(),
+                &descriptor.source_unit.id,
+                &staging,
+                &mut budget,
+            )?;
+            match outcome {
+                kide_core::MaterializationOutcome::Materialized => {
+                    materialized += 1;
+                    let key = ArtifactBlobKey::new(
+                        descriptor.source_unit.content.clone(),
+                        &descriptor.provenance,
+                    );
+                    let blob_bytes = artifact_cache
+                        .load(&key)?
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default();
+                    artifacts.push(serde_json::json!({"source_unit": descriptor.source_unit.id, "outcome": "materialized", "millis": artifact_started.elapsed().as_millis(), "blob_bytes": blob_bytes, "worker_phases": metrics.as_ref().map(|metrics| &metrics.worker_phases), "worker_metrics": metrics.as_ref().map(|metrics| &metrics.worker_metrics)}));
+                }
+                kide_core::MaterializationOutcome::AlreadyMaterialized => {
+                    cached += 1;
+                    artifacts.push(serde_json::json!({"source_unit": descriptor.source_unit.id, "outcome": "cached", "millis": artifact_started.elapsed().as_millis()}));
+                }
+                kide_core::MaterializationOutcome::BudgetExhausted => break,
+                kide_core::MaterializationOutcome::NotCataloged => {}
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": CANONICAL_SCHEMA_VERSION,
+                "status": "ok",
+                "workspace": discovery.root,
+                "materialization_only": true,
+                "cataloged": store.artifact_descriptors()?.len(),
+                "materialized": materialized,
+                "cached": cached,
+                "worker_starts": worker.start_count(),
+                "timing_millis": { "dependency_materialization": started.elapsed().as_millis() },
+                "artifacts": artifacts,
+            })
+        );
+        return Ok(QueryStatus::Ok);
+    }
     let registry = WorkerRegistry::new(vec![kotlin_worker_installation(
         &discovery.root,
         verbosity,
@@ -98,16 +161,22 @@ pub(super) fn index(
     } else {
         index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
     };
-    if warm_dependencies {
+    let mut materialized_artifacts = Vec::new();
+    if let Some(warm_limit) = warm_dependencies {
         let materialization_started = Instant::now();
         let mut worker =
             WorkerSupervisor::new(selection.batches[0].worker.installation.launch.clone());
         worker.handshake("warm-dependency-cache")?;
         let mut budget = kide_core::MaterializationBudget {
-            remaining_artifacts: WARM_DEPENDENCY_ARTIFACT_LIMIT,
+            remaining_artifacts: if warm_limit == 0 {
+                u32::MAX
+            } else {
+                warm_limit
+            },
         };
         for descriptor in store.artifact_descriptors()? {
-            match cache_catalog_artifact(
+            let artifact_started = Instant::now();
+            let (outcome, metrics) = cache_catalog_artifact_with_metrics(
                 &store,
                 &mut worker,
                 &artifact_cache,
@@ -115,10 +184,29 @@ pub(super) fn index(
                 &descriptor.source_unit.id,
                 &staging,
                 &mut budget,
-            )? {
-                kide_core::MaterializationOutcome::Materialized => run.dependency_analyzed += 1,
+            )?;
+            match outcome {
+                kide_core::MaterializationOutcome::Materialized => {
+                    run.dependency_analyzed += 1;
+                    if let Some(metrics) = &metrics {
+                        run.record_materialization_metrics(metrics);
+                    }
+                    let key = ArtifactBlobKey::new(
+                        descriptor.source_unit.content.clone(),
+                        &descriptor.provenance,
+                    );
+                    let blob_bytes = artifact_cache
+                        .load(&key)?
+                        .map(|bytes| bytes.len())
+                        .unwrap_or_default();
+                    materialized_artifacts.push(serde_json::json!({"source_unit": descriptor.source_unit.id, "outcome": "materialized", "millis": artifact_started.elapsed().as_millis(), "blob_bytes": blob_bytes, "worker_phases": metrics.as_ref().map(|metrics| &metrics.worker_phases), "worker_metrics": metrics.as_ref().map(|metrics| &metrics.worker_metrics)}));
+                }
                 kide_core::MaterializationOutcome::AlreadyMaterialized => {
-                    run.dependency_reused += 1
+                    run.dependency_reused += 1;
+                    if let Some(metrics) = &metrics {
+                        run.record_materialization_metrics(metrics);
+                    }
+                    materialized_artifacts.push(serde_json::json!({"source_unit": descriptor.source_unit.id, "outcome": "cached", "millis": artifact_started.elapsed().as_millis()}));
                 }
                 kide_core::MaterializationOutcome::BudgetExhausted => break,
                 _ => {}
@@ -219,16 +307,68 @@ pub(super) fn index(
                     import,
                     stage,
                     pipeline.saturating_sub(stage),
-                    batch.worker_metrics.get("semantic_parse").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("semantic_analyze").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("semantic_facts").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("stage_cache_hits").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("stage_cache_misses").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("stage_compile_success").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("stage_compile_failed").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("unresolved_dependencies").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("response_bytes").copied().unwrap_or_default(),
-                    batch.worker_metrics.get("serialize_millis").copied().unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("semantic_parse")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("semantic_analyze")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("semantic_facts")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("stage_cache_hits")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("stage_cache_misses")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("stage_compile_success")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("stage_compile_failed")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("unresolved_dependencies")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("response_bytes")
+                        .copied()
+                        .unwrap_or_default(),
+                    batch
+                        .worker_metrics
+                        .get("serialize_millis")
+                        .copied()
+                        .unwrap_or_default(),
+                );
+            }
+            if !materialized_artifacts.is_empty() {
+                eprintln!(
+                    "  dependency materialization: artifacts={} extract={}ms encode={}ms write={}ms total={}ms input={}B blob={}B",
+                    materialized_artifacts.len(),
+                    run.worker_phase_millis.get("artifact_extract").copied().unwrap_or_default(),
+                    run.worker_phase_millis.get("artifact_encode").copied().unwrap_or_default(),
+                    run.worker_phase_millis.get("artifact_stage_write").copied().unwrap_or_default(),
+                    run.worker_phase_millis.get("artifact_total").copied().unwrap_or_default(),
+                    run.worker_metrics.get("artifact_input_bytes").copied().unwrap_or_default(),
+                    run.worker_metrics.get("artifact_blob_bytes").copied().unwrap_or_default(),
                 );
             }
         }
@@ -245,7 +385,8 @@ pub(super) fn index(
         "worker_starts": run.worker_starts,
         "dependency_analyzed": run.dependency_analyzed,
         "dependency_reused": run.dependency_reused,
-        "dependency_warm_limit": warm_dependencies.then_some(WARM_DEPENDENCY_ARTIFACT_LIMIT),
+        "dependency_warm_limit": warm_dependencies.map(|limit| if limit == 0 { "all".to_owned() } else { limit.to_string() }),
+        "dependency_materialization_artifacts": materialized_artifacts,
         "text_documents": text_inventory.documents.len(),
         "text_skipped": text_inventory.skipped.len(),
         "timing_millis": {

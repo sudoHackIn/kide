@@ -23,22 +23,43 @@ internal object ArtifactMaterializer {
     }
 
     fun stage(artifact: Path, component: String, context: String, directory: Path): Worker.ArtifactMaterializationResponse {
+        val totalStarted = System.nanoTime()
+        val extractStarted = System.nanoTime()
         val snapshot = ProtobufAnalysisSnapshotAdapter.snapshot(JvmBytecodeExtractor.extractArtifact(artifact, component, context).jsonObject)
+        val extractMillis = elapsedMillis(extractStarted)
+        val encodeStarted = System.nanoTime()
         val graph = graph(snapshot)
         val bytes = JvmArtifactBlobLayout.encode(graph)
+        val encodeMillis = elapsedMillis(encodeStarted)
+        val writeStarted = System.nanoTime()
         Files.createDirectories(directory)
         val staged = Files.createTempFile(directory, "kide-jvm-", ".blob")
         FileChannel.open(staged, StandardOpenOption.WRITE).use { channel ->
             channel.write(java.nio.ByteBuffer.wrap(bytes))
             channel.force(true)
         }
+        val writeMillis = elapsedMillis(writeStarted)
         return Worker.ArtifactMaterializationResponse.newBuilder()
             .setStagedFilename(staged.fileName.toString())
             .setByteLength(bytes.size.toLong())
             .setSha256(com.google.protobuf.ByteString.copyFrom(MessageDigest.getInstance("SHA-256").digest(bytes)))
             .setBlobFormatVersion(JvmArtifactBlobLayout.VERSION)
+            .addTimings(phaseTiming("artifact_extract", extractMillis))
+            .addTimings(phaseTiming("artifact_encode", encodeMillis))
+            .addTimings(phaseTiming("artifact_stage_write", writeMillis))
+            .addTimings(phaseTiming("artifact_total", elapsedMillis(totalStarted)))
+            .addMetrics(workerMetric("artifact_input_bytes", Files.size(artifact)))
+            .addMetrics(workerMetric("artifact_blob_bytes", bytes.size.toLong()))
             .build()
     }
+
+    private fun elapsedMillis(started: Long): Long = (System.nanoTime() - started) / 1_000_000
+
+    private fun phaseTiming(phase: String, millis: Long): Worker.PhaseTiming =
+        Worker.PhaseTiming.newBuilder().setPhase(phase).setElapsedMillis(millis).build()
+
+    private fun workerMetric(name: String, value: Long): Worker.WorkerMetric =
+        Worker.WorkerMetric.newBuilder().setName(name).setValue(value).build()
 
     private fun graph(snapshot: Worker.FileAnalysisSnapshot): Artifact.GraphArtifact =
         Artifact.GraphArtifact.newBuilder().addSnapshots(
