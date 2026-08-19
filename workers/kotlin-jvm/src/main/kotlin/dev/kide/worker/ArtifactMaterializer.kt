@@ -14,13 +14,26 @@ internal object ArtifactMaterializer {
     fun materialize(request: Worker.ArtifactMaterializationRequest): Worker.ArtifactMaterializationResponse {
         require(request.hasArtifact()) { "artifact materialization requires artifact descriptor" }
         require(request.blobFormatVersion == JvmArtifactBlobLayout.VERSION) { "unsupported artifact blob format" }
-        val workspace = resolveWorkspacePath(request.workspaceRoot)
-        val artifact = resolvedArtifacts(workspace).singleOrNull { candidate ->
-            val descriptor = JvmBytecodeExtractor.descriptor(candidate.path, candidate.component, candidate.context).jsonObject
-            descriptor["source_unit"]!!.jsonObject["id"]!!.toString().trim('"') == request.artifact.sourceUnitId
-        } ?: error("requested artifact is not resolved by this workspace")
+        val artifact = request.artifactLocator.takeIf { request.hasArtifactLocator() }
+            ?.let { locator ->
+                val path = Path.of(locator)
+                require(Files.isRegularFile(path)) { "requested artifact locator is not a regular file" }
+                ResolvedJvmArtifact(path, request.artifact.componentId, request.artifact.contextFingerprint)
+            }
+            ?: resolvedArtifacts(resolveWorkspacePath(request.workspaceRoot)).singleOrNull { candidate ->
+                descriptorId(candidate) == request.artifact.sourceUnitId
+            }
+            ?: error("requested artifact is not resolved by this workspace")
+        require(descriptorId(artifact) == request.artifact.sourceUnitId) {
+            "requested artifact locator does not match descriptor identity"
+        }
         return stage(artifact.path, artifact.component, artifact.context, Path.of(request.stagingDirectory))
     }
+
+    private fun descriptorId(candidate: ResolvedJvmArtifact): String = (
+        JvmBytecodeExtractor.descriptor(candidate.path, candidate.component, candidate.context).jsonObject
+            ["source_unit"]!!.jsonObject["id"]!!.toString().trim('"')
+        )
 
     fun stage(artifact: Path, component: String, context: String, directory: Path): Worker.ArtifactMaterializationResponse {
         val totalStarted = System.nanoTime()

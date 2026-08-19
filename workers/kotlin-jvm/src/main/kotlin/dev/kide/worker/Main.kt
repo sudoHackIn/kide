@@ -129,7 +129,14 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                     },
                 )
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
-                    .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder().addAllArtifacts(json["artifacts"]!!.jsonArray.map { ProtobufArtifactDiscoveryAdapter.descriptor(it.jsonObject) }).apply { json["next_cursor"]?.jsonPrimitive?.contentOrNull?.let(::setNextCursor) }).build()
+                    .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder()
+                        .addAllArtifacts(json["artifacts"]!!.jsonArray.map { ProtobufArtifactDiscoveryAdapter.descriptor(it.jsonObject) })
+                        .addAllArtifactLocators(json["artifact_locators"]!!.jsonArray.map { locator ->
+                            val entry = locator.jsonObject
+                            Worker.ArtifactLocator.newBuilder().setSourceUnitId(entry["source_unit_id"]!!.jsonPrimitive.content)
+                                .setLocator(entry["locator"]!!.jsonPrimitive.content).build()
+                        })
+                        .apply { json["next_cursor"]?.jsonPrimitive?.contentOrNull?.let(::setNextCursor) }).build()
             } catch (error: Exception) {
                 unsupported(request.requestId, failureMessage(error, "JVM dependency discovery failed"))
             }
@@ -211,6 +218,10 @@ internal fun artifactDescriptors(
         ?: error("artifact cursor is not valid for this workspace") } ?: 0
     val batch = artifacts.drop(start).take(maxArtifacts)
     put("artifacts", buildJsonArray { batch.forEach { artifact -> add(JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context)) } })
+    put("artifact_locators", buildJsonArray { batch.forEach { artifact ->
+        val descriptor = JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context).jsonObject
+        add(buildJsonObject { put("source_unit_id", descriptor["source_unit"]!!.jsonObject["id"]!!.jsonPrimitive.content); put("locator", artifact.path.toString()) })
+    } })
     put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
 }
 

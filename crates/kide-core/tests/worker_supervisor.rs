@@ -120,6 +120,7 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
             &cache,
             WorkspacePath::new("."),
             descriptor(),
+            None,
             &staging,
             "materialize-1"
         )
@@ -132,6 +133,7 @@ fn materialized_artifact_is_promoted_once_then_reused_from_cache() {
             &cache,
             WorkspacePath::new("."),
             descriptor(),
+            None,
             &staging,
             "materialize-2"
         )

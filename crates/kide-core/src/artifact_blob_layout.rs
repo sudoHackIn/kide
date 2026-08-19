@@ -1,15 +1,18 @@
 //! Fixed-header, section-addressable layout for JVM dependency graph blobs.
 
-use std::{collections::BTreeMap, io::{Read, Write}};
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+};
 
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use prost::Message;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    artifact_proto::{self, ArtifactBlobSectionKind},
     ArtifactBlob, ArtifactBlobCacheError,
+    artifact_proto::{self, ArtifactBlobSectionKind},
 };
 
 pub const ARTIFACT_BLOB_LAYOUT_VERSION: u32 = 1;
@@ -145,10 +148,7 @@ impl ArtifactBlobSections {
 
     /// Stable grouping key for all ordinals stored in the same bounded detail
     /// block. Query callers can therefore read each block at most once.
-    pub fn symbol_detail_block_start(
-        &self,
-        ordinal: u32,
-    ) -> Result<u32, ArtifactBlobLayoutError> {
+    pub fn symbol_detail_block_start(&self, ordinal: u32) -> Result<u32, ArtifactBlobLayoutError> {
         Ok(self.detail_section(ordinal)?.symbol_ordinal_start)
     }
 
@@ -540,8 +540,8 @@ fn symbol_detail(
         name: string_table.inline(&symbol.name),
         qualified_name: string_table.inline_optional(symbol.qualified_name.as_deref()),
         signature: string_table.inline_optional(symbol.signature.as_deref()),
-        declaration: symbol.declaration.clone(),
-        name_range: symbol.name_range.clone(),
+        declaration: symbol.declaration,
+        name_range: symbol.name_range,
         owner_id: string_table.inline_optional(symbol.owner_id.as_deref()),
         modifiers: string_table.inline_many(&symbol.modifiers),
         applied_symbol_ids: string_table.inline_many(&symbol.applied_symbol_ids),
@@ -557,9 +557,18 @@ fn symbol_detail(
         backend_key_string_index: string_table.index(&symbol.backend_key),
         kind_string_index: string_table.index(&symbol.kind),
         name_string_index: string_table.index(&symbol.name),
-        qualified_name_string_index: symbol.qualified_name.as_deref().and_then(|value| string_table.index(value)),
-        signature_string_index: symbol.signature.as_deref().and_then(|value| string_table.index(value)),
-        owner_id_string_index: symbol.owner_id.as_deref().and_then(|value| string_table.index(value)),
+        qualified_name_string_index: symbol
+            .qualified_name
+            .as_deref()
+            .and_then(|value| string_table.index(value)),
+        signature_string_index: symbol
+            .signature
+            .as_deref()
+            .and_then(|value| string_table.index(value)),
+        owner_id_string_index: symbol
+            .owner_id
+            .as_deref()
+            .and_then(|value| string_table.index(value)),
         modifier_string_indexes: string_table.indexes(&symbol.modifiers),
         applied_symbol_string_indexes: string_table.indexes(&symbol.applied_symbol_ids),
     }
@@ -578,25 +587,63 @@ impl StringTable {
             for value in [&symbol.backend_key, &symbol.kind, &symbol.name] {
                 *counts.entry(value.clone()).or_default() += 1;
             }
-            for value in [symbol.qualified_name.as_ref(), symbol.signature.as_ref(), symbol.owner_id.as_ref()].into_iter().flatten() {
+            for value in [
+                symbol.qualified_name.as_ref(),
+                symbol.signature.as_ref(),
+                symbol.owner_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 *counts.entry(value.clone()).or_default() += 1;
             }
             for value in symbol.modifiers.iter().chain(&symbol.applied_symbol_ids) {
                 *counts.entry(value.clone()).or_default() += 1;
             }
         }
-        let values = counts.into_iter()
-            .filter_map(|(value, occurrences)| (occurrences >= STRING_INTERN_MIN_OCCURRENCES && value.len() >= STRING_INTERN_MIN_BYTES).then_some(value))
+        let values = counts
+            .into_iter()
+            .filter_map(|(value, occurrences)| {
+                (occurrences >= STRING_INTERN_MIN_OCCURRENCES
+                    && value.len() >= STRING_INTERN_MIN_BYTES)
+                    .then_some(value)
+            })
             .collect::<Vec<_>>();
-        let indexes = values.iter().enumerate().map(|(index, value)| (value.clone(), index as u32)).collect();
+        let indexes = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.clone(), index as u32))
+            .collect();
         Self { values, indexes }
     }
 
-    fn index(&self, value: &str) -> Option<u32> { self.indexes.get(value).copied() }
-    fn indexes(&self, values: &[String]) -> Vec<u32> { values.iter().map(|value| self.index(value)).collect::<Option<Vec<_>>>().unwrap_or_default() }
-    fn inline(&self, value: &str) -> String { self.index(value).is_none().then(|| value.to_owned()).unwrap_or_default() }
-    fn inline_optional(&self, value: Option<&str>) -> Option<String> { value.and_then(|value| self.index(value).is_none().then(|| value.to_owned())) }
-    fn inline_many(&self, values: &[String]) -> Vec<String> { self.indexes(values).is_empty().then(|| values.to_vec()).unwrap_or_default() }
+    fn index(&self, value: &str) -> Option<u32> {
+        self.indexes.get(value).copied()
+    }
+    fn indexes(&self, values: &[String]) -> Vec<u32> {
+        values
+            .iter()
+            .map(|value| self.index(value))
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default()
+    }
+    fn inline(&self, value: &str) -> String {
+        if self.index(value).is_none() {
+            value.to_owned()
+        } else {
+            String::new()
+        }
+    }
+    fn inline_optional(&self, value: Option<&str>) -> Option<String> {
+        value.and_then(|value| self.index(value).is_none().then(|| value.to_owned()))
+    }
+    fn inline_many(&self, values: &[String]) -> Vec<String> {
+        if self.indexes(values).is_empty() {
+            values.to_vec()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn decompress_section(bytes: &[u8], compression: i32) -> Result<Vec<u8>, ArtifactBlobLayoutError> {

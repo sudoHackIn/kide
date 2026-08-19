@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::{
     worker_proto, AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
     ApplicationArgument, ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
-    ArtifactAnalysisResponse, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactAnalysisResponse, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactLocator,
     ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
     BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
     DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
@@ -1592,6 +1592,9 @@ pub fn discovery_response(
     worker_proto::ArtifactDiscoveryResponse {
         artifacts: response.artifacts.iter().map(descriptor).collect(),
         next_cursor: response.next_cursor.clone(),
+        artifact_locators: response.artifact_locators.iter().map(|locator| worker_proto::ArtifactLocator {
+            source_unit_id: locator.source_unit.as_str().to_owned(), locator: locator.locator.clone(),
+        }).collect(),
     }
 }
 
@@ -1660,6 +1663,9 @@ pub fn decode_discovery_response(
             .map(decode_descriptor)
             .collect::<Result<Vec<_>, _>>()?,
         next_cursor: value.next_cursor,
+        artifact_locators: value.artifact_locators.into_iter().map(|locator| ArtifactLocator {
+            source_unit: SourceUnitId::new(locator.source_unit_id), locator: locator.locator,
+        }).collect(),
     })
 }
 
@@ -1700,6 +1706,7 @@ pub fn materialization_request(
         artifact: Some(descriptor(&value.artifact)),
         staging_directory: value.staging_directory.clone(),
         blob_format_version: value.blob_format_version,
+        artifact_locator: value.artifact_locator.clone(),
     }
 }
 
@@ -1721,6 +1728,7 @@ pub fn decode_materialization_request(
         )?,
         staging_directory: value.staging_directory,
         blob_format_version: value.blob_format_version,
+        artifact_locator: value.artifact_locator,
     })
 }
 

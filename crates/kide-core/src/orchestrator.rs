@@ -9,12 +9,12 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    plan_invalidation, AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache,
-    ArtifactBlobCacheError, ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor,
-    ArtifactDiscoveryRequest, ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint,
-    IndexAction, IndexStore, IndexStoreError, ProjectManifest, Provenance, SourceOrigin,
-    SourceUnit, WorkerBatch, WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage,
-    WorkerSelection, WorkerSupervisor, WorkerSupervisorError, WorkspacePath,
+    AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError,
+    ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
+    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
+    WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
+    WorkerSupervisor, WorkerSupervisorError, WorkspacePath, plan_invalidation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +34,7 @@ pub struct IndexRun {
     pub worker_phase_millis: BTreeMap<String, u64>,
     pub worker_metrics: BTreeMap<String, u64>,
     pub batches: Vec<BatchIndexMetrics>,
+    artifact_locators: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -68,6 +69,7 @@ pub struct MaterializationMetrics {
     pub promoted: bool,
     pub worker_phases: BTreeMap<String, u64>,
     pub worker_metrics: BTreeMap<String, u64>,
+    pub core_phases: BTreeMap<String, u64>,
 }
 
 impl IndexRun {
@@ -80,6 +82,19 @@ impl IndexRun {
         for (name, value) in &metrics.worker_metrics {
             *self.worker_metrics.entry(name.clone()).or_default() += value;
         }
+        for (phase, millis) in &metrics.core_phases {
+            *self.worker_phase_millis.entry(phase.clone()).or_default() += millis;
+        }
+    }
+
+    /// Consumes a worker-local locator. It is intentionally unavailable after
+    /// the warmup request and never belongs to persistent index state.
+    pub fn take_artifact_locator(&mut self, source_unit: &crate::SourceUnitId) -> Option<String> {
+        self.artifact_locators.remove(source_unit.as_str())
+    }
+
+    pub fn clear_artifact_locators(&mut self) {
+        self.artifact_locators.clear();
     }
 }
 
@@ -146,6 +161,7 @@ pub fn index_selected_batches(
         worker_phase_millis: BTreeMap::new(),
         worker_metrics: BTreeMap::new(),
         batches: Vec::new(),
+        artifact_locators: BTreeMap::new(),
     };
     for action in actions {
         match action {
@@ -223,7 +239,7 @@ pub fn index_selected_batches(
             supervisor
         };
         let catalog_started = Instant::now();
-        index_dependency_catalog(
+        run.artifact_locators = index_dependency_catalog(
             store,
             supervisor,
             artifact_candidates.into_values().collect(),
@@ -238,6 +254,9 @@ pub fn index_selected_batches(
     Ok(run)
 }
 
+// These are separate scheduler resources; keeping them explicit makes the
+// source batch transaction boundary and its ownership visible at each call.
+#[allow(clippy::too_many_arguments)]
 fn analyze_selected_batch(
     store: &mut IndexStore,
     manifest: &ProjectManifest,
@@ -349,13 +368,28 @@ pub fn materialize_artifact(
     cache: &ArtifactBlobCache,
     workspace_root: WorkspacePath,
     artifact: ArtifactDescriptor,
+    artifact_locator: Option<String>,
     staging_directory: &Path,
     request_id: impl Into<String>,
 ) -> Result<MaterializationMetrics, IndexOrchestratorError> {
     let request_id = request_id.into();
+    let _span = tracing::info_span!(
+        target: "kide::dependency",
+        "materialize_artifact",
+        source_unit_id = artifact.source_unit.id.as_str(),
+        component = artifact.source_unit.component.as_str(),
+        dependency_path = artifact.source_unit.path.as_str(),
+    )
+    .entered();
     let key = ArtifactBlobKey::new(artifact.source_unit.content.clone(), &artifact.provenance);
-    if cache.open_blob(&key)?.is_some() {
-        return Ok(MaterializationMetrics::default());
+    let cache_check_started = Instant::now();
+    let cached = cache.open_blob(&key)?.is_some();
+    let cache_check_millis = cache_check_started.elapsed().as_millis() as u64;
+    if cached {
+        return Ok(MaterializationMetrics {
+            core_phases: BTreeMap::from([("core_cache_check".to_owned(), cache_check_millis)]),
+            ..MaterializationMetrics::default()
+        });
     }
     let response = supervisor.request(WorkerEnvelope::new(
         request_id,
@@ -364,6 +398,7 @@ pub fn materialize_artifact(
             artifact,
             staging_directory: staging_directory.to_string_lossy().into_owned(),
             blob_format_version: crate::artifact_blob_layout::ARTIFACT_BLOB_LAYOUT_VERSION,
+            artifact_locator,
         })),
     ))?;
     let WorkerMessage::ArtifactMaterializationResponse(response) = response.message else {
@@ -372,6 +407,7 @@ pub fn materialize_artifact(
         });
     };
     let response = *response;
+    let verify_started = Instant::now();
     let digest =
         sha256_bytes(&response.sha256).ok_or(IndexOrchestratorError::InvalidStagedArtifact)?;
     let staged = staging_directory.join(&response.staged_filename);
@@ -379,12 +415,15 @@ pub fn materialize_artifact(
     {
         return Err(IndexOrchestratorError::InvalidStagedArtifact);
     }
-    let promoted = cache
-        .promote_staged(&key, &staged, response.byte_length, digest)
+    let verify_millis = verify_started.elapsed().as_millis() as u64;
+    let promotion = cache
+        .promote_staged_with_metrics(&key, &staged, response.byte_length, digest)
         .map_err(IndexOrchestratorError::from)?;
     // A promoted blob is immutable in the cache. The worker-created file is
     // only a verified hand-off buffer and must not retain a second full copy.
+    let cleanup_started = Instant::now();
     std::fs::remove_file(staged).map_err(ArtifactBlobCacheError::from)?;
+    let cleanup_millis = cleanup_started.elapsed().as_millis() as u64;
     let worker_phases = response
         .timings
         .into_iter()
@@ -400,11 +439,33 @@ pub fn materialize_artifact(
                 *metrics.entry(metric.name).or_default() += metric.value;
                 metrics
             });
-    Ok(MaterializationMetrics {
-        promoted,
+    let metrics = MaterializationMetrics {
+        promoted: promotion.promoted,
         worker_phases,
         worker_metrics,
-    })
+        core_phases: BTreeMap::from([
+            ("core_cache_check".to_owned(), cache_check_millis),
+            ("core_staged_verify".to_owned(), verify_millis),
+            (
+                "core_staged_checksum".to_owned(),
+                promotion.staged_checksum_millis,
+            ),
+            (
+                "core_cache_publish".to_owned(),
+                promotion.cache_publish_millis,
+            ),
+            ("core_staging_cleanup".to_owned(), cleanup_millis),
+        ]),
+    };
+    tracing::debug!(
+        target: "kide::dependency",
+        promoted = metrics.promoted,
+        worker_phases = ?metrics.worker_phases,
+        worker_metrics = ?metrics.worker_metrics,
+        core_phases = ?metrics.core_phases,
+        "dependency artifact materialized"
+    );
+    Ok(metrics)
 }
 
 /// Resolves one catalog descriptor on demand. This is deliberately bounded:
@@ -437,6 +498,7 @@ pub fn materialize_catalog_artifact(
         cache,
         workspace_root,
         descriptor,
+        None,
         staging_directory,
         format!("demand-materialize-{}", source_unit.as_str()),
     )?;
@@ -458,12 +520,14 @@ pub fn materialize_catalog_artifact(
 
 /// Promotes exactly one cataloged artifact into the immutable blob cache. It
 /// intentionally does not decode graph facts or write any project-index rows.
+#[allow(clippy::too_many_arguments)]
 pub fn cache_catalog_artifact(
     store: &IndexStore,
     supervisor: &mut WorkerSupervisor,
     cache: &ArtifactBlobCache,
     workspace_root: WorkspacePath,
     source_unit: &crate::SourceUnitId,
+    artifact_locator: Option<String>,
     staging_directory: &Path,
     budget: &mut MaterializationBudget,
 ) -> Result<MaterializationOutcome, IndexOrchestratorError> {
@@ -473,6 +537,7 @@ pub fn cache_catalog_artifact(
         cache,
         workspace_root,
         source_unit,
+        artifact_locator,
         staging_directory,
         budget,
     )?
@@ -481,12 +546,14 @@ pub fn cache_catalog_artifact(
 
 /// Same bounded cache warmup operation, retaining worker measurements for the
 /// CLI/run aggregator. Cache hits have no worker metrics.
+#[allow(clippy::too_many_arguments)]
 pub fn cache_catalog_artifact_with_metrics(
     store: &IndexStore,
     supervisor: &mut WorkerSupervisor,
     cache: &ArtifactBlobCache,
     workspace_root: WorkspacePath,
     source_unit: &crate::SourceUnitId,
+    artifact_locator: Option<String>,
     staging_directory: &Path,
     budget: &mut MaterializationBudget,
 ) -> Result<(MaterializationOutcome, Option<MaterializationMetrics>), IndexOrchestratorError> {
@@ -509,6 +576,7 @@ pub fn cache_catalog_artifact_with_metrics(
         cache,
         workspace_root,
         descriptor,
+        artifact_locator,
         staging_directory,
         format!("cache-materialize-{}", source_unit.as_str()),
     )?;
@@ -629,6 +697,7 @@ fn index_batch_with_optional_cache(
         worker_phase_millis: BTreeMap::new(),
         worker_metrics: BTreeMap::new(),
         batches: Vec::new(),
+        artifact_locators: BTreeMap::new(),
     };
     for action in actions {
         match action {
@@ -695,7 +764,8 @@ fn index_batch_with_optional_cache(
     // API-impact persistence below may perform SQLite work beyond its idle
     // timeout but requires no worker state.
     let catalog_started = Instant::now();
-    index_dependency_catalog(store, &mut supervisor, response.artifact_candidates.clone())?;
+    run.artifact_locators =
+        index_dependency_catalog(store, &mut supervisor, response.artifact_candidates.clone())?;
     run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
@@ -752,10 +822,16 @@ fn index_dependency_catalog(
     store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
     artifact_candidates: Vec<ArtifactCandidate>,
-) -> Result<(), IndexOrchestratorError> {
+) -> Result<BTreeMap<String, String>, IndexOrchestratorError> {
+    tracing::info!(
+        target: "kide::index",
+        candidates = artifact_candidates.len(),
+        "starting dependency catalog phase"
+    );
     let mut cursor = None;
     let mut page = 0_u64;
     let mut descriptors = BTreeMap::new();
+    let mut artifact_locators = BTreeMap::new();
     loop {
         let response = supervisor.request(WorkerEnvelope::new(
             format!("index-artifact-descriptors-{page}"),
@@ -774,15 +850,25 @@ fn index_dependency_catalog(
         for descriptor in response.artifacts {
             descriptors.insert(descriptor.source_unit.id.as_str().to_owned(), descriptor);
         }
+        for locator in response.artifact_locators {
+            artifact_locators.insert(locator.source_unit.as_str().to_owned(), locator.locator);
+        }
         match response.next_cursor {
             Some(next) => {
                 cursor = Some(next);
                 page += 1
             }
             None => {
+                let artifacts = descriptors.len();
                 store
                     .replace_artifact_descriptors(&descriptors.into_values().collect::<Vec<_>>())?;
-                return Ok(());
+                tracing::info!(
+                    target: "kide::index",
+                    artifacts,
+                    pages = page + 1,
+                    "dependency catalog phase complete"
+                );
+                return Ok(artifact_locators);
             }
         }
     }

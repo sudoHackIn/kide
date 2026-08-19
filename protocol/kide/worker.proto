@@ -285,12 +285,16 @@ message SymbolLocator { string qualified_name = 1; string symbol_id = 2; }
 message ArtifactDiscoveryResponse {
   repeated ArtifactDescriptor artifacts = 1;
   optional string next_cursor = 2;
+  repeated ArtifactLocator artifact_locators = 3;
 }
+// Locator is run-local transport only; it must never be persisted by Core.
+message ArtifactLocator { string source_unit_id = 1; string locator = 2; }
 message ArtifactMaterializationRequest {
   string workspace_root = 1;
   ArtifactDescriptor artifact = 2;
   string staging_directory = 3;
   uint32 blob_format_version = 4;
+  optional string artifact_locator = 5;
 }
 message ArtifactMaterializationResponse {
   string staged_filename = 1;

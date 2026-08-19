@@ -475,6 +475,7 @@ mod worker_framing_tests {
             artifact: descriptor,
             staging_directory: "staging-7".into(),
             blob_format_version: 1,
+            artifact_locator: None,
         };
         let response = crate::ArtifactMaterializationResponse {
             staged_filename: "artifact.kide".into(),

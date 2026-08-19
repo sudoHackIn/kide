@@ -68,8 +68,9 @@ pub struct WorkspaceDiscovery {
 /// Resolves a user invocation path to its workspace root.
 ///
 /// The closest Gradle settings root wins over nested module build files. If no
-/// settings file exists, an enclosing `.git` directory wins, then the closest
-/// recognised build marker. The path itself is canonicalized once; symlinks
+/// settings file exists, the closest recognised build marker wins over an
+/// enclosing `.git` directory. This lets a Maven/Gradle project nested inside
+/// a repository be indexed as itself. The path is canonicalized once; symlinks
 /// inside the resulting workspace are deliberately not followed.
 pub fn find_workspace_root(invocation: impl AsRef<Path>) -> Result<PathBuf, DiscoveryError> {
     let invocation = invocation.as_ref();
@@ -115,7 +116,7 @@ pub fn find_workspace_root(invocation: impl AsRef<Path>) -> Result<PathBuf, Disc
         }
     }
 
-    Ok(settings_root.or(git_root).or(build_root).unwrap_or(start))
+    Ok(settings_root.or(build_root).or(git_root).unwrap_or(start))
 }
 
 /// Builds the generic manifest and inventory. No compiler, PSI, or build tool

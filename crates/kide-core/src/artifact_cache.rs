@@ -9,6 +9,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use sha2::{Digest, Sha256};
@@ -26,6 +27,15 @@ pub struct ArtifactBlobKey {
     backend_version: String,
     protocol_version: u32,
     canonical_schema_version: u32,
+}
+
+/// Timing and outcome for promoting a worker-produced staged artifact into
+/// the immutable shared cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArtifactPromotionMetrics {
+    pub promoted: bool,
+    pub staged_checksum_millis: u64,
+    pub cache_publish_millis: u64,
 }
 
 impl ArtifactBlobKey {
@@ -220,6 +230,20 @@ impl ArtifactBlobCache {
         expected_length: u64,
         expected_sha256: [u8; 32],
     ) -> Result<bool, ArtifactBlobCacheError> {
+        Ok(self
+            .promote_staged_with_metrics(key, staged, expected_length, expected_sha256)?
+            .promoted)
+    }
+
+    /// Verifies then promotes a worker-staged blob, reporting the separate
+    /// costs of reading/checksumming the staging file and publishing it.
+    pub fn promote_staged_with_metrics(
+        &self,
+        key: &ArtifactBlobKey,
+        staged: impl AsRef<Path>,
+        expected_length: u64,
+        expected_sha256: [u8; 32],
+    ) -> Result<ArtifactPromotionMetrics, ArtifactBlobCacheError> {
         let staged = staged.as_ref();
         let actual = fs::metadata(staged)?.len();
         if actual != expected_length {
@@ -228,6 +252,7 @@ impl ArtifactBlobCache {
                 actual,
             });
         }
+        let checksum_started = Instant::now();
         let mut hasher = Sha256::new();
         let mut file = File::open(staged)?;
         let mut buffer = [0_u8; 64 * 1024];
@@ -241,7 +266,15 @@ impl ArtifactBlobCache {
         if hasher.finalize().as_slice() != expected_sha256 {
             return Err(ArtifactBlobCacheError::StagedChecksumMismatch);
         }
-        self.publish_stream(key, expected_length, File::open(staged)?)
+        let staged_checksum_millis = checksum_started.elapsed().as_millis() as u64;
+        let publish_started = Instant::now();
+        let promoted = self.publish_stream(key, expected_length, File::open(staged)?)?;
+        let cache_publish_millis = publish_started.elapsed().as_millis() as u64;
+        Ok(ArtifactPromotionMetrics {
+            promoted,
+            staged_checksum_millis,
+            cache_publish_millis,
+        })
     }
 
     fn path_for(&self, key: &ArtifactBlobKey) -> PathBuf {

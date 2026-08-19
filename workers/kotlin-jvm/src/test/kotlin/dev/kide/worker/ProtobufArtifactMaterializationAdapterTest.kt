@@ -27,10 +27,12 @@ class ProtobufArtifactMaterializationAdapterTest {
         val request = buildJsonObject {
             put("workspace_root", "."); put("artifact", descriptor)
             put("staging_directory", "staging-7"); put("blob_format_version", 1)
+            put("artifact_locator", JsonNull)
         }
         val response = buildJsonObject {
             put("staged_filename", "artifact.kide"); put("byte_length", 12)
             put("sha256", "sha256:" + "ab".repeat(32)); put("blob_format_version", 1)
+            put("timings", buildJsonArray { }); put("metrics", buildJsonArray { })
         }
         val error = buildJsonObject {
             put("code", "analysis_failed"); put("message", "staging failed"); put("retryable", true)

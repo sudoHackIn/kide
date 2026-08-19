@@ -40,6 +40,7 @@ internal object ProtobufArtifactMaterializationAdapter {
             .setArtifact(ProtobufArtifactDiscoveryAdapter.descriptor(value["artifact"]!!.jsonObject))
             .setStagingDirectory(stagingDirectory)
             .setBlobFormatVersion(version)
+            .apply { value["artifact_locator"]?.jsonPrimitive?.contentOrNull?.let(::setArtifactLocator) }
             .build()
     }
 
@@ -51,6 +52,7 @@ internal object ProtobufArtifactMaterializationAdapter {
         put("artifact", ProtobufArtifactDiscoveryAdapter.json(value.artifact))
         put("staging_directory", value.stagingDirectory)
         put("blob_format_version", value.blobFormatVersion)
+        put("artifact_locator", value.artifactLocator.takeIf { value.hasArtifactLocator() }?.let(::JsonPrimitive) ?: JsonNull)
     }
 
     fun response(value: JsonObject): Worker.ArtifactMaterializationResponse {

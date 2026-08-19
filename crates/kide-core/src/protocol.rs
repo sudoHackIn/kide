@@ -272,6 +272,15 @@ pub struct ArtifactDiscoveryRequest {
 pub struct ArtifactDiscoveryResponse {
     pub artifacts: Vec<ArtifactDescriptor>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub artifact_locators: Vec<ArtifactLocator>,
+}
+
+/// Ephemeral mapping returned with a catalog page. It never enters IndexStore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactLocator {
+    pub source_unit: SourceUnitId,
+    pub locator: String,
 }
 
 /// Instructs a worker to materialize an artifact into a Core-provided staging
@@ -283,6 +292,8 @@ pub struct ArtifactMaterializationRequest {
     /// Opaque worker-local staging location supplied by Core.
     pub staging_directory: String,
     pub blob_format_version: u32,
+    #[serde(default)]
+    pub artifact_locator: Option<String>,
 }
 
 /// Metadata for a successfully staged artifact blob. `sha256` verifies the

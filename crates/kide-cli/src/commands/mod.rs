@@ -292,6 +292,8 @@ mod tests {
                     supertype_symbol_id: target.as_str().into(),
                     precision: "exact".into(),
                     provenance_index: Some(0),
+                    subtype_symbol_ordinal: None,
+                    supertype_symbol_ordinal: None,
                 }],
                 completeness: "partial".into(),
                 ..Default::default()

@@ -333,6 +333,7 @@ fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
             &cache,
             WorkspacePath::new("."),
             &artifact.source_unit.id,
+            None,
             &staging,
             &mut MaterializationBudget {
                 remaining_artifacts: 1

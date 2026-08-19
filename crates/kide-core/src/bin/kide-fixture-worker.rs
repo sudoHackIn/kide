@@ -7,13 +7,13 @@ use std::{
 };
 
 use kide_core::{
-    artifact_blob_layout::ArtifactBlobLayout, artifact_proto, worker_framing, worker_proto_adapter,
     AnalysisBatchResponse, ArtifactAnalysisResponse, ArtifactDescriptor, ArtifactDiscoveryResponse,
     ArtifactMaterializationResponse, Completeness, FileAnalysisSnapshot, Fingerprint,
     HandshakeResponse, Language, Provenance, SemanticQueryCapability, SemanticQueryResponse,
     SemanticQueryResponseState, SemanticQueryResultKind, SourceOrigin, SourceUnit, SourceUnitId,
-    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity, WorkerMessage,
-    WorkspacePath, WORKER_PROTOCOL_VERSION,
+    WORKER_PROTOCOL_VERSION, WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerIdentity,
+    WorkerMessage, WorkspacePath, artifact_blob_layout::ArtifactBlobLayout, artifact_proto,
+    worker_framing, worker_proto_adapter,
 };
 use sha2::{Digest, Sha256};
 
@@ -62,29 +62,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             WorkerMessage::AnalyzeBatchRequest(request) => {
                 WorkerMessage::AnalysisBatchResponse(AnalysisBatchResponse {
-                    snapshots: (mode != "missing")
-                        .then(|| {
-                            request
-                                .source_units
-                                .into_iter()
-                                .map(|source_unit| FileAnalysisSnapshot {
-                                    source_unit,
-                                    structural_fingerprint: None,
-                                    public_api_fingerprint: None,
-                                    symbols: Vec::new(),
-                                    applications: Vec::new(),
-                                    occurrences: Vec::new(),
-                                    references: Vec::new(),
-                                    calls: Vec::new(),
-                                    hierarchy: Vec::new(),
-                                    types: Vec::new(),
-                                    diagnostics: Vec::new(),
-                                    completeness: Completeness::Partial,
-                                    provenance: provenance(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    snapshots: if mode != "missing" {
+                        request
+                            .source_units
+                            .into_iter()
+                            .map(|source_unit| FileAnalysisSnapshot {
+                                source_unit,
+                                structural_fingerprint: None,
+                                public_api_fingerprint: None,
+                                symbols: Vec::new(),
+                                applications: Vec::new(),
+                                occurrences: Vec::new(),
+                                references: Vec::new(),
+                                calls: Vec::new(),
+                                hierarchy: Vec::new(),
+                                types: Vec::new(),
+                                diagnostics: Vec::new(),
+                                completeness: Completeness::Partial,
+                                provenance: provenance(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
                     timings: Vec::new(),
                     artifact_candidates: Vec::new(),
                     metrics: Vec::new(),
@@ -111,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WorkerMessage::ArtifactDiscoveryResponse(ArtifactDiscoveryResponse {
                     artifacts,
                     next_cursor,
+                    artifact_locators: Vec::new(),
                 })
             }
             WorkerMessage::ArtifactMaterializationRequest(request) if mode == "materialize" => {

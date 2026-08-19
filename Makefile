@@ -1,4 +1,7 @@
-.PHONY: check test e2e fmt storage-transport-spike worker-handshake
+.PHONY: build check test e2e verify full_build fmt storage-transport-spike worker-handshake
+
+KIDE_MAVEN_HOME ?= $(HOME)/.sdkman/candidates/maven/current
+export KIDE_MAVEN_HOME
 
 build:
 	cargo build
@@ -15,6 +18,10 @@ test:
 
 e2e: build
 	cargo test -p kide --test mvp_e2e -- --ignored --nocapture
+
+verify: check test e2e
+
+full_build: verify
 
 fmt:
 	cargo fmt --all -- --check
