@@ -7,7 +7,7 @@ use kide_core::{
     document_from_bytes,
 };
 
-use super::print_response;
+use super::{WorkspaceContext, print_response};
 
 pub(super) fn fan_out(
     mut targets: Vec<String>,
@@ -26,7 +26,7 @@ pub(super) fn fan_out(
 }
 
 pub(super) fn select_symbols(
-    workspace: &Path,
+    context: &WorkspaceContext,
     applies: String,
     kotlin_class: bool,
     java_class: bool,
@@ -34,6 +34,7 @@ pub(super) fn select_symbols(
     qualified_prefix: Option<String>,
     human_output: bool,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     use kide_core::selector::{
         LanguageView, Selector, SelectorPredicate, SelectorState, records, select,
     };
@@ -115,10 +116,11 @@ fn print_short_symbol(
 }
 
 pub(super) fn definition(
-    workspace: &Path,
+    context: &WorkspaceContext,
     value: String,
     human_output: bool,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(id) => match store.symbol(&id)? {
@@ -177,7 +179,8 @@ pub(super) fn definition(
     Ok(status)
 }
 
-pub(super) fn references(workspace: &Path, value: String, short: bool) -> Result<QueryStatus> {
+pub(super) fn references(context: &WorkspaceContext, value: String, short: bool) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
@@ -344,7 +347,8 @@ pub(super) fn byte_to_location(text: &str, byte_offset: u64) -> Option<(usize, u
     Some((line, column))
 }
 
-pub(super) fn callers(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
+pub(super) fn callers(context: &WorkspaceContext, value: String, human_output: bool) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
@@ -369,11 +373,12 @@ pub(super) fn callers(workspace: &Path, value: String, human_output: bool) -> Re
 }
 
 pub(super) fn implementations(
-    workspace: &Path,
+    context: &WorkspaceContext,
     value: String,
     transitive: bool,
     human_output: bool,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
@@ -427,7 +432,8 @@ pub(super) fn cached_dependency_implementations(
     Ok(symbols)
 }
 
-pub(super) fn type_at(workspace: &Path, value: String, human_output: bool) -> Result<QueryStatus> {
+pub(super) fn type_at(context: &WorkspaceContext, value: String, human_output: bool) -> Result<QueryStatus> {
+    let workspace = context.path();
     let location = parse_location(&value)?;
     let source_text = std::fs::read_to_string(workspace.join(location.path.as_str()))?;
     let store = IndexStore::open(IndexStore::default_path(workspace))?;

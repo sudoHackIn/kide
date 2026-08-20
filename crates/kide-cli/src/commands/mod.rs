@@ -67,7 +67,7 @@ fn dispatch_configured(
     match command {
         Command::Init => unreachable!("init is dispatched before configuration loading"),
         Command::Query { args, params } => {
-            query::run(context.path(), args, params, human_output, verbosity)
+            query::run(&context, args, params, human_output, verbosity)
         }
         Command::Index {
             path,
@@ -86,9 +86,9 @@ fn dispatch_configured(
             materialize_only,
         )}
         Command::Status => search::status(&context, human_output),
-        Command::Text { query } => search::text_search(context.path(), query, human_output),
+        Command::Text { query } => search::text_search(&context, query, human_output),
         Command::Symbols { query, short } => {
-            search::symbols(context.path(), query, short || human_output)
+            search::symbols(&context, query, short || human_output)
         }
         Command::Select {
             applies,
@@ -97,7 +97,7 @@ fn dispatch_configured(
             component,
             qualified_prefix,
         } => navigation::select_symbols(
-            context.path(),
+            &context,
             applies,
             kotlin_class,
             java_class,
@@ -106,26 +106,26 @@ fn dispatch_configured(
             human_output,
         ),
         Command::Definition { target } => navigation::definition(
-            context.path(),
+            &context,
             input::target_from_argument_or_stdin(target)?,
             human_output,
         ),
         Command::Refs { target, short } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::references(context.path(), target, short || human_output)
+                navigation::references(&context, target, short || human_output)
             })
         }
         Command::Implementations { target, transitive } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::implementations(context.path(), target, transitive, human_output)
+                navigation::implementations(&context, target, transitive, human_output)
             })
         }
         Command::Callers { target } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::callers(context.path(), target, human_output)
+                navigation::callers(&context, target, human_output)
             })
         }
-        Command::TypeAt { location } => navigation::type_at(context.path(), location, human_output),
+        Command::TypeAt { location } => navigation::type_at(&context, location, human_output),
     }
 }
 
@@ -133,6 +133,7 @@ pub(crate) use output::{exit_code, print_response};
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use clap::{CommandFactory, Parser};
 
     use super::input::{target_from_pipe_text, target_from_symbols};
@@ -142,6 +143,13 @@ mod tests {
     };
     use super::{Cli, Command, WorkspaceContext, exit_code};
     use std::process::ExitCode;
+
+    fn context(path: &Path) -> WorkspaceContext {
+        WorkspaceContext {
+            workspace: path.to_path_buf(),
+            configuration: kide_core::EffectiveConfiguration::default(),
+        }
+    }
 
     #[test]
     fn cli_definition_is_valid() {
@@ -290,15 +298,15 @@ mod tests {
             .expect("snapshot");
         drop(store);
         assert_eq!(
-            callers(workspace.path(), target.as_str().to_owned(), false).unwrap(),
+            callers(&context(workspace.path()), target.as_str().to_owned(), false).unwrap(),
             kide_core::QueryStatus::Ok
         );
         assert_eq!(
-            implementations(workspace.path(), target.as_str().to_owned(), false, false).unwrap(),
+            implementations(&context(workspace.path()), target.as_str().to_owned(), false, false).unwrap(),
             kide_core::QueryStatus::NoResult
         );
         assert_eq!(
-            type_at(workspace.path(), "src/Main.kt:1:16".to_owned(), false).unwrap(),
+            type_at(&context(workspace.path()), "src/Main.kt:1:16".to_owned(), false).unwrap(),
             kide_core::QueryStatus::Ok
         );
     }
@@ -390,7 +398,7 @@ mod tests {
             vec![implementation]
         );
         assert_eq!(
-            implementations(workspace.path(), target.as_str().into(), false, false)
+            implementations(&context(workspace.path()), target.as_str().into(), false, false)
                 .expect("CLI fallback"),
             kide_core::QueryStatus::Ok
         );

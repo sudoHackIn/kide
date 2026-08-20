@@ -107,10 +107,11 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
 }
 
 pub(super) fn text_search(
-    workspace: &Path,
+    context: &WorkspaceContext,
     query: String,
     human_output: bool,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     if query.is_empty()
         || !query
             .chars()
@@ -169,7 +170,8 @@ pub(super) fn text_search(
     })
 }
 
-pub(super) fn symbols(workspace: &Path, query: String, short: bool) -> Result<QueryStatus> {
+pub(super) fn symbols(context: &WorkspaceContext, query: String, short: bool) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let mut symbols = store.symbols_named(&query)?;
     if symbols.is_empty() {

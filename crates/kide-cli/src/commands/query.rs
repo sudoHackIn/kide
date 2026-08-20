@@ -18,7 +18,7 @@ use kide_core::{
 };
 use serde::Serialize;
 
-use super::index::kotlin_worker_installation;
+use super::{WorkspaceContext, index::kotlin_worker_installation};
 
 const QUERY_CAPABILITY_MAX_BYTES: u64 = 1024 * 1024;
 const QUERY_CAPABILITY_DEADLINE_MILLIS: u64 = 5_000;
@@ -81,12 +81,13 @@ struct CapabilityProviderRecord {
 }
 
 pub(super) fn run(
-    workspace: &Path,
+    context: &WorkspaceContext,
     args: Vec<String>,
     params: Vec<(String, String)>,
     human: bool,
     verbosity: u8,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     match args.as_slice() {
         [action] if action == "list" => {
             for (name, _) in commands(workspace)? {
