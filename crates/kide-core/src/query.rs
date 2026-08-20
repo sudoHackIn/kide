@@ -144,6 +144,10 @@ pub struct IndexResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResult {
     pub workspace: WorkspacePath,
+    /// Version of the effective configuration contract used for this status.
+    pub configuration_schema_version: u32,
+    /// The policy that semantic query gates must enforce for this workspace.
+    pub freshness_strategy: crate::FreshnessStrategy,
     pub manifest: Freshness,
     pub source_units: IndexCounts,
     pub workers_running: Vec<String>,
@@ -168,6 +172,8 @@ mod tests {
         let response = QueryResponse::ok(
             QueryPayload::Status(StatusResult {
                 workspace: WorkspacePath::new("."),
+                configuration_schema_version: crate::CONFIGURATION_SCHEMA_VERSION,
+                freshness_strategy: crate::FreshnessStrategy::FreshOnly,
                 manifest: Freshness::Fresh,
                 source_units: IndexCounts {
                     fresh: 2,

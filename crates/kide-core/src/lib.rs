@@ -886,6 +886,7 @@ mod worker_framing_tests {
     }
 }
 mod canonical;
+mod configuration;
 mod discovery;
 mod freshness;
 mod orchestrator;
@@ -897,6 +898,7 @@ mod worker_registry;
 
 pub use artifact_cache::*;
 pub use canonical::*;
+pub use configuration::*;
 pub use discovery::*;
 pub use framework_query::*;
 pub use freshness::*;

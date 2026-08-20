@@ -1,37 +1,94 @@
 //! Command dispatcher and shared command helpers.
 
-use crate::{Cli, Command};
-use anyhow::Result;
+use std::path::{Path, PathBuf};
 
+use crate::{Cli, Command};
+use anyhow::{Result, bail};
+use kide_core::{EffectiveConfiguration, QueryStatus, load_workspace_configuration};
+
+mod config;
 mod index;
 mod input;
 mod navigation;
 mod output;
 mod query;
 mod search;
-use kide_core::QueryStatus;
+
+/// Immutable command-scoped inputs loaded once before semantic dispatch.
+#[derive(Debug)]
+pub(crate) struct WorkspaceContext {
+    workspace: PathBuf,
+    pub(crate) configuration: EffectiveConfiguration,
+}
+
+impl WorkspaceContext {
+    fn load(workspace: &Path) -> Result<Self> {
+        Self::from_loaded(workspace, false)
+    }
+
+    fn load_required(workspace: &Path) -> Result<Self> {
+        Self::from_loaded(workspace, true)
+    }
+
+    fn from_loaded(workspace: &Path, require_workspace_file: bool) -> Result<Self> {
+        let loaded = load_workspace_configuration(workspace)?;
+        if require_workspace_file && loaded.sources.workspace.is_none() {
+            bail!(
+                "workspace configuration is missing at {}; run `kide --workspace {} init` before indexing",
+                workspace.join(".kide/config.toml").display(),
+                workspace.display(),
+            );
+        }
+        Ok(Self {
+            workspace: workspace.to_path_buf(),
+            configuration: loaded.effective,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.workspace
+    }
+}
 
 pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
     match cli.command {
+        Command::Init => config::init(&cli.workspace),
+        command => dispatch_configured(command, &cli.workspace, cli.verbose, human_output),
+    }
+}
+
+fn dispatch_configured(
+    command: Command,
+    workspace: &Path,
+    verbosity: u8,
+    human_output: bool,
+) -> Result<QueryStatus> {
+    let context = WorkspaceContext::load(workspace)?;
+    match command {
+        Command::Init => unreachable!("init is dispatched before configuration loading"),
         Command::Query { args, params } => {
-            query::run(&cli.workspace, args, params, human_output, cli.verbose)
+            query::run(context.path(), args, params, human_output, verbosity)
         }
         Command::Index {
             path,
             force,
             warm_dependencies,
             materialize_only,
-        } => index::index(
-            path,
-            cli.verbose,
+        } => {
+            let discovery = kide_core::discover_workspace(path)?;
+            let index_context = WorkspaceContext::load_required(&discovery.root)?;
+            index::index(
+            discovery,
+            index_context.configuration,
+            verbosity,
             force,
             warm_dependencies,
             materialize_only,
-        ),
-        Command::Status => search::status(&cli.workspace, human_output),
-        Command::Text { query } => search::text_search(&cli.workspace, query, human_output),
+        )}
+        Command::Status => search::status(&context, human_output),
+        Command::Text { query } => search::text_search(context.path(), query, human_output),
         Command::Symbols { query, short } => {
-            search::symbols(&cli.workspace, query, short || human_output)
+            search::symbols(context.path(), query, short || human_output)
         }
         Command::Select {
             applies,
@@ -40,7 +97,7 @@ pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
             component,
             qualified_prefix,
         } => navigation::select_symbols(
-            &cli.workspace,
+            context.path(),
             applies,
             kotlin_class,
             java_class,
@@ -49,26 +106,26 @@ pub(crate) fn dispatch(cli: Cli, human_output: bool) -> Result<QueryStatus> {
             human_output,
         ),
         Command::Definition { target } => navigation::definition(
-            &cli.workspace,
+            context.path(),
             input::target_from_argument_or_stdin(target)?,
             human_output,
         ),
         Command::Refs { target, short } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::references(&cli.workspace, target, short || human_output)
+                navigation::references(context.path(), target, short || human_output)
             })
         }
         Command::Implementations { target, transitive } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::implementations(&cli.workspace, target, transitive, human_output)
+                navigation::implementations(context.path(), target, transitive, human_output)
             })
         }
         Command::Callers { target } => {
             navigation::fan_out(input::targets_from_argument_or_stdin(target)?, |target| {
-                navigation::callers(&cli.workspace, target, human_output)
+                navigation::callers(context.path(), target, human_output)
             })
         }
-        Command::TypeAt { location } => navigation::type_at(&cli.workspace, location, human_output),
+        Command::TypeAt { location } => navigation::type_at(context.path(), location, human_output),
     }
 }
 
@@ -83,12 +140,27 @@ mod tests {
         TargetResolution, byte_to_location, cached_dependency_implementations, callers, fan_out,
         implementations, target_problem, type_at,
     };
-    use super::{Cli, Command, exit_code};
+    use super::{Cli, Command, WorkspaceContext, exit_code};
     use std::process::ExitCode;
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_accepts_workspace_initialization() {
+        let cli = Cli::try_parse_from(["kide", "init"]).expect("parses init");
+        assert!(matches!(cli.command, Command::Init));
+    }
+
+    #[test]
+    fn indexing_context_requires_explicit_initialization() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let error = WorkspaceContext::load_required(workspace.path()).expect_err("missing config");
+        assert!(error.to_string().contains("kide --workspace"));
+        kide_core::initialize_workspace_configuration(workspace.path()).expect("initializes");
+        WorkspaceContext::load_required(workspace.path()).expect("loads initialized workspace");
     }
 
     #[test]

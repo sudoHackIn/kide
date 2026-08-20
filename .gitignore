@@ -12,6 +12,9 @@
 **/.kotlin/
 **/build/
 **/.kide/
+!.kide/
+!.kide/.gitignore
+!.kide/config.toml
 !fixtures/spring-boot-crud/.kide/
 !fixtures/spring-boot-crud/.kide/**
 .DS_Store

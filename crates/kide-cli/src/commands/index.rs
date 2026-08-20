@@ -6,22 +6,22 @@ use std::{
 
 use anyhow::{Result, bail};
 use kide_core::{
-    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, IndexStore,
+    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, EffectiveConfiguration, IndexStore, WorkspaceDiscovery,
     Provenance, QueryStatus, WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry,
     WorkerSupervisor, cache_catalog_artifact_with_metrics, collect_workspace_text,
-    discover_workspace, index_batch_with_artifact_cache_and_provenance, index_selected_batches,
+    index_batch_with_artifact_cache_and_provenance, index_selected_batches,
 };
 
 pub(super) fn index(
-    path: PathBuf,
+    discovery: WorkspaceDiscovery,
+    configuration: EffectiveConfiguration,
     verbosity: u8,
     force: bool,
     warm_dependencies: Option<u32>,
     materialize_only: bool,
 ) -> Result<QueryStatus> {
-    tracing::debug!(target: "kide::cli", workspace = %path.display(), "discovering workspace");
     let discovery_started = Instant::now();
-    let discovery = discover_workspace(&path)?;
+    tracing::debug!(target: "kide::cli", workspace = %discovery.root.display(), "indexing discovered workspace");
     let discovery_millis = discovery_started.elapsed().as_millis();
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
@@ -492,6 +492,7 @@ pub(super) fn index(
         serde_json::json!({
             "schema_version": CANONICAL_SCHEMA_VERSION,
             "status": "ok",
+            "freshness_strategy": configuration.freshness_strategy,
             "workspace": discovery.root,
             "reused": run.reused,
             "analyzed": run.analyzed,
@@ -517,6 +518,7 @@ pub(super) fn index(
     );
     Ok(QueryStatus::Ok)
 }
+
 
 /// Temporary external scheduling override. Workspace configuration will own
 /// this same policy once the config schema includes index execution limits.

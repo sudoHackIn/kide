@@ -1,0 +1,4 @@
+# Persistent KIDE state is local and reproducible.
+*
+!.gitignore
+!config.toml

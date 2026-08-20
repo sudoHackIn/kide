@@ -1,0 +1,7 @@
+# KIDE workspace configuration schema.  Workspace values override the optional
+# global file selected by KIDE_GLOBAL_CONFIG; both override built-in defaults.
+schema_version = 1
+
+# Do not serve semantic answers whose source owners changed after indexing.
+# Set to "allow_stale" only when callers can explicitly handle `status: stale`.
+freshness_strategy = "fresh_only"

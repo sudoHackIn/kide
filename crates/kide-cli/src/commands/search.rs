@@ -9,10 +9,11 @@ use kide_core::{
 
 use super::{
     navigation::{print_query_response, print_short_symbols},
-    print_response,
+    print_response, WorkspaceContext,
 };
 
-pub(super) fn status(workspace: &Path, human_output: bool) -> Result<QueryStatus> {
+pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<QueryStatus> {
+    let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let Some(manifest) = store.latest_manifest()? else {
         return print_query_response(QueryStatus::NoResult, None, Vec::new());
@@ -72,6 +73,8 @@ pub(super) fn status(workspace: &Path, human_output: bool) -> Result<QueryStatus
     provenance.dedup();
     let payload = QueryPayload::Status(kide_core::StatusResult {
         workspace: manifest.root,
+        configuration_schema_version: context.configuration.schema_version,
+        freshness_strategy: context.configuration.freshness_strategy,
         manifest: freshness,
         source_units: counts,
         workers_running: Vec::new(),
