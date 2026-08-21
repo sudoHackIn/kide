@@ -59,7 +59,7 @@ pub(super) fn index(
         for descriptor in descriptors {
             let artifact_started = Instant::now();
             let (outcome, metrics) = cache_catalog_artifact_with_metrics(
-                &store,
+                &mut store,
                 &mut worker,
                 &artifact_cache,
                 discovery.manifest.root.clone(),
@@ -203,7 +203,7 @@ pub(super) fn index(
                 .unwrap_or(descriptor.source_unit.path.as_str())
                 .to_owned();
             let (outcome, metrics) = cache_catalog_artifact_with_metrics(
-                &store,
+                &mut store,
                 &mut worker,
                 &artifact_cache,
                 discovery.manifest.root.clone(),

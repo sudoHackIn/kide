@@ -14,7 +14,14 @@ import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
 /** Run-local resolved artifact. Its path crosses only as an opaque locator. */
-internal data class ResolvedJvmArtifact(val path: Path, val component: String, val context: String) {
+internal data class ResolvedJvmArtifact(
+    val path: Path,
+    val component: String,
+    val context: String,
+    val ecosystem: String = "unknown",
+    val coordinate: String? = null,
+    val version: String? = null,
+) {
     val cursor: String get() = path.toAbsolutePath().normalize().toString()
 }
 
@@ -217,9 +224,9 @@ internal fun artifactDescriptors(
     val start = cursor?.let { previous -> artifacts.indexOfFirst { it.cursor == previous }.takeIf { it >= 0 }?.plus(1)
         ?: error("artifact cursor is not valid for this workspace") } ?: 0
     val batch = artifacts.drop(start).take(maxArtifacts)
-    put("artifacts", buildJsonArray { batch.forEach { artifact -> add(JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context)) } })
+    put("artifacts", buildJsonArray { batch.forEach { artifact -> add(JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context, artifact.ecosystem, artifact.coordinate, artifact.version)) } })
     put("artifact_locators", buildJsonArray { batch.forEach { artifact ->
-        val descriptor = JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context).jsonObject
+        val descriptor = JvmBytecodeExtractor.descriptor(artifact.path, artifact.component, artifact.context, artifact.ecosystem, artifact.coordinate, artifact.version).jsonObject
         add(buildJsonObject { put("source_unit_id", descriptor["source_unit"]!!.jsonObject["id"]!!.jsonPrimitive.content); put("locator", artifact.path.toString()) })
     } })
     put("next_cursor", batch.lastOrNull()?.takeIf { start + batch.size < artifacts.size }?.cursor)
@@ -227,7 +234,7 @@ internal fun artifactDescriptors(
 
 internal fun resolvedArtifacts(workspace: Path): List<ResolvedJvmArtifact> = when {
     workspace.resolve("pom.xml").toFile().isFile -> MavenProjectImporter.resolvedArtifacts(workspace)
-        .map { ResolvedJvmArtifact(it.path, it.component, it.context) }
+        .map { ResolvedJvmArtifact(it.path, it.component, it.context, "maven", it.coordinate, it.version) }
     else -> GradleProjectImporter.resolvedArtifacts(workspace)
         .map { ResolvedJvmArtifact(it.path, it.component, it.context) }
 }

@@ -28,7 +28,7 @@ import org.objectweb.asm.Type
  * persistence transaction artifact-granular rather than class-granular.
  */
 internal object JvmBytecodeExtractor {
-    fun descriptor(artifact: Path, component: String, context: String): JsonElement {
+    fun descriptor(artifact: Path, component: String, context: String, ecosystem: String = "unknown", coordinate: String? = null, version: String? = null): JsonElement {
         require(artifact.isRegularFile() || artifact.isDirectory()) { "artifact does not exist: $artifact" }
         val artifactHash = fingerprint(artifactBytes(artifact))
         return buildJsonObject {
@@ -38,6 +38,11 @@ internal object JvmBytecodeExtractor {
                 put("language", "java"); put("origin", "dependency"); put("content", artifactHash); put("context", context)
             })
             put("provenance", provenance(context))
+            put("resolved_identity", buildJsonObject {
+                put("ecosystem", ecosystem)
+                coordinate?.let { put("canonical_coordinate", it) }
+                version?.let { put("resolved_version", it) }
+            })
             put("symbol_locators", buildJsonArray {
                 classEntries(artifact).map { it.first.removeSuffix(".class").replace('/', '.') }
                     .filter { it.isNotEmpty() && !it.endsWith("module-info") && !it.endsWith("package-info") }

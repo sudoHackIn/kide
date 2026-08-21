@@ -248,8 +248,25 @@ pub struct ArtifactAnalysisResponse {
 pub struct ArtifactDescriptor {
     pub source_unit: SourceUnit,
     pub provenance: crate::Provenance,
+    /// Full resolved identity when the build worker can provide registry
+    /// metadata. Older workers remain safe through the unattributed fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_identity: Option<crate::ResolvedDependencyIdentity>,
     #[serde(default)]
     pub symbol_locators: Vec<SymbolLocator>,
+}
+
+impl ArtifactDescriptor {
+    pub fn resolved_identity(&self) -> crate::ResolvedDependencyIdentity {
+        self.resolved_identity.clone().unwrap_or_else(|| {
+            crate::ResolvedDependencyIdentity::unattributed(
+                self.source_unit.content.clone(),
+                self.source_unit.context.clone(),
+                self.provenance.clone(),
+                crate::ARTIFACT_BLOB_FORMAT_VERSION,
+            )
+        })
+    }
 }
 
 /// Lightweight catalog entry; it carries no graph facts.

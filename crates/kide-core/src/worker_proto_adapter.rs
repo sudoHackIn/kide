@@ -1612,6 +1612,19 @@ fn descriptor(value: &ArtifactDescriptor) -> worker_proto::ArtifactDescriptor {
         analysis_options_fingerprint: value.provenance.analysis_options.as_str().to_owned(),
         language: proto_language(&unit.language),
         origin: proto_source_origin(&unit.origin).to_owned(),
+        ecosystem: value
+            .resolved_identity
+            .as_ref()
+            .map(|identity| identity.ecosystem.clone())
+            .unwrap_or_default(),
+        canonical_coordinate: value
+            .resolved_identity
+            .as_ref()
+            .and_then(|identity| identity.canonical_coordinate.clone()),
+        resolved_version: value
+            .resolved_identity
+            .as_ref()
+            .and_then(|identity| identity.resolved_version.clone()),
         symbol_locators: value
             .symbol_locators
             .iter()
@@ -1626,22 +1639,36 @@ fn descriptor(value: &ArtifactDescriptor) -> worker_proto::ArtifactDescriptor {
 pub fn decode_descriptor(
     value: worker_proto::ArtifactDescriptor,
 ) -> Result<ArtifactDescriptor, AdapterError> {
+    let source_unit = SourceUnit {
+        id: SourceUnitId::new(value.source_unit_id.clone()),
+        component: ComponentId::new(value.component_id),
+        path: WorkspacePath::new(value.workspace_path),
+        language: language(value.language),
+        origin: source_origin(value.origin)?,
+        content: Fingerprint::new(value.content_fingerprint.clone()),
+        context: Fingerprint::new(value.context_fingerprint.clone()),
+    };
+    let provenance = Provenance {
+        backend: value.backend.clone(),
+        backend_version: value.backend_version.clone(),
+        protocol_version: value.worker_protocol_version,
+        analysis_options: Fingerprint::new(value.analysis_options_fingerprint.clone()),
+    };
+    let resolved_identity = (!value.ecosystem.is_empty()).then(|| {
+        crate::ResolvedDependencyIdentity::new(
+            value.ecosystem,
+            value.canonical_coordinate,
+            value.resolved_version,
+            source_unit.content.clone(),
+            source_unit.context.clone(),
+            provenance.clone(),
+            crate::ARTIFACT_BLOB_FORMAT_VERSION,
+        )
+    });
     Ok(ArtifactDescriptor {
-        source_unit: SourceUnit {
-            id: SourceUnitId::new(value.source_unit_id),
-            component: ComponentId::new(value.component_id),
-            path: WorkspacePath::new(value.workspace_path),
-            language: language(value.language),
-            origin: source_origin(value.origin)?,
-            content: Fingerprint::new(value.content_fingerprint),
-            context: Fingerprint::new(value.context_fingerprint),
-        },
-        provenance: Provenance {
-            backend: value.backend,
-            backend_version: value.backend_version,
-            protocol_version: value.worker_protocol_version,
-            analysis_options: Fingerprint::new(value.analysis_options_fingerprint),
-        },
+        source_unit,
+        provenance,
+        resolved_identity,
         symbol_locators: value
             .symbol_locators
             .into_iter()

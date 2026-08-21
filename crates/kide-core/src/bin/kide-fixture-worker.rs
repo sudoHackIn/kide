@@ -209,6 +209,7 @@ fn descriptor() -> ArtifactDescriptor {
             context: kide_core::Fingerprint::new("sha256:fixture-context"),
         },
         provenance: provenance(),
+        resolved_identity: None,
         symbol_locators: Vec::new(),
     }
 }

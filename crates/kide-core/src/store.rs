@@ -18,7 +18,8 @@ use crate::{
     ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord, FileAnalysisSnapshot,
     Fingerprint, HierarchyEdge, LexicalMatch, ProjectManifest, Provenance, ReferenceEdge,
     SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
-    WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION, reconcile_configuration_inputs,
+    WorkspacePath, ArtifactBlobKey, ResolvedDependencyIdentity, INDEX_FORMAT_VERSION,
+    WORKER_PROTOCOL_VERSION, reconcile_configuration_inputs,
 };
 
 const MIGRATION_1: &str = r#"
@@ -191,6 +192,21 @@ CREATE TABLE IF NOT EXISTS configuration_inputs (
     component_ids_json TEXT NOT NULL
 );
 "#;
+const MIGRATION_10: &str = r#"
+CREATE TABLE IF NOT EXISTS artifact_blob_catalog (
+    blob_key TEXT PRIMARY KEY,
+    identity_json TEXT NOT NULL,
+    byte_length INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS project_artifact_blob_refs (
+    source_unit_id TEXT PRIMARY KEY,
+    blob_key TEXT NOT NULL REFERENCES artifact_blob_catalog(blob_key)
+);
+CREATE INDEX IF NOT EXISTS project_artifact_blob_refs_by_blob
+    ON project_artifact_blob_refs(blob_key, source_unit_id);
+"#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
 
@@ -230,6 +246,15 @@ pub enum IndexStoreError {
     },
     #[error("byte offset {value} cannot be represented by SQLite")]
     ByteOffsetOutOfRange { value: u64 },
+    #[error("artifact blob key `{blob_key}` is already bound to a different identity")]
+    ArtifactBlobIdentityMismatch { blob_key: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactBlobCatalogEntry {
+    pub blob_key: Fingerprint,
+    pub identity: ResolvedDependencyIdentity,
+    pub byte_length: Option<u64>,
 }
 
 /// A durable local index. The type is deliberately not `Clone`: one Core
@@ -404,6 +429,20 @@ impl IndexStore {
             self.connection.execute_batch(MIGRATION_9)?;
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 10",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_10)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
         }
         Ok(())
     }
@@ -630,6 +669,11 @@ impl IndexStore {
                 )?;
             }
         }
+        transaction.execute(
+            "DELETE FROM project_artifact_blob_refs
+             WHERE source_unit_id NOT IN (SELECT source_unit_id FROM artifact_catalog)",
+            [],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -653,6 +697,115 @@ impl IndexStore {
             .map(|row| row.map(|json| serde_json::from_str(&json)))
             .collect::<Result<Result<Vec<_>, _>, _>>()?
             .map_err(IndexStoreError::from)
+    }
+
+    /// Atomically binds one current project artifact to immutable blob metadata.
+    /// The key is opaque and no absolute cache location enters SQLite.
+    pub fn record_artifact_blob(
+        &mut self,
+        descriptor: &ArtifactDescriptor,
+        byte_length: u64,
+    ) -> Result<ArtifactBlobCatalogEntry, IndexStoreError> {
+        let identity = descriptor.resolved_identity();
+        let blob_key = ArtifactBlobKey::from_identity(identity.clone()).cache_key();
+        let identity_json = serde_json::to_string(&identity)?;
+        let transaction = self.connection.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT INTO artifact_blob_catalog (blob_key, identity_json, byte_length)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(blob_key) DO UPDATE SET
+               byte_length = excluded.byte_length,
+               accessed_at = CURRENT_TIMESTAMP
+             WHERE artifact_blob_catalog.identity_json = excluded.identity_json",
+            params![blob_key.as_str(), identity_json, i64::try_from(byte_length).map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: byte_length })?],
+        )?;
+        if inserted == 0 {
+            return Err(IndexStoreError::ArtifactBlobIdentityMismatch {
+                blob_key: blob_key.as_str().to_owned(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO project_artifact_blob_refs (source_unit_id, blob_key) VALUES (?1, ?2)
+             ON CONFLICT(source_unit_id) DO UPDATE SET blob_key = excluded.blob_key",
+            params![descriptor.source_unit.id.as_str(), blob_key.as_str()],
+        )?;
+        transaction.commit()?;
+        Ok(ArtifactBlobCatalogEntry {
+            blob_key,
+            identity,
+            byte_length: Some(byte_length),
+        })
+    }
+
+    pub fn artifact_blob_for(
+        &self,
+        source_unit: &SourceUnitId,
+    ) -> Result<Option<ArtifactBlobCatalogEntry>, IndexStoreError> {
+        self.connection
+            .query_row(
+                "SELECT catalog.blob_key, catalog.identity_json, catalog.byte_length
+                 FROM project_artifact_blob_refs AS reference
+                 JOIN artifact_blob_catalog AS catalog USING (blob_key)
+                 WHERE reference.source_unit_id = ?1",
+                params![source_unit.as_str()],
+                |row| {
+                    let identity: String = row.get(1)?;
+                    Ok((
+                        Fingerprint::new(row.get::<_, String>(0)?),
+                        serde_json::from_str::<ResolvedDependencyIdentity>(&identity).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                identity.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(blob_key, identity, byte_length)| {
+                Ok(ArtifactBlobCatalogEntry {
+                    blob_key,
+                    identity,
+                    byte_length: byte_length
+                        .map(|value| u64::try_from(value).map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: 0 }))
+                        .transpose()?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Drops references to blobs which are no longer readable. The descriptor
+    /// stays in the project catalog, so the next bounded materialization can
+    /// rebuild it; no query can mistake a missing blob for cached facts.
+    pub fn reconcile_artifact_blob_refs(
+        &mut self,
+        cache: &crate::ArtifactBlobCache,
+    ) -> Result<usize, IndexStoreError> {
+        let references = self.connection.prepare(
+            "SELECT reference.source_unit_id, catalog.identity_json
+             FROM project_artifact_blob_refs AS reference
+             JOIN artifact_blob_catalog AS catalog USING (blob_key)",
+        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let missing = references.into_iter().filter_map(|(source_unit, identity)| {
+            let identity = serde_json::from_str::<ResolvedDependencyIdentity>(&identity).ok()?;
+            match cache.open_blob(&ArtifactBlobKey::from_identity(identity)) {
+                Ok(Some(_)) => None,
+                Ok(None) | Err(crate::ArtifactBlobCacheError::InvalidHeader) => Some(source_unit),
+                Err(_) => None,
+            }
+        }).collect::<Vec<_>>();
+        let transaction = self.connection.transaction()?;
+        for source_unit in &missing {
+            transaction.execute(
+                "DELETE FROM project_artifact_blob_refs WHERE source_unit_id = ?1",
+                params![source_unit],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(missing.len())
     }
 
     pub fn manifest(
@@ -2123,6 +2276,7 @@ mod tests {
             .put_artifact_descriptor(&ArtifactDescriptor {
                 source_unit: dependency.clone(),
                 provenance: provenance(),
+                resolved_identity: None,
                 symbol_locators: vec![crate::SymbolLocator {
                     qualified_name: "jakarta.persistence.Entity".to_owned(),
                     symbol: entity.clone(),
@@ -2164,6 +2318,52 @@ mod tests {
             .artifact_descriptors()
             .expect("reads replaced catalog")
             .is_empty());
+    }
+
+    #[test]
+    fn artifact_blob_catalog_survives_restart() {
+        let directory = tempdir().expect("temporary index directory");
+        let path = directory.path().join("index.sqlite3");
+        let mut source = source_unit("sha256:dependency-content");
+        source.id = SourceUnitId::new("jvm:sha256:dependency-content");
+        source.origin = SourceOrigin::Dependency;
+        let descriptor = ArtifactDescriptor {
+            source_unit: source.clone(),
+            provenance: provenance(),
+            resolved_identity: Some(crate::ResolvedDependencyIdentity::new(
+                "maven",
+                Some("org.example:library:jar".to_owned()),
+                Some("1.2.3".to_owned()),
+                source.content.clone(),
+                source.context.clone(),
+                provenance(),
+                crate::ARTIFACT_BLOB_FORMAT_VERSION,
+            )),
+            symbol_locators: Vec::new(),
+        };
+        let expected = {
+            let mut store = IndexStore::open(&path).expect("opens store");
+            store
+                .record_artifact_blob(&descriptor, 4096)
+                .expect("records immutable blob")
+        };
+        let mut store = IndexStore::open(&path).expect("reopens store");
+        assert_eq!(
+            store.artifact_blob_for(&source.id).expect("reads catalog"),
+            Some(expected)
+        );
+        let cache = crate::ArtifactBlobCache::open(directory.path().join("cache"))
+            .expect("opens empty shared cache");
+        assert_eq!(
+            store
+                .reconcile_artifact_blob_refs(&cache)
+                .expect("reconciles missing blob"),
+            1
+        );
+        assert!(store
+            .artifact_blob_for(&source.id)
+            .expect("reads reconciled catalog")
+            .is_none());
     }
 
     fn source_unit(content: &str) -> SourceUnit {

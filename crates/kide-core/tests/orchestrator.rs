@@ -316,7 +316,7 @@ fn demand_materializes_one_cataloged_artifact_and_respects_explicit_bounds() {
 #[test]
 fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
     let directory = tempdir().expect("temporary workspace");
-    let store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
     let artifact = artifact_descriptor();
     store
         .put_artifact_descriptor(&artifact)
@@ -329,7 +329,7 @@ fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
 
     assert_eq!(
         cache_catalog_artifact(
-            &store,
+            &mut store,
             &mut worker,
             &cache,
             WorkspacePath::new("."),
@@ -423,6 +423,7 @@ fn artifact_descriptor() -> ArtifactDescriptor {
             protocol_version: kide_core::WORKER_PROTOCOL_VERSION,
             analysis_options: Fingerprint::new("sha256:fixture"),
         },
+        resolved_identity: None,
         symbol_locators: Vec::new(),
     }
 }

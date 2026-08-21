@@ -31,11 +31,7 @@ pub fn symbols_with_qualified_name(
     artifact: &ArtifactDescriptor,
     qualified_name: &str,
 ) -> Result<Vec<SymbolRecord>, ArtifactQueryError> {
-    let key = ArtifactBlobKey::new(
-        artifact.source_unit.content.clone(),
-        artifact.source_unit.context.clone(),
-        &artifact.provenance,
-    );
+    let key = ArtifactBlobKey::for_descriptor(artifact);
     let Some(mut blob) = cache.open_blob(&key)? else {
         return Ok(Vec::new());
     };
@@ -68,11 +64,7 @@ pub fn direct_implementations(
     artifact: &ArtifactDescriptor,
     supertype: &SymbolId,
 ) -> Result<Vec<SymbolRecord>, ArtifactQueryError> {
-    let key = ArtifactBlobKey::new(
-        artifact.source_unit.content.clone(),
-        artifact.source_unit.context.clone(),
-        &artifact.provenance,
-    );
+    let key = ArtifactBlobKey::for_descriptor(artifact);
     let Some(mut blob) = cache.open_blob(&key)? else {
         return Ok(Vec::new());
     };

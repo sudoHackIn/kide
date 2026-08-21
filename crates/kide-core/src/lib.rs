@@ -468,6 +468,7 @@ mod worker_framing_tests {
                 protocol_version: 3,
                 analysis_options: Fingerprint::new("sha256:options"),
             },
+            resolved_identity: None,
             symbol_locators: Vec::new(),
         };
         let request = crate::ArtifactMaterializationRequest {
@@ -830,6 +831,7 @@ mod worker_framing_tests {
                 &crate::ArtifactDescriptor {
                     source_unit: source,
                     provenance,
+                    resolved_identity: None,
                     symbol_locators: Vec::new()
                 },
                 &crate::SymbolId::new("java:example.Widget")
@@ -930,4 +932,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 9;
+pub const INDEX_FORMAT_VERSION: u32 = 10;

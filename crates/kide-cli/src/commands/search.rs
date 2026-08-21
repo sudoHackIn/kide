@@ -332,6 +332,7 @@ mod tests {
         let descriptor = ArtifactDescriptor {
             source_unit: source.clone(),
             provenance: provenance.clone(),
+            resolved_identity: None,
             symbol_locators: vec![SymbolLocator {
                 qualified_name: "example.Widget".into(),
                 symbol: SymbolId::new("java:example.Widget"),

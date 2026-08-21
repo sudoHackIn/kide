@@ -381,11 +381,7 @@ pub fn materialize_artifact(
         dependency_path = artifact.source_unit.path.as_str(),
     )
     .entered();
-    let key = ArtifactBlobKey::new(
-        artifact.source_unit.content.clone(),
-        artifact.source_unit.context.clone(),
-        &artifact.provenance,
-    );
+    let key = ArtifactBlobKey::for_descriptor(&artifact);
     let cache_check_started = Instant::now();
     let cached = cache.open_blob(&key)?.is_some();
     let cache_check_millis = cache_check_started.elapsed().as_millis() as u64;
@@ -493,16 +489,13 @@ pub fn materialize_catalog_artifact(
         return Ok(MaterializationOutcome::BudgetExhausted);
     }
     budget.remaining_artifacts -= 1;
-    let key = ArtifactBlobKey::new(
-        descriptor.source_unit.content.clone(),
-        descriptor.source_unit.context.clone(),
-        &descriptor.provenance,
-    );
+    let key = ArtifactBlobKey::for_descriptor(&descriptor);
+    let catalog_descriptor = descriptor.clone();
     materialize_artifact(
         supervisor,
         cache,
         workspace_root,
-        descriptor,
+        descriptor.clone(),
         None,
         staging_directory,
         format!("demand-materialize-{}", source_unit.as_str()),
@@ -510,6 +503,7 @@ pub fn materialize_catalog_artifact(
     let payload = cache
         .load(&key)?
         .ok_or(IndexOrchestratorError::InvalidStagedArtifact)?;
+    store.record_artifact_blob(&catalog_descriptor, payload.len() as u64)?;
     let layout = crate::artifact_blob_layout::ArtifactBlobLayout::validate(payload)
         .map_err(|_| IndexOrchestratorError::InvalidStagedArtifact)?;
     let graph = layout
@@ -527,7 +521,7 @@ pub fn materialize_catalog_artifact(
 /// intentionally does not decode graph facts or write any project-index rows.
 #[allow(clippy::too_many_arguments)]
 pub fn cache_catalog_artifact(
-    store: &IndexStore,
+    store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
     cache: &ArtifactBlobCache,
     workspace_root: WorkspacePath,
@@ -553,7 +547,7 @@ pub fn cache_catalog_artifact(
 /// CLI/run aggregator. Cache hits have no worker metrics.
 #[allow(clippy::too_many_arguments)]
 pub fn cache_catalog_artifact_with_metrics(
-    store: &IndexStore,
+    store: &mut IndexStore,
     supervisor: &mut WorkerSupervisor,
     cache: &ArtifactBlobCache,
     workspace_root: WorkspacePath,
@@ -565,11 +559,7 @@ pub fn cache_catalog_artifact_with_metrics(
     let Some(descriptor) = store.artifact_descriptor(source_unit)? else {
         return Ok((MaterializationOutcome::NotCataloged, None));
     };
-    let key = ArtifactBlobKey::new(
-        descriptor.source_unit.content.clone(),
-        descriptor.source_unit.context.clone(),
-        &descriptor.provenance,
-    );
+    let key = ArtifactBlobKey::for_descriptor(&descriptor);
     if cache.open_blob(&key)?.is_some() {
         return Ok((MaterializationOutcome::AlreadyMaterialized, None));
     }
@@ -581,11 +571,16 @@ pub fn cache_catalog_artifact_with_metrics(
         supervisor,
         cache,
         workspace_root,
-        descriptor,
+        descriptor.clone(),
         artifact_locator,
         staging_directory,
         format!("cache-materialize-{}", source_unit.as_str()),
     )?;
+    let byte_length = cache
+        .open_blob(&key)?
+        .ok_or(IndexOrchestratorError::InvalidStagedArtifact)?
+        .len();
+    store.record_artifact_blob(&descriptor, byte_length)?;
     if metrics.promoted {
         Ok((MaterializationOutcome::Materialized, Some(metrics)))
     } else {

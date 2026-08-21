@@ -18,7 +18,10 @@ import org.eclipse.aether.transport.http.HttpTransporterFactory
 
 /** Official Maven Resolver adapter for external artifacts only. */
 internal object MavenExternalResolver {
-    data class Resolution(val paths: List<Path>, val unresolvedCoordinates: List<String>)
+    data class ResolvedArtifact(val path: Path, val coordinate: String, val version: String)
+    data class Resolution(val artifacts: List<ResolvedArtifact>, val unresolvedCoordinates: List<String>) {
+        val paths: List<Path> get() = artifacts.map(ResolvedArtifact::path)
+    }
     private val repositorySystem: RepositorySystem by lazy {
         MavenRepositorySystemUtils.newServiceLocator().also { locator ->
             locator.addService(RepositoryConnectorFactory::class.java, BasicRepositoryConnectorFactory::class.java)
@@ -48,21 +51,25 @@ internal object MavenExternalResolver {
                     dependency.scope ?: "compile",
                 )
             }
-        fun resolve(dependencies: List<Dependency>): List<Path> {
+        fun resolve(dependencies: List<Dependency>): List<ResolvedArtifact> {
             val request = CollectRequest().apply {
                 repositories = listOf(RemoteRepository.Builder("central", "default", "https://repo.maven.apache.org/maven2/").build())
                 dependencies.forEach(::addDependency)
             }
             return repositorySystem.resolveDependencies(session, DependencyRequest(request, null)).artifactResults
-                .mapNotNull { result -> result.artifact?.file?.toPath() }
-                .filter { path -> path.fileName.toString().endsWith(".jar") }
+                .mapNotNull { result -> result.artifact?.let { artifact -> artifact.file?.toPath()?.let { path -> artifact to path } } }
+                .filter { (_, path) -> path.fileName.toString().endsWith(".jar") }
+                .map { (artifact, path) ->
+                    val classifier = artifact.classifier.takeIf(String::isNotBlank)?.let { ":$it" }.orEmpty()
+                    ResolvedArtifact(path, "${artifact.groupId}:${artifact.artifactId}$classifier:${artifact.extension}", artifact.version)
+                }
         }
-        if (!bestEffortEnabled) return Resolution(resolve(dependencies).distinct().sortedBy(Path::toString), emptyList())
+        if (!bestEffortEnabled) return Resolution(resolve(dependencies).distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() }, emptyList())
         val resolved = dependencies.map { dependency ->
             dependency to runCatching { resolve(listOf(dependency)) }
         }
         return Resolution(
-            paths = resolved.flatMap { (_, result) -> result.getOrDefault(emptyList()) }.distinct().sortedBy(Path::toString),
+            artifacts = resolved.flatMap { (_, result) -> result.getOrDefault(emptyList()) }.distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() },
             unresolvedCoordinates = resolved.mapNotNull { (dependency, result) -> result.exceptionOrNull()?.let { dependency.artifact.toString() } }.sorted(),
         )
     }

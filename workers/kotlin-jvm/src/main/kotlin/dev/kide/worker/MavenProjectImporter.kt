@@ -34,7 +34,13 @@ import org.codehaus.plexus.util.xml.Xpp3Dom
 internal object MavenProjectImporter {
     private const val MODEL_VERSION = "3.9.9"
 
-    data class ResolvedArtifact(val path: Path, val component: String, val context: String)
+    data class ResolvedArtifact(
+        val path: Path,
+        val component: String,
+        val context: String,
+        val coordinate: String,
+        val version: String,
+    )
 
     fun import(workspace: Path): JsonElement = import(workspace, System.getenv())
 
@@ -124,8 +130,8 @@ internal object MavenProjectImporter {
             if (module.model.packaging == "pom") return@flatMap emptyList()
             val component = componentId(root, module)
             val context = fingerprint(listOf(Files.readAllBytes(module.pom)))
-            MavenExternalResolver.resolve(module.model, reactorCoordinates)
-                .map { path -> ResolvedArtifact(path, component, context) }
+            MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates).artifacts
+                .map { artifact -> ResolvedArtifact(artifact.path, component, context, artifact.coordinate, artifact.version) }
         }.distinctBy { it.path.toAbsolutePath().normalize() }.sortedBy { it.path.toString() }
     }
 

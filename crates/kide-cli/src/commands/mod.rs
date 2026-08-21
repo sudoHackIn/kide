@@ -346,6 +346,7 @@ mod tests {
         let descriptor = kide_core::ArtifactDescriptor {
             source_unit: source.clone(),
             provenance: provenance.clone(),
+            resolved_identity: None,
             symbol_locators: vec![kide_core::SymbolLocator {
                 qualified_name: "example.Widget".into(),
                 symbol: target.clone(),

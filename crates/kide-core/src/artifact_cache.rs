@@ -60,6 +60,16 @@ impl ArtifactBlobKey {
         &self.identity
     }
 
+    /// Opaque content-addressed identifier persisted by catalog rows. It does
+    /// not reveal a worker-local cache path.
+    pub fn cache_key(&self) -> Fingerprint {
+        self.identity.cache_key()
+    }
+
+    pub fn for_descriptor(descriptor: &crate::ArtifactDescriptor) -> Self {
+        Self::from_identity(descriptor.resolved_identity())
+    }
+
     fn digest(&self) -> [u8; 32] {
         Sha256::digest(self.identity.canonical_bytes()).into()
     }
