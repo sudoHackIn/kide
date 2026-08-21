@@ -15,6 +15,7 @@ use kide_core::{
 pub(super) fn index(
     discovery: WorkspaceDiscovery,
     configuration: EffectiveConfiguration,
+    artifact_cache_root: PathBuf,
     verbosity: u8,
     force: bool,
     warm_dependencies: Option<u32>,
@@ -35,9 +36,6 @@ pub(super) fn index(
             store.remove_snapshot(&source.id)?;
         }
     }
-    let artifact_cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| discovery.root.join(".kide/artifact-cache"));
     let artifact_cache = ArtifactBlobCache::open(artifact_cache_root)?;
     let staging = discovery.root.join(".kide/staging");
     std::fs::create_dir_all(&staging)?;

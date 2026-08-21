@@ -28,11 +28,23 @@ pub enum FreshnessStrategy {
     AllowStale,
 }
 
+/// Placement policy for immutable dependency artifact blobs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCacheScope {
+    /// Reuse compatible immutable blobs across workspaces for the same user.
+    #[default]
+    User,
+    /// Keep blobs under the workspace for fully isolated or portable runs.
+    Workspace,
+}
+
 /// Typed effective configuration passed from the CLI into Core services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EffectiveConfiguration {
     pub schema_version: u32,
     pub freshness_strategy: FreshnessStrategy,
+    pub artifact_cache_scope: ArtifactCacheScope,
 }
 
 impl Default for EffectiveConfiguration {
@@ -40,6 +52,7 @@ impl Default for EffectiveConfiguration {
         Self {
             schema_version: CONFIGURATION_SCHEMA_VERSION,
             freshness_strategy: FreshnessStrategy::FreshOnly,
+            artifact_cache_scope: ArtifactCacheScope::User,
         }
     }
 }
@@ -64,6 +77,7 @@ pub struct LoadedConfiguration {
 struct ConfigurationLayer {
     schema_version: Option<u32>,
     freshness_strategy: Option<FreshnessStrategy>,
+    artifact_cache_scope: Option<ArtifactCacheScope>,
 }
 
 #[derive(Debug, Error)]
@@ -92,7 +106,7 @@ pub enum ConfigurationError {
 }
 
 /// The deterministic starter file written by `kide init`.
-pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n";
+pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n\n# Share immutable dependency blobs between this user's workspaces. Set to\n# \"workspace\" for an isolated, project-local cache. KIDE_ARTIFACT_CACHE_DIR\n# is an explicit override for CI and tests.\nartifact_cache_scope = \"user\"\n";
 
 /// The local ignore policy installed beside the checked-in configuration.
 /// Git applies this file automatically to `.kide` contents; root `.gitignore`
@@ -129,6 +143,44 @@ pub fn load_workspace_configuration(
 ) -> Result<LoadedConfiguration, ConfigurationError> {
     let global = std::env::var_os("KIDE_GLOBAL_CONFIG").map(PathBuf::from);
     load_configuration(workspace_root, global.as_deref())
+}
+
+/// Resolves the artifact cache once, before command dispatch. The environment
+/// override is intentionally stronger than tracked configuration so CI and
+/// isolated tests never need to edit a checkout.
+pub fn artifact_cache_root(workspace_root: &Path, configuration: &EffectiveConfiguration) -> PathBuf {
+    if let Some(root) = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR") {
+        return PathBuf::from(root);
+    }
+    match configuration.artifact_cache_scope {
+        ArtifactCacheScope::Workspace => workspace_root.join(".kide/artifact-cache"),
+        ArtifactCacheScope::User => platform_user_cache_root(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_user_cache_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library/Caches/kide/artifact-cache")
+}
+
+#[cfg(target_os = "windows")]
+fn platform_user_cache_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("kide/artifact-cache")
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn platform_user_cache_root() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("kide/artifact-cache")
 }
 
 /// Creates the checked-in workspace configuration without overwriting an
@@ -187,6 +239,9 @@ fn apply_layer(
     if let Some(strategy) = layer.freshness_strategy {
         effective.freshness_strategy = strategy;
     }
+    if let Some(scope) = layer.artifact_cache_scope {
+        effective.artifact_cache_scope = scope;
+    }
     Ok(())
 }
 
@@ -209,13 +264,13 @@ mod tests {
         let global = workspace.path().join("global.toml");
         fs::write(
             &global,
-            "schema_version = 1\nfreshness_strategy = 'allow_stale'\n",
+            "schema_version = 1\nfreshness_strategy = 'allow_stale'\nartifact_cache_scope = 'workspace'\n",
         )
         .unwrap();
         fs::create_dir(workspace.path().join(".kide")).unwrap();
         fs::write(
             workspace.path().join(".kide/config.toml"),
-            "schema_version = 1\nfreshness_strategy = 'fresh_only'\n",
+            "schema_version = 1\nfreshness_strategy = 'fresh_only'\nartifact_cache_scope = 'user'\n",
         )
         .unwrap();
 
@@ -224,6 +279,7 @@ mod tests {
             loaded.effective.freshness_strategy,
             FreshnessStrategy::FreshOnly
         );
+        assert_eq!(loaded.effective.artifact_cache_scope, ArtifactCacheScope::User);
         assert_eq!(loaded.sources.global, Some(global));
         assert_eq!(
             loaded.sources.workspace,
@@ -270,5 +326,18 @@ mod tests {
             initialize_workspace_configuration(workspace.path()),
             Err(ConfigurationError::AlreadyInitialized(existing)) if existing == path
         ));
+    }
+
+    #[test]
+    fn workspace_scope_keeps_artifacts_under_the_project() {
+        let workspace = tempdir().unwrap();
+        let configuration = EffectiveConfiguration {
+            artifact_cache_scope: ArtifactCacheScope::Workspace,
+            ..EffectiveConfiguration::default()
+        };
+        assert_eq!(
+            artifact_cache_root(workspace.path(), &configuration),
+            workspace.path().join(".kide/artifact-cache")
+        );
     }
 }

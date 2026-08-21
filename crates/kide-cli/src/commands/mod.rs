@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{Cli, Command};
 use anyhow::{Result, bail};
-use kide_core::{EffectiveConfiguration, QueryStatus, load_workspace_configuration};
+use kide_core::{
+    EffectiveConfiguration, QueryStatus, artifact_cache_root, load_workspace_configuration,
+};
 
 mod config;
 mod index;
@@ -19,6 +21,7 @@ mod search;
 pub(crate) struct WorkspaceContext {
     workspace: PathBuf,
     pub(crate) configuration: EffectiveConfiguration,
+    artifact_cache_root: PathBuf,
 }
 
 impl WorkspaceContext {
@@ -39,14 +42,20 @@ impl WorkspaceContext {
                 workspace.display(),
             );
         }
+        let artifact_cache_root = artifact_cache_root(workspace, &loaded.effective);
         Ok(Self {
             workspace: workspace.to_path_buf(),
             configuration: loaded.effective,
+            artifact_cache_root,
         })
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.workspace
+    }
+
+    pub(crate) fn artifact_cache_root(&self) -> &Path {
+        &self.artifact_cache_root
     }
 }
 
@@ -78,13 +87,15 @@ fn dispatch_configured(
             let discovery = kide_core::discover_workspace(path)?;
             let index_context = WorkspaceContext::load_required(&discovery.root)?;
             index::index(
-            discovery,
-            index_context.configuration,
-            verbosity,
-            force,
-            warm_dependencies,
-            materialize_only,
-        )}
+                discovery,
+                index_context.configuration,
+                index_context.artifact_cache_root,
+                verbosity,
+                force,
+                warm_dependencies,
+                materialize_only,
+            )
+        }
         Command::Status => search::status(&context, human_output),
         Command::Text { query } => search::text_search(&context, query, human_output),
         Command::Symbols { query, short } => {
@@ -148,6 +159,7 @@ mod tests {
         WorkspaceContext {
             workspace: path.to_path_buf(),
             configuration: kide_core::EffectiveConfiguration::default(),
+            artifact_cache_root: path.join(".kide/artifact-cache"),
         }
     }
 
@@ -394,7 +406,11 @@ mod tests {
             .expect("blob");
 
         assert_eq!(
-            cached_dependency_implementations(&store, workspace.path(), &target)
+            cached_dependency_implementations(
+                &store,
+                &workspace.path().join(".kide/artifact-cache"),
+                &target,
+            )
                 .expect("cached hierarchy")
                 .into_iter()
                 .map(|symbol| symbol.id)

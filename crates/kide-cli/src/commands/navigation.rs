@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use kide_core::{
@@ -395,7 +395,11 @@ pub(super) fn implementations(
                 .flatten()
                 .collect::<Vec<_>>();
             if symbols.is_empty() && !transitive {
-                symbols = cached_dependency_implementations(&store, workspace, &symbol)?;
+                symbols = cached_dependency_implementations(
+                    &store,
+                    context.artifact_cache_root(),
+                    &symbol,
+                )?;
             }
             if human_output {
                 if symbols.is_empty() {
@@ -414,12 +418,9 @@ pub(super) fn implementations(
 
 pub(super) fn cached_dependency_implementations(
     store: &IndexStore,
-    workspace: &Path,
+    cache_root: &Path,
     supertype: &SymbolId,
 ) -> Result<Vec<SymbolRecord>> {
-    let cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join(".kide/artifact-cache"));
     let cache = ArtifactBlobCache::open(cache_root)?;
     let mut symbols = Vec::new();
     for artifact in store.artifact_candidates_with_symbol(supertype)? {

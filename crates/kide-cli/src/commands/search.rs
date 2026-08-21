@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use kide_core::{
@@ -202,7 +202,7 @@ pub(super) fn symbols(context: &WorkspaceContext, query: String, short: bool) ->
             .collect();
     }
     if symbols.is_empty() {
-        symbols = cached_dependency_symbols(&store, workspace, &query)?;
+        symbols = cached_dependency_symbols(&store, context.artifact_cache_root(), &query)?;
     }
     if symbols.is_empty() {
         symbols = store.symbols_matching_name(&query)?;
@@ -285,12 +285,9 @@ pub(super) fn symbols(context: &WorkspaceContext, query: String, short: bool) ->
 
 fn cached_dependency_symbols(
     store: &IndexStore,
-    workspace: &Path,
+    cache_root: &Path,
     qualified_name: &str,
 ) -> Result<Vec<SymbolRecord>> {
-    let cache_root = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join(".kide/artifact-cache"));
     let cache = ArtifactBlobCache::open(cache_root)?;
     let mut symbols = Vec::new();
     for descriptor in store.artifact_candidates_with_qualified_name(qualified_name)? {
@@ -390,8 +387,12 @@ mod tests {
             .publish(&key, ArtifactBlobLayout::encode(&graph).bytes())
             .expect("publishes");
 
-        let symbols = cached_dependency_symbols(&store, workspace.path(), "example.Widget")
-            .expect("queries postings");
+        let symbols = cached_dependency_symbols(
+            &store,
+            &workspace.path().join(".kide/artifact-cache"),
+            "example.Widget",
+        )
+        .expect("queries postings");
         assert_eq!(symbols[0].id.as_str(), "java:example.Widget");
         assert!(store.source_unit(&source.id).expect("store read").is_none());
     }

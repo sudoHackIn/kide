@@ -95,6 +95,22 @@ Unknown newer versions are incompatible cache misses, not migration guesses.
 Old key layouts are not rewritten in place: their references are dropped on
 the next project-catalog replacement and fresh bytes are published under v1.
 
+## Cache placement and isolation
+
+The default root is user-scoped and platform appropriate: `~/Library/Caches`
+on macOS, `%LOCALAPPDATA%` on Windows, and `$XDG_CACHE_HOME` (or `~/.cache`)
+on other platforms, each below `kide/artifact-cache`. Thus two workspaces of
+the same user can reuse an exact compatible blob without putting an absolute
+cache path into either project index.
+
+`KIDE_ARTIFACT_CACHE_DIR` overrides this root completely and is intended for
+CI and hermetic tests. A tracked workspace may instead set
+`artifact_cache_scope = "workspace"` in `.kide/config.toml`; it uses
+`.kide/artifact-cache` only for that project. Existing workspace-local caches
+are safely ignored under the new default rather than copied or trusted without
+catalog identity verification. Selecting workspace scope retains them as a
+separate cache root.
+
 ## Retention and reconciliation
 
 Project replacement deletes references absent from the latest complete
