@@ -792,7 +792,11 @@ mod worker_framing_tests {
             protocol_version: WORKER_PROTOCOL_VERSION,
             analysis_options: Fingerprint::new("sha256:options"),
         };
-        let key = ArtifactBlobKey::new(Fingerprint::new("sha256:artifact"), &provenance);
+        let key = ArtifactBlobKey::new(
+            Fingerprint::new("sha256:artifact"),
+            Fingerprint::new("sha256:context"),
+            &provenance,
+        );
         cache
             .publish(&key, encoded.bytes())
             .expect("publishes blob");
@@ -887,6 +891,7 @@ mod worker_framing_tests {
 }
 mod canonical;
 mod config;
+mod dependency_identity;
 mod discovery;
 mod input_inventory;
 mod freshness;
@@ -901,6 +906,7 @@ mod workspace;
 pub use artifact_cache::*;
 pub use canonical::*;
 pub use config::*;
+pub use dependency_identity::*;
 pub use discovery::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,

@@ -222,6 +222,7 @@ pub(super) fn index(
                     }
                     let key = ArtifactBlobKey::new(
                         descriptor.source_unit.content.clone(),
+                        descriptor.source_unit.context.clone(),
                         &descriptor.provenance,
                     );
                     let blob_bytes = artifact_cache

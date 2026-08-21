@@ -384,7 +384,11 @@ mod tests {
                 .expect("cache");
         cache
             .publish(
-                &kide_core::ArtifactBlobKey::new(source.content.clone(), &provenance),
+                &kide_core::ArtifactBlobKey::new(
+                    source.content.clone(),
+                    source.context.clone(),
+                    &provenance,
+                ),
                 kide_core::artifact_blob_layout::ArtifactBlobLayout::encode(&graph).bytes(),
             )
             .expect("blob");

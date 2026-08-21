@@ -169,6 +169,7 @@ fn cached_indexing_catalogs_dependencies_without_eager_graph_materialization() {
     assert!(cache
         .open_blob(&ArtifactBlobKey::new(
             descriptor.source_unit.content,
+            descriptor.source_unit.context,
             &descriptor.provenance,
         ))
         .expect("checks cache")
@@ -345,6 +346,7 @@ fn cache_materializes_one_cataloged_artifact_without_sqlite_projection() {
     assert!(cache
         .open_blob(&ArtifactBlobKey::new(
             artifact.source_unit.content.clone(),
+            artifact.source_unit.context.clone(),
             &artifact.provenance,
         ))
         .expect("opens cache")

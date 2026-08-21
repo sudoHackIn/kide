@@ -381,7 +381,11 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let key = ArtifactBlobKey::new(source.content.clone(), &provenance);
+        let key = ArtifactBlobKey::new(
+            source.content.clone(),
+            source.context.clone(),
+            &provenance,
+        );
         cache
             .publish(&key, ArtifactBlobLayout::encode(&graph).bytes())
             .expect("publishes");

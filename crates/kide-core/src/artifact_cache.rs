@@ -15,18 +15,17 @@ use std::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{Fingerprint, Provenance, CANONICAL_SCHEMA_VERSION};
+use crate::{
+    Fingerprint, Provenance, ResolvedDependencyIdentity,
+    artifact_blob_layout::ARTIFACT_BLOB_LAYOUT_VERSION,
+};
 
 const MAGIC: [u8; 8] = *b"KIDEBLB1";
 const HEADER_SIZE: usize = MAGIC.len() + 4 + 32 + 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactBlobKey {
-    artifact: Fingerprint,
-    backend: String,
-    backend_version: String,
-    protocol_version: u32,
-    canonical_schema_version: u32,
+    identity: ResolvedDependencyIdentity,
 }
 
 /// Timing and outcome for promoting a worker-produced staged artifact into
@@ -39,29 +38,30 @@ pub struct ArtifactPromotionMetrics {
 }
 
 impl ArtifactBlobKey {
-    pub fn new(artifact: Fingerprint, provenance: &Provenance) -> Self {
+    /// Creates the complete compatibility key for a worker-produced artifact
+    /// payload. Content alone is insufficient: a different resolved build
+    /// context or analysis-options fingerprint must miss the shared cache.
+    pub fn new(artifact: Fingerprint, context: Fingerprint, provenance: &Provenance) -> Self {
         Self {
-            artifact,
-            backend: provenance.backend.clone(),
-            backend_version: provenance.backend_version.clone(),
-            protocol_version: provenance.protocol_version,
-            canonical_schema_version: CANONICAL_SCHEMA_VERSION,
+            identity: ResolvedDependencyIdentity::unattributed(
+                artifact,
+                context,
+                provenance.clone(),
+                ARTIFACT_BLOB_LAYOUT_VERSION,
+            ),
         }
     }
 
+    pub fn from_identity(identity: ResolvedDependencyIdentity) -> Self {
+        Self { identity }
+    }
+
+    pub fn identity(&self) -> &ResolvedDependencyIdentity {
+        &self.identity
+    }
+
     fn digest(&self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        for field in [
-            self.artifact.as_str(),
-            &self.backend,
-            &self.backend_version,
-            &self.protocol_version.to_string(),
-            &self.canonical_schema_version.to_string(),
-        ] {
-            hasher.update(field.as_bytes());
-            hasher.update([0]);
-        }
-        hasher.finalize().into()
+        Sha256::digest(self.identity.canonical_bytes()).into()
     }
 }
 
@@ -335,6 +335,7 @@ mod tests {
     fn key() -> ArtifactBlobKey {
         ArtifactBlobKey::new(
             Fingerprint::new("sha256:artifact"),
+            Fingerprint::new("sha256:component-context"),
             &Provenance {
                 backend: "kide-kotlin-jvm".to_owned(),
                 backend_version: "0.1.0".to_owned(),
@@ -390,6 +391,7 @@ mod tests {
         let key = key();
         let incompatible = ArtifactBlobKey::new(
             Fingerprint::new("sha256:artifact"),
+            Fingerprint::new("sha256:component-context"),
             &Provenance {
                 backend_version: "0.2.0".to_owned(),
                 ..key_provenance()
@@ -398,6 +400,30 @@ mod tests {
 
         assert!(cache.publish(&key, b"v1").expect("publishes"));
         assert_eq!(cache.load(&incompatible).expect("separate key"), None);
+    }
+
+    #[test]
+    fn context_or_analysis_options_identity_changes_the_cache_key() {
+        let directory = tempdir().expect("temporary cache directory");
+        let cache = ArtifactBlobCache::open(directory.path()).expect("opens cache");
+        let key = key();
+        let changed_context = ArtifactBlobKey::new(
+            Fingerprint::new("sha256:artifact"),
+            Fingerprint::new("sha256:other-context"),
+            &key_provenance(),
+        );
+        let changed_options = ArtifactBlobKey::new(
+            Fingerprint::new("sha256:artifact"),
+            Fingerprint::new("sha256:component-context"),
+            &Provenance {
+                analysis_options: Fingerprint::new("sha256:other-options"),
+                ..key_provenance()
+            },
+        );
+
+        assert!(cache.publish(&key, b"v1").expect("publishes"));
+        assert_eq!(cache.load(&changed_context).expect("separate key"), None);
+        assert_eq!(cache.load(&changed_options).expect("separate key"), None);
     }
 
     fn key_provenance() -> Provenance {

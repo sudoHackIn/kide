@@ -381,7 +381,11 @@ pub fn materialize_artifact(
         dependency_path = artifact.source_unit.path.as_str(),
     )
     .entered();
-    let key = ArtifactBlobKey::new(artifact.source_unit.content.clone(), &artifact.provenance);
+    let key = ArtifactBlobKey::new(
+        artifact.source_unit.content.clone(),
+        artifact.source_unit.context.clone(),
+        &artifact.provenance,
+    );
     let cache_check_started = Instant::now();
     let cached = cache.open_blob(&key)?.is_some();
     let cache_check_millis = cache_check_started.elapsed().as_millis() as u64;
@@ -491,6 +495,7 @@ pub fn materialize_catalog_artifact(
     budget.remaining_artifacts -= 1;
     let key = ArtifactBlobKey::new(
         descriptor.source_unit.content.clone(),
+        descriptor.source_unit.context.clone(),
         &descriptor.provenance,
     );
     materialize_artifact(
@@ -562,6 +567,7 @@ pub fn cache_catalog_artifact_with_metrics(
     };
     let key = ArtifactBlobKey::new(
         descriptor.source_unit.content.clone(),
+        descriptor.source_unit.context.clone(),
         &descriptor.provenance,
     );
     if cache.open_blob(&key)?.is_some() {
