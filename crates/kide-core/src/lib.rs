@@ -886,8 +886,9 @@ mod worker_framing_tests {
     }
 }
 mod canonical;
-mod configuration;
+mod config;
 mod discovery;
+mod input_inventory;
 mod freshness;
 mod orchestrator;
 mod protocol;
@@ -895,11 +896,16 @@ mod query;
 mod store;
 mod supervisor;
 mod worker_registry;
+mod workspace;
 
 pub use artifact_cache::*;
 pub use canonical::*;
-pub use configuration::*;
+pub use config::*;
 pub use discovery::*;
+pub use input_inventory::{
+    ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
+    ConfigurationInputStatus, reconcile_configuration_inputs,
+};
 pub use framework_query::*;
 pub use freshness::*;
 pub use orchestrator::*;
@@ -918,4 +924,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 8;
+pub const INDEX_FORMAT_VERSION: u32 = 9;

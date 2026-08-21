@@ -3,7 +3,7 @@
 - Status: accepted
 - Configuration schema version: `1`
 - Checkpoint contract version: `1`
-- Rust source of truth: `crates/kide-core/src/{configuration,freshness}.rs`
+- Rust source of truth: `crates/kide-core/src/{config,freshness}.rs`
 
 ## Configuration
 
@@ -45,3 +45,16 @@ An unavailable lazy blob is distinct from an invalid blob: absence is
 `unknown`/materializable; a failed content check is stale and cannot support a
 fresh response. A newer generation supersedes an in-flight generation, which
 must never publish its checkpoint or facts.
+
+## Configuration input inventory
+
+Core inventories `.kide/config.toml`, build manifests and settings, Gradle
+wrapper properties, and npm/pnpm/Yarn/Bun lock and workspace files. Each entry
+stores its workspace-relative path, content fingerprint, and affected component
+IDs. Reconciliation is deterministic and reports `current`, `added`, `changed`,
+or `missing`; any non-current entry makes the affected component context stale
+before a build or language worker starts.
+
+Root inputs affect every component. A module-local build manifest affects only
+the deepest matching component root. Build workers remain authoritative for
+interpreting these files and producing the resolved dependency graph.

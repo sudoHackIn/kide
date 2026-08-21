@@ -25,6 +25,9 @@ pub(super) fn index(
     let discovery_millis = discovery_started.elapsed().as_millis();
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
+    let configuration_input_records = discovery.configuration_input_records.clone();
+    let configuration_changes =
+        store.configuration_input_status(&configuration_input_records)?;
     let sources = discovery.source_units;
     if force {
         tracing::info!(target: "kide::cli", sources = sources.len(), "forcing source reanalysis");
@@ -281,6 +284,7 @@ pub(super) fn index(
     }
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;
+    store.replace_configuration_inputs(&configuration_input_records)?;
     let mut slowest_materializations = materialized_artifacts.clone();
     slowest_materializations.sort_by_key(|artifact| {
         std::cmp::Reverse(
@@ -504,6 +508,8 @@ pub(super) fn index(
         "dependency_materialization_top": if verbosity > 1 { slowest_materializations.clone() } else { Vec::new() },
         "text_documents": text_inventory.documents.len(),
         "text_skipped": text_inventory.skipped.len(),
+        "configuration_inputs_changed": configuration_changes.inputs.iter().filter(|input| input.state != kide_core::ConfigurationInputState::Current).count(),
+        "affected_components": configuration_changes.affected_components,
         "timing_millis": {
             "discovery": discovery_millis,
             "source_worker": run.source_worker_millis,

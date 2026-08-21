@@ -24,6 +24,18 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         unknown: 0,
         unsupported: 0,
     };
+    let discovery = kide_core::discover_workspace(workspace)?;
+    let configuration_status =
+        store.configuration_input_status(&discovery.configuration_input_records)?;
+    let mut configuration_counts = kide_core::ConfigurationInputCounts::default();
+    for input in &configuration_status.inputs {
+        match input.state {
+            kide_core::ConfigurationInputState::Current => configuration_counts.current += 1,
+            kide_core::ConfigurationInputState::Added => configuration_counts.added += 1,
+            kide_core::ConfigurationInputState::Changed => configuration_counts.changed += 1,
+            kide_core::ConfigurationInputState::Missing => configuration_counts.missing += 1,
+        }
+    }
     for source in store.source_units()? {
         match source.origin {
             kide_core::SourceOrigin::Source | kide_core::SourceOrigin::Generated => {
@@ -39,7 +51,10 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             kide_core::SourceOrigin::Dependency => counts.unknown += 1,
         }
     }
-    let freshness = if counts.stale > 0 {
+    let configuration_stale = configuration_counts.added > 0
+        || configuration_counts.changed > 0
+        || configuration_counts.missing > 0;
+    let freshness = if counts.stale > 0 || configuration_stale {
         Freshness::Stale
     } else if counts.unknown > 0 {
         Freshness::Unknown
@@ -77,6 +92,8 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         freshness_strategy: context.configuration.freshness_strategy,
         manifest: freshness,
         source_units: counts,
+        configuration_inputs: configuration_counts,
+        affected_components: configuration_status.affected_components,
         workers_running: Vec::new(),
     });
     if human_output {

@@ -150,7 +150,17 @@ pub struct StatusResult {
     pub freshness_strategy: crate::FreshnessStrategy,
     pub manifest: Freshness,
     pub source_units: IndexCounts,
+    pub configuration_inputs: ConfigurationInputCounts,
+    pub affected_components: Vec<crate::ComponentId>,
     pub workers_running: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationInputCounts {
+    pub current: u64,
+    pub added: u64,
+    pub changed: u64,
+    pub missing: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +191,8 @@ mod tests {
                     unknown: 0,
                     unsupported: 0,
                 },
+                configuration_inputs: ConfigurationInputCounts::default(),
+                affected_components: Vec::new(),
                 workers_running: Vec::new(),
             }),
             ResultMetadata {

@@ -14,20 +14,17 @@ use thiserror::Error;
 
 use crate::{
     BuildSystem, Component, ComponentId, DependencyEdge, Fingerprint, Language, ProjectManifest,
-    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkspaceId, WorkspacePath,
+    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkspacePath,
     WORKER_PROTOCOL_VERSION,
 };
+use crate::{
+    input_inventory::{
+        ConfigurationInput, component_context_fingerprint, component_scope, fingerprint_file,
+        is_configuration_input,
+    },
+    workspace::{find_workspace_root, has_regular_file, workspace_id, workspace_path},
+};
 
-const CONFIGURATION_FILE_NAMES: &[&str] = &[
-    "settings.gradle",
-    "settings.gradle.kts",
-    "build.gradle",
-    "build.gradle.kts",
-    "gradle.properties",
-    "pom.xml",
-    "Cargo.toml",
-    "package.json",
-];
 
 const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
@@ -44,13 +41,10 @@ const EXCLUDED_DIRECTORIES: &[&str] = &[
 pub enum DiscoveryError {
     #[error("cannot inspect {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
-    #[error("{path} is neither a regular file nor a directory")]
-    UnsupportedInvocationPath { path: PathBuf },
-    #[error("discovered path {path} escapes workspace root {workspace_root}")]
-    PathOutsideWorkspace {
-        path: PathBuf,
-        workspace_root: PathBuf,
-    },
+    #[error(transparent)]
+    WorkspaceRoot(#[from] crate::workspace::WorkspaceRootError),
+    #[error(transparent)]
+    WorkspacePath(#[from] crate::workspace::WorkspacePathError),
 }
 
 /// Results of one filesystem discovery pass. `root` is canonical; all model
@@ -61,62 +55,11 @@ pub struct WorkspaceDiscovery {
     pub manifest: ProjectManifest,
     pub source_units: Vec<SourceUnit>,
     pub configuration_inputs: Vec<WorkspacePath>,
+    /// Individually fingerprinted inputs and the component contexts they can
+    /// invalidate. Core owns this inventory; workers interpret the files.
+    pub configuration_input_records: Vec<ConfigurationInput>,
     /// Workspace-relative symlinks skipped by the fallback walker.
     pub skipped_symlinks: Vec<WorkspacePath>,
-}
-
-/// Resolves a user invocation path to its workspace root.
-///
-/// The closest Gradle settings root wins over nested module build files. If no
-/// settings file exists, the closest recognised build marker wins over an
-/// enclosing `.git` directory. This lets a Maven/Gradle project nested inside
-/// a repository be indexed as itself. The path is canonicalized once; symlinks
-/// inside the resulting workspace are deliberately not followed.
-pub fn find_workspace_root(invocation: impl AsRef<Path>) -> Result<PathBuf, DiscoveryError> {
-    let invocation = invocation.as_ref();
-    let canonical = fs::canonicalize(invocation).map_err(|source| DiscoveryError::Io {
-        path: invocation.to_path_buf(),
-        source,
-    })?;
-    let metadata = fs::metadata(&canonical).map_err(|source| DiscoveryError::Io {
-        path: canonical.clone(),
-        source,
-    })?;
-    let start = if metadata.is_file() {
-        canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
-            DiscoveryError::UnsupportedInvocationPath {
-                path: canonical.clone(),
-            }
-        })?
-    } else if metadata.is_dir() {
-        canonical
-    } else {
-        return Err(DiscoveryError::UnsupportedInvocationPath { path: canonical });
-    };
-
-    let mut settings_root = None;
-    let mut git_root = None;
-    let mut build_root = None;
-    for directory in start.ancestors() {
-        if settings_root.is_none()
-            && (has_regular_file(directory, "settings.gradle")?
-                || has_regular_file(directory, "settings.gradle.kts")?)
-        {
-            settings_root = Some(directory.to_path_buf());
-        }
-        if git_root.is_none() && has_directory(directory, ".git")? {
-            git_root = Some(directory.to_path_buf());
-        }
-        if build_root.is_none()
-            && CONFIGURATION_FILE_NAMES
-                .iter()
-                .any(|name| has_regular_file(directory, name).unwrap_or(false))
-        {
-            build_root = Some(directory.to_path_buf());
-        }
-    }
-
-    Ok(settings_root.or(build_root).or(git_root).unwrap_or(start))
 }
 
 /// Builds the generic manifest and inventory. No compiler, PSI, or build tool
@@ -131,11 +74,17 @@ pub fn discover_workspace(
     files.sort();
     skipped_symlinks.sort();
 
-    let configuration_paths: Vec<PathBuf> = files
+    let mut configuration_paths: Vec<PathBuf> = files
         .iter()
         .filter(|path| is_configuration_input(&root, path))
         .cloned()
         .collect();
+    let kide_config = root.join(".kide/config.toml");
+    if kide_config.is_file() {
+        configuration_paths.push(kide_config);
+        configuration_paths.sort();
+        configuration_paths.dedup();
+    }
     let configuration_inputs = configuration_paths
         .iter()
         .map(|path| workspace_path(&root, path))
@@ -149,16 +98,34 @@ pub fn discover_workspace(
     component_roots.sort();
     component_roots.dedup();
 
-    let components = component_roots
+    let mut components = component_roots
         .iter()
         .map(|component_root| make_component(&root, component_root, &workspace_configuration))
         .collect::<Result<Vec<_>, _>>()?;
+    let configuration_input_records = configuration_paths
+        .iter()
+        .map(|path| {
+            let path_in_workspace = workspace_path(&root, path)?;
+            let components = component_scope(&root, path, &components);
+            Ok(ConfigurationInput {
+                path: path_in_workspace,
+                fingerprint: fingerprint_file(path).map_err(|source| DiscoveryError::Io {
+                    path: path.clone(),
+                    source,
+                })?,
+                components,
+            })
+        })
+        .collect::<Result<Vec<_>, DiscoveryError>>()?;
+    for component in &mut components {
+        component.configuration =
+            component_context_fingerprint(&component.id, &configuration_input_records);
+    }
     let source_units = source_units(
         &root,
         &files,
         &components,
         &component_roots,
-        &workspace_configuration,
     )?;
     let workspace_identity = workspace_id(&root);
     let provenance = Provenance {
@@ -180,31 +147,12 @@ pub fn discover_workspace(
         },
         source_units,
         configuration_inputs,
+        configuration_input_records,
         skipped_symlinks: skipped_symlinks
             .iter()
             .map(|path| workspace_path(&root, path))
             .collect::<Result<Vec<_>, _>>()?,
     })
-}
-
-fn has_regular_file(directory: &Path, name: &str) -> Result<bool, DiscoveryError> {
-    let path = directory.join(name);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => return Err(DiscoveryError::Io { path, source }),
-    };
-    Ok(metadata.file_type().is_file())
-}
-
-fn has_directory(directory: &Path, name: &str) -> Result<bool, DiscoveryError> {
-    let path = directory.join(name);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => return Err(DiscoveryError::Io { path, source }),
-    };
-    Ok(metadata.file_type().is_dir())
 }
 
 fn collect_files(
@@ -247,16 +195,6 @@ fn collect_files(
     }
     let _ = root;
     Ok(())
-}
-
-fn is_configuration_input(root: &Path, path: &Path) -> bool {
-    let name = path.file_name().and_then(|name| name.to_str());
-    if name.is_some_and(|name| CONFIGURATION_FILE_NAMES.contains(&name)) {
-        return true;
-    }
-    path.strip_prefix(root)
-        .ok()
-        .is_some_and(|relative| relative == Path::new("gradle/wrapper/gradle-wrapper.properties"))
 }
 
 fn component_roots(configuration_paths: &[PathBuf]) -> Result<Vec<PathBuf>, DiscoveryError> {
@@ -334,7 +272,6 @@ fn source_units(
     files: &[PathBuf],
     components: &[Component],
     component_roots: &[PathBuf],
-    context: &Fingerprint,
 ) -> Result<Vec<SourceUnit>, DiscoveryError> {
     let mut roots_and_components = component_roots
         .iter()
@@ -390,7 +327,7 @@ fn source_units(
                 language,
                 origin,
                 content,
-                context: context.clone(),
+                context: component.configuration.clone(),
             })
         })
         .collect::<Result<Vec<_>, DiscoveryError>>()?;
@@ -410,30 +347,6 @@ fn is_generated_source(path: &WorkspacePath) -> bool {
     path.as_str()
         .split('/')
         .any(|segment| segment == "generated")
-}
-
-fn workspace_path(root: &Path, path: &Path) -> Result<WorkspacePath, DiscoveryError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| DiscoveryError::PathOutsideWorkspace {
-            path: path.to_path_buf(),
-            workspace_root: root.to_path_buf(),
-        })?;
-    let text = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    Ok(WorkspacePath::new(if text.is_empty() {
-        "."
-    } else {
-        &text
-    }))
-}
-
-fn workspace_id(root: &Path) -> WorkspaceId {
-    WorkspaceId::new(format!(
-        "filesystem:{}",
-        fingerprint_bytes(root.to_string_lossy().as_bytes()).as_str()
-    ))
 }
 
 fn fingerprint_files(root: &Path, paths: &[PathBuf]) -> Result<Fingerprint, DiscoveryError> {
@@ -532,6 +445,71 @@ mod tests {
         assert_ne!(before_app.content, after_app.content);
         assert_eq!(before_app.context, after_app.context);
         assert_eq!(before.manifest.fingerprint, after.manifest.fingerprint);
+    }
+
+    #[test]
+    fn javascript_lockfiles_are_configuration_inputs_that_change_context() {
+        let fixture = tempdir().expect("temporary fixture");
+        let root = fixture.path();
+        write(root.join("package.json"), "{\"name\":\"app\"}\n");
+        write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+        write(root.join("src/Main.java"), "class Main {}\n");
+
+        let before = discover_workspace(root).expect("discovers lockfile");
+        assert!(before
+            .configuration_inputs
+            .contains(&WorkspacePath::new("pnpm-lock.yaml")));
+        let before_context = before.source_units[0].context.clone();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages: {}\n")
+            .expect("updates lockfile");
+        let after = discover_workspace(root).expect("rediscovers changed lockfile");
+        assert_ne!(before_context, after.source_units[0].context);
+        assert_ne!(before.manifest.fingerprint, after.manifest.fingerprint);
+    }
+
+    #[test]
+    fn module_configuration_changes_only_that_component_context() {
+        let fixture = fixture_workspace();
+        let before = discover_workspace(fixture.path()).unwrap();
+        let contexts = |discovery: &WorkspaceDiscovery| {
+            discovery
+                .source_units
+                .iter()
+                .map(|source| (source.path.as_str().to_owned(), source.context.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = contexts(&before);
+        fs::write(
+            fixture.path().join("app/build.gradle.kts"),
+            "plugins { kotlin(\"jvm\") }\ndependencies {}\n",
+        )
+        .unwrap();
+        let after_discovery = discover_workspace(fixture.path()).unwrap();
+        let after = contexts(&after_discovery);
+        assert_ne!(
+            before["app/src/main/kotlin/App.kt"],
+            after["app/src/main/kotlin/App.kt"]
+        );
+        assert_eq!(
+            before["lib/src/main/java/Library.java"],
+            after["lib/src/main/java/Library.java"]
+        );
+    }
+
+    #[test]
+    fn kide_configuration_is_workspace_wide_even_though_state_directory_is_excluded() {
+        let fixture = fixture_workspace();
+        write(
+            fixture.path().join(".kide/config.toml"),
+            "schema_version = 1\nfreshness_strategy = \"fresh_only\"\n",
+        );
+        let discovery = discover_workspace(fixture.path()).unwrap();
+        let input = discovery
+            .configuration_input_records
+            .iter()
+            .find(|input| input.path.as_str() == ".kide/config.toml")
+            .expect("KIDE config is inventoried");
+        assert_eq!(input.components.len(), discovery.manifest.components.len());
     }
 
     #[cfg(unix)]

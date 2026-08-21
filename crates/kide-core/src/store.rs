@@ -15,9 +15,10 @@ use thiserror::Error;
 
 use crate::{
     AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
-    DiagnosticRecord, FileAnalysisSnapshot, HierarchyEdge, LexicalMatch, ProjectManifest,
-    Provenance, ReferenceEdge, SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord,
-    TextDocument, TypeRecord, WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION,
+    ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord, FileAnalysisSnapshot,
+    Fingerprint, HierarchyEdge, LexicalMatch, ProjectManifest, Provenance, ReferenceEdge,
+    SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
+    WorkspacePath, INDEX_FORMAT_VERSION, WORKER_PROTOCOL_VERSION, reconcile_configuration_inputs,
 };
 
 const MIGRATION_1: &str = r#"
@@ -182,6 +183,13 @@ CREATE INDEX IF NOT EXISTS workspace_text_terms_by_term ON workspace_text_terms(
 "#;
 const MIGRATION_8: &str = r#"
 ALTER TABLE source_snapshots ADD COLUMN public_api_fingerprint TEXT;
+"#;
+const MIGRATION_9: &str = r#"
+CREATE TABLE IF NOT EXISTS configuration_inputs (
+    workspace_path TEXT PRIMARY KEY,
+    content_fingerprint TEXT NOT NULL,
+    component_ids_json TEXT NOT NULL
+);
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -383,6 +391,20 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (8)", [])?;
         }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 9",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_9)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
+        }
         Ok(())
     }
 
@@ -408,6 +430,72 @@ impl IndexStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn configuration_inputs(&self) -> Result<Vec<ConfigurationInput>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT workspace_path, content_fingerprint, component_ids_json
+             FROM configuration_inputs ORDER BY workspace_path",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .map(|row| {
+                let (path, fingerprint, components) = row?;
+                let components = serde_json::from_str::<Vec<String>>(&components)?
+                    .into_iter()
+                    .map(ComponentId::new)
+                    .collect();
+                Ok(ConfigurationInput {
+                    path: WorkspacePath::new(path),
+                    fingerprint: Fingerprint::new(fingerprint),
+                    components,
+                })
+            })
+            .collect()
+    }
+
+    pub fn configuration_input_status(
+        &self,
+        current: &[ConfigurationInput],
+    ) -> Result<ConfigurationInputReconciliation, IndexStoreError> {
+        Ok(reconcile_configuration_inputs(
+            &self.configuration_inputs()?,
+            current,
+        ))
+    }
+
+    pub fn replace_configuration_inputs(
+        &mut self,
+        current: &[ConfigurationInput],
+    ) -> Result<ConfigurationInputReconciliation, IndexStoreError> {
+        let status = self.configuration_input_status(current)?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM configuration_inputs", [])?;
+        for input in current {
+            let components = input
+                .components
+                .iter()
+                .map(|component| component.as_str())
+                .collect::<Vec<_>>();
+            transaction.execute(
+                "INSERT INTO configuration_inputs
+                 (workspace_path, content_fingerprint, component_ids_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    input.path.as_str(),
+                    input.fingerprint.as_str(),
+                    serde_json::to_string(&components)?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(status)
     }
 
     pub fn symbols_with_qualified_name(
@@ -1534,6 +1622,42 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn configuration_inventory_persists_and_reconciles_changes_and_missing_inputs() {
+        let directory = tempdir().expect("temporary index directory");
+        let mut store = IndexStore::open(directory.path().join("index.sqlite3")).unwrap();
+        let first = vec![ConfigurationInput {
+            path: WorkspacePath::new("pom.xml"),
+            fingerprint: Fingerprint::new("sha256:first"),
+            components: vec![ComponentId::new("maven:root:main")],
+        }];
+        let initial = store.replace_configuration_inputs(&first).unwrap();
+        assert_eq!(initial.inputs[0].state, crate::ConfigurationInputState::Added);
+        assert_eq!(store.configuration_inputs().unwrap(), first);
+
+        let second = vec![ConfigurationInput {
+            path: WorkspacePath::new("package-lock.json"),
+            fingerprint: Fingerprint::new("sha256:second"),
+            components: vec![ComponentId::new("npm:root:main")],
+        }];
+        let changed = store.configuration_input_status(&second).unwrap();
+        assert_eq!(
+            changed
+                .inputs
+                .iter()
+                .map(|input| input.state)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::ConfigurationInputState::Added,
+                crate::ConfigurationInputState::Missing,
+            ]
+        );
+        assert_eq!(
+            changed.affected_components,
+            vec![ComponentId::new("maven:root:main"), ComponentId::new("npm:root:main")]
+        );
+    }
 
     #[test]
     fn persists_and_recovers_every_file_owned_fact_after_restart() {
