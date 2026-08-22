@@ -1,5 +1,6 @@
 package dev.kide.worker
 
+import java.nio.file.Files
 import java.nio.file.Path
 import com.google.protobuf.ByteString
 import kide.worker.v1.Worker
@@ -88,6 +89,8 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 val workspace = resolveWorkspacePath(workspaceRoot)
                 val manifest = projectManifest(workspace).jsonObject
                 val candidates = resolvedArtifacts(workspace)
+                val planPayload = encodeExecutionPlan(workspace, manifest, candidates)
+                persistExecutionPlan(workspace, manifest["fingerprint"]!!.jsonPrimitive.content, planPayload)
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setProjectManifestResponse(
                         Worker.ProjectManifestResponse.newBuilder()
@@ -95,7 +98,7 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                             .setExecutionPlan(Worker.OpaqueExecutionPlan.newBuilder()
                                 .setBackend(WORKER_NAME)
                                 .setResolvedFingerprint(manifest["fingerprint"]!!.jsonPrimitive.content)
-                                .setPayload(ByteString.copyFrom(encodeExecutionPlan(workspace, manifest, candidates)))),
+                                .setPayload(ByteString.copyFrom(planPayload))),
                     )
                     .build()
             } catch (error: Exception) {
@@ -113,11 +116,15 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 require(request.analyzeBatchRequest.hasExecutionPlan()) {
                     "analyze_batch_request requires an execution plan"
                 }
-                require(request.analyzeBatchRequest.executionPlan.backend == WORKER_NAME) {
+                require(request.analyzeBatchRequest.executionPlan.backend in setOf(WORKER_NAME, "cached")) {
                     "execution plan belongs to ${request.analyzeBatchRequest.executionPlan.backend}, not $WORKER_NAME"
                 }
                 val startedAt = System.nanoTime()
-                val plan = decodeExecutionPlan(request.analyzeBatchRequest.executionPlan.payload.toByteArray())
+                val plan = decodeExecutionPlan(
+                    workspaceRoot(),
+                    request.analyzeBatchRequest.executionPlan.resolvedFingerprint,
+                    request.analyzeBatchRequest.executionPlan.payload.toByteArray(),
+                )
                 require(request.analyzeBatchRequest.executionPlan.resolvedFingerprint == plan.manifest["fingerprint"]!!.jsonPrimitive.content) {
                     "execution plan fingerprint does not match its resolved manifest"
                 }
@@ -163,11 +170,18 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
             val maxArtifacts = discoveryRequest.maxArtifacts
             if (maxArtifacts !in 1..64) return unsupported(request.requestId, "max_artifacts must be between 1 and 64")
             try {
+                require(discoveryRequest.executionPlan.backend in setOf(WORKER_NAME, "cached")) {
+                    "execution plan belongs to ${discoveryRequest.executionPlan.backend}, not $WORKER_NAME"
+                }
                 val json = artifactDescriptors(
                     resolveWorkspacePath(workspaceRoot),
                     maxArtifacts,
                     if (discoveryRequest.hasCursor()) discoveryRequest.cursor else null,
-                    decodeExecutionPlan(discoveryRequest.executionPlan.payload.toByteArray()).artifacts,
+                    decodeExecutionPlan(
+                        resolveWorkspacePath(workspaceRoot),
+                        discoveryRequest.executionPlan.resolvedFingerprint,
+                        discoveryRequest.executionPlan.payload.toByteArray(),
+                    ).artifacts,
                 )
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder()
@@ -313,8 +327,14 @@ private fun encodeExecutionPlan(
     }.toString().encodeToByteArray()
 }
 
-private fun decodeExecutionPlan(payload: ByteArray): ExecutionPlan {
-    val json = Json.parseToJsonElement(payload.decodeToString()).jsonObject
+private fun decodeExecutionPlan(
+    workspace: Path,
+    resolvedFingerprint: String,
+    payload: ByteArray,
+): ExecutionPlan {
+    val effectivePayload = payload.takeIf { it.isNotEmpty() }
+        ?: loadExecutionPlan(workspace, resolvedFingerprint)
+    val json = Json.parseToJsonElement(effectivePayload.decodeToString()).jsonObject
     fun kotlinx.serialization.json.JsonObject.paths(name: String) = getValue(name).jsonArray.map { Path.of(it.jsonPrimitive.content) }
     fun kotlinx.serialization.json.JsonObject.strings(name: String) = getValue(name).jsonArray.map { it.jsonPrimitive.content }
     val artifacts = json["artifacts"]!!.jsonArray.map { value ->
@@ -334,7 +354,33 @@ private fun decodeExecutionPlan(payload: ByteArray): ExecutionPlan {
     val kotlinContexts = json["kotlin_contexts"]!!.jsonArray.map { value -> value.jsonObject.let { context ->
         GradleProjectImporter.KotlinCompilationContext(context["component"]!!.jsonPrimitive.content, context["module_name"]!!.jsonPrimitive.content, context["gradle_path"]!!.jsonPrimitive.content, context.paths("source_files"), context.paths("classpath"), Path.of(context["jdk_home"]!!.jsonPrimitive.content), context.strings("project_dependencies").toSet())
     } }.associateBy { it.component }
-    return ExecutionPlan(json["manifest"]!!.jsonObject, artifacts, javaContexts, kotlinContexts)
+    val manifest = json["manifest"]!!.jsonObject
+    require(manifest["fingerprint"]!!.jsonPrimitive.content == resolvedFingerprint) {
+        "execution plan cache key does not match its resolved manifest"
+    }
+    return ExecutionPlan(manifest, artifacts, javaContexts, kotlinContexts)
+}
+
+/** A worker-owned cache only. Core persists neither this payload nor its paths. */
+private fun persistExecutionPlan(workspace: Path, fingerprint: String, payload: ByteArray) {
+    val cache = executionPlanCachePath(workspace, fingerprint)
+    Files.createDirectories(cache.parent)
+    Files.write(cache, payload)
+}
+
+private fun loadExecutionPlan(workspace: Path, fingerprint: String): ByteArray {
+    val cache = executionPlanCachePath(workspace, fingerprint)
+    require(Files.isRegularFile(cache)) {
+        "no cached execution plan is available for resolved fingerprint $fingerprint"
+    }
+    return Files.readAllBytes(cache)
+}
+
+private fun executionPlanCachePath(workspace: Path, fingerprint: String): Path {
+    require(fingerprint.matches(Regex("sha256:[0-9a-f]{64}"))) {
+        "resolved fingerprint is not a SHA-256 cache key"
+    }
+    return workspace.resolve(".kide/worker-plans").resolve("${fingerprint.removePrefix("sha256:")}.json")
 }
 
 private fun List<Path>.jsonPaths() = buildJsonArray { forEach { add(kotlinx.serialization.json.JsonPrimitive(it.toString())) } }

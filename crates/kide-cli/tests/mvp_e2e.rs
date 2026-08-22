@@ -41,6 +41,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(unchanged["analyzed"], 0);
     assert_eq!(unchanged["reused"], 9);
     assert_eq!(unchanged["worker_starts"], 0);
+    assert_eq!(unchanged["build_resolution_reused"], true);
 
     let status = measure("warm_status", || {
         run_json(

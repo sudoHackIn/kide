@@ -6,14 +6,16 @@ use std::{
 
 use anyhow::{Result, bail};
 use kide_core::{
-    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION,
-    EffectiveConfiguration, IndexStore, ProjectManifestRequest, ProjectManifestResponse,
-    Provenance, QueryStatus, WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch,
-    WorkerMessage, WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
+    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, Component,
+    ComponentId, ConfigurationInput, EffectiveConfiguration, Fingerprint, IndexStore,
+    OpaqueExecutionPlan, ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus,
+    WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage,
+    WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
     cache_catalog_artifact_with_metrics, collect_workspace_text,
     index_batch_with_artifact_cache_provenance_and_execution_plan,
     index_selected_batches_with_execution_plan,
 };
+use sha2::{Digest, Sha256};
 
 pub(super) fn index(
     discovery: WorkspaceDiscovery,
@@ -29,7 +31,11 @@ pub(super) fn index(
     let discovery_millis = discovery_started.elapsed().as_millis();
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
-    let configuration_input_records = discovery.configuration_input_records.clone();
+    let mut configuration_input_records = discovery.configuration_input_records.clone();
+    configuration_input_records.push(effective_configuration_input(
+        &configuration,
+        &discovery.manifest.components,
+    )?);
     let configuration_changes = store.configuration_input_status(&configuration_input_records)?;
     let mut sources = discovery.source_units;
     if force {
@@ -106,7 +112,31 @@ pub(super) fn index(
         return Ok(QueryStatus::Ok);
     }
     let worker_installation = kotlin_worker_installation(&discovery.root, verbosity)?;
-    let resolved_plan = resolve_project_manifest(&worker_installation.launch)?;
+    let cached_manifest = (!force
+        && configuration_changes
+            .inputs
+            .iter()
+            .all(|input| input.state == kide_core::ConfigurationInputState::Current))
+        // The resolved build model is authoritative for workspace identity;
+        // filesystem discovery can use a different generic identity. One
+        // index database owns exactly one current resolved manifest.
+        .then(|| store.latest_manifest())
+    .transpose()?
+    .flatten();
+    let reused_build_resolution = cached_manifest.is_some();
+    let resolved_plan = match cached_manifest {
+        Some(manifest) => ProjectManifestResponse {
+            execution_plan: OpaqueExecutionPlan {
+                // `cached` is an opaque plan reference. The worker resolves it
+                // against its own private cache keyed by this fingerprint.
+                backend: "cached".to_owned(),
+                resolved_fingerprint: manifest.fingerprint.clone(),
+                payload: Vec::new(),
+            },
+            manifest,
+        },
+        None => resolve_project_manifest(&worker_installation.launch)?,
+    };
     let manifest = resolved_plan.manifest;
     let execution_plan = resolved_plan.execution_plan;
     if sources.iter().any(|source| {
@@ -533,6 +563,7 @@ pub(super) fn index(
             "freshness_strategy": configuration.freshness_strategy,
             "worker_limits": configuration.workers,
             "resolved_manifest": if verbosity > 1 { serde_json::to_value(&manifest)? } else { serde_json::Value::Null },
+            "build_resolution_reused": reused_build_resolution,
             "workspace": discovery.root,
             "reused": run.reused,
             "analyzed": run.analyzed,
@@ -574,6 +605,24 @@ fn resolve_project_manifest(launch: &WorkerLaunch) -> Result<ProjectManifestResp
         WorkerMessage::ProjectManifestResponse(response) => Ok(response),
         received => bail!("invalid_project_manifest_response={received:?}"),
     }
+}
+
+/// The global config layer has no workspace-relative path, but its effective
+/// semantic result must still invalidate a cached build plan deterministically.
+fn effective_configuration_input(
+    configuration: &EffectiveConfiguration,
+    components: &[Component],
+) -> Result<ConfigurationInput> {
+    let bytes = serde_json::to_vec(configuration)?;
+    let fingerprint = Fingerprint::new(format!("sha256:{:x}", Sha256::digest(bytes)));
+    Ok(ConfigurationInput {
+        path: WorkspacePath::new(".kide/effective-config"),
+        fingerprint,
+        components: components
+            .iter()
+            .map(|component| ComponentId::new(component.id.as_str()))
+            .collect(),
+    })
 }
 
 /// Temporary external scheduling override. Workspace configuration will own

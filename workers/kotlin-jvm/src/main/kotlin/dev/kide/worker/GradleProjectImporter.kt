@@ -510,5 +510,6 @@ internal object GradleProjectImporter {
         "build.gradle.kts",
         "gradle.properties",
         "libs.versions.toml",
+        "gradle.lockfile",
     )
 }

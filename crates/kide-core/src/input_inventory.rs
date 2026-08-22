@@ -49,6 +49,10 @@ pub(crate) const CONFIGURATION_FILE_NAMES: &[&str] = &[
     "build.gradle",
     "build.gradle.kts",
     "gradle.properties",
+    "libs.versions.toml",
+    "gradle.lockfile",
+    "maven.config",
+    "maven-wrapper.properties",
     "pom.xml",
     "Cargo.toml",
     "package.json",
@@ -63,6 +67,8 @@ pub(crate) const CONFIGURATION_FILE_NAMES: &[&str] = &[
     ".npmrc",
 ];
 
+pub(crate) const CONFIGURATION_FILE_SUFFIXES: &[&str] = &[".lockfile"];
+
 pub(crate) fn is_configuration_input(root: &Path, path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -70,6 +76,14 @@ pub(crate) fn is_configuration_input(root: &Path, path: &Path) -> bool {
         || path.strip_prefix(root).ok().is_some_and(|relative| {
             relative == Path::new("gradle/wrapper/gradle-wrapper.properties")
                 || relative == Path::new(".kide/config.toml")
+                || relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        CONFIGURATION_FILE_SUFFIXES
+                            .iter()
+                            .any(|suffix| name.ends_with(suffix))
+                    })
         })
 }
 
