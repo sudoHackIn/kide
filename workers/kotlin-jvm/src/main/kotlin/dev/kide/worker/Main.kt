@@ -1,7 +1,9 @@
 package dev.kide.worker
 
 import java.nio.file.Path
+import com.google.protobuf.ByteString
 import kide.worker.v1.Worker
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
@@ -24,6 +26,14 @@ internal data class ResolvedJvmArtifact(
 ) {
     val cursor: String get() = path.toAbsolutePath().normalize().toString()
 }
+
+/** Backend-private compiler inputs, materialized while the build model is resolved. */
+internal data class ExecutionPlan(
+    val manifest: kotlinx.serialization.json.JsonObject,
+    val artifacts: List<ResolvedJvmArtifact>,
+    val javaContexts: List<JavaCompilationContext>,
+    val kotlinContexts: Map<String, GradleProjectImporter.KotlinCompilationContext>,
+)
 
 fun main(args: Array<String>) {
     configureLogging()
@@ -75,17 +85,43 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                 .takeIf(String::isNotBlank) ?: return unsupported(request.requestId, "project_manifest_request requires workspace_root")
             try {
                 workerPhase("project-manifest: build import")
+                val workspace = resolveWorkspacePath(workspaceRoot)
+                val manifest = projectManifest(workspace).jsonObject
+                val candidates = resolvedArtifacts(workspace)
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
-                    .setProjectManifestResponse(Worker.ProjectManifestResponse.newBuilder().setManifest(ProtobufManifestAdapter.manifest(projectManifest(resolveWorkspacePath(workspaceRoot)).jsonObject))).build()
+                    .setProjectManifestResponse(
+                        Worker.ProjectManifestResponse.newBuilder()
+                            .setManifest(ProtobufManifestAdapter.manifest(manifest))
+                            .setExecutionPlan(Worker.OpaqueExecutionPlan.newBuilder()
+                                .setBackend(WORKER_NAME)
+                                .setResolvedFingerprint(manifest["fingerprint"]!!.jsonPrimitive.content)
+                                .setPayload(ByteString.copyFrom(encodeExecutionPlan(workspace, manifest, candidates)))),
+                    )
+                    .build()
             } catch (error: Exception) {
-                unsupported(request.requestId, failureMessage(error, "build project import failed"))
+                logger().error("Build project import failed", error)
+                unsupported(
+                    request.requestId,
+                    failureMessage(error, "build project import failed (${error::class.qualifiedName})") +
+                        " at " + error.stackTrace.take(3).joinToString(" <- "),
+                )
             }
         }
         Worker.Envelope.MessageCase.ANALYZE_BATCH_REQUEST -> {
             try {
                 workerPhase("analyze-batch: ${request.analyzeBatchRequest.sourceUnitsCount} source units")
+                require(request.analyzeBatchRequest.hasExecutionPlan()) {
+                    "analyze_batch_request requires an execution plan"
+                }
+                require(request.analyzeBatchRequest.executionPlan.backend == WORKER_NAME) {
+                    "execution plan belongs to ${request.analyzeBatchRequest.executionPlan.backend}, not $WORKER_NAME"
+                }
                 val startedAt = System.nanoTime()
-                val batch = structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot())
+                val plan = decodeExecutionPlan(request.analyzeBatchRequest.executionPlan.payload.toByteArray())
+                require(request.analyzeBatchRequest.executionPlan.resolvedFingerprint == plan.manifest["fingerprint"]!!.jsonPrimitive.content) {
+                    "execution plan fingerprint does not match its resolved manifest"
+                }
+                val batch = structuralBatch(ProtobufManifestAdapter.json(request.analyzeBatchRequest), workspaceRoot(), plan)
                 val timed = buildJsonObject {
                     batch.forEach { (key, value) -> put(key, value) }
                     put("timings", buildJsonArray {
@@ -131,9 +167,7 @@ internal fun dispatch(request: Worker.Envelope): Worker.Envelope {
                     resolveWorkspacePath(workspaceRoot),
                     maxArtifacts,
                     if (discoveryRequest.hasCursor()) discoveryRequest.cursor else null,
-                    discoveryRequest.artifactCandidatesList.map { candidate ->
-                        ResolvedJvmArtifact(Path.of(candidate.locator), candidate.componentId, candidate.contextFingerprint)
-                    },
+                    decodeExecutionPlan(discoveryRequest.executionPlan.payload.toByteArray()).artifacts,
                 )
                 Worker.Envelope.newBuilder().setProtocolVersion(WORKER_PROTOCOL_VERSION).setRequestId(request.requestId)
                     .setArtifactDiscoveryResponse(Worker.ArtifactDiscoveryResponse.newBuilder()
@@ -239,7 +273,79 @@ internal fun resolvedArtifacts(workspace: Path): List<ResolvedJvmArtifact> = whe
         .map { ResolvedJvmArtifact(it.path, it.component, it.context) }
 }
 
-internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path): kotlinx.serialization.json.JsonObject {
+private fun encodeExecutionPlan(
+    workspace: Path,
+    manifest: kotlinx.serialization.json.JsonObject,
+    artifacts: List<ResolvedJvmArtifact>,
+): ByteArray {
+    val (javaContexts, kotlinContexts) = sourceExecutionContexts(workspace)
+    return buildJsonObject {
+        put("format", 1)
+        put("manifest", manifest)
+        put("artifacts", buildJsonArray {
+            artifacts.forEach { artifact -> add(buildJsonObject {
+                put("path", artifact.path.toString()); put("component", artifact.component); put("context", artifact.context)
+                put("ecosystem", artifact.ecosystem)
+                artifact.coordinate?.let { put("coordinate", it) }
+                artifact.version?.let { put("version", it) }
+            }) }
+        })
+        put("java_contexts", buildJsonArray {
+            javaContexts.forEach { context -> add(buildJsonObject {
+                put("component", context.component)
+                put("source_files", context.sourceFiles.jsonPaths())
+                put("owned_source_files", context.ownedSourceFiles.jsonPaths())
+                put("source_roots", context.sourceRoots.jsonPaths())
+                put("classpath", context.classpath.jsonPaths())
+                put("jdk_home", context.jdkHome.toString())
+                context.languageLevel?.let { put("language_level", it) }
+                put("unresolved_dependencies", context.unresolvedDependencies.jsonStrings())
+                put("artifact_context", context.artifactContext)
+            }) }
+        })
+        put("kotlin_contexts", buildJsonArray {
+            kotlinContexts.values.sortedBy { it.component }.forEach { context -> add(buildJsonObject {
+                put("component", context.component); put("module_name", context.moduleName); put("gradle_path", context.gradlePath)
+                put("source_files", context.sourceFiles.jsonPaths()); put("classpath", context.classpath.jsonPaths()); put("jdk_home", context.jdkHome.toString())
+                put("project_dependencies", context.projectDependencyModuleNames.sorted().jsonStrings())
+            }) }
+        })
+    }.toString().encodeToByteArray()
+}
+
+private fun decodeExecutionPlan(payload: ByteArray): ExecutionPlan {
+    val json = Json.parseToJsonElement(payload.decodeToString()).jsonObject
+    fun kotlinx.serialization.json.JsonObject.paths(name: String) = getValue(name).jsonArray.map { Path.of(it.jsonPrimitive.content) }
+    fun kotlinx.serialization.json.JsonObject.strings(name: String) = getValue(name).jsonArray.map { it.jsonPrimitive.content }
+    val artifacts = json["artifacts"]!!.jsonArray.map { value ->
+        val artifact = value.jsonObject
+        ResolvedJvmArtifact(
+            Path.of(artifact["path"]!!.jsonPrimitive.content),
+            artifact["component"]!!.jsonPrimitive.content,
+            artifact["context"]!!.jsonPrimitive.content,
+            artifact["ecosystem"]?.jsonPrimitive?.contentOrNull ?: "unknown",
+            artifact["coordinate"]?.jsonPrimitive?.contentOrNull,
+            artifact["version"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+    val javaContexts = json["java_contexts"]!!.jsonArray.map { value -> value.jsonObject.let { context ->
+        JavaCompilationContext(context["component"]!!.jsonPrimitive.content, context.paths("source_files"), context.paths("owned_source_files"), context.paths("source_roots"), context.paths("classpath"), Path.of(context["jdk_home"]!!.jsonPrimitive.content), context["language_level"]?.jsonPrimitive?.contentOrNull, context.strings("unresolved_dependencies"), context["artifact_context"]!!.jsonPrimitive.content)
+    } }
+    val kotlinContexts = json["kotlin_contexts"]!!.jsonArray.map { value -> value.jsonObject.let { context ->
+        GradleProjectImporter.KotlinCompilationContext(context["component"]!!.jsonPrimitive.content, context["module_name"]!!.jsonPrimitive.content, context["gradle_path"]!!.jsonPrimitive.content, context.paths("source_files"), context.paths("classpath"), Path.of(context["jdk_home"]!!.jsonPrimitive.content), context.strings("project_dependencies").toSet())
+    } }.associateBy { it.component }
+    return ExecutionPlan(json["manifest"]!!.jsonObject, artifacts, javaContexts, kotlinContexts)
+}
+
+private fun List<Path>.jsonPaths() = buildJsonArray { forEach { add(kotlinx.serialization.json.JsonPrimitive(it.toString())) } }
+private fun List<String>.jsonStrings() = buildJsonArray { forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }
+
+private fun sourceExecutionContexts(workspace: Path): Pair<List<JavaCompilationContext>, Map<String, GradleProjectImporter.KotlinCompilationContext>> = when {
+    workspace.resolve("pom.xml").toFile().isFile -> MavenProjectImporter.javaCompilationContexts(workspace) to emptyMap()
+    else -> GradleProjectImporter.javaCompilationContexts(workspace).values.toList() to GradleProjectImporter.kotlinCompilationContexts(workspace)
+}
+
+internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, workspaceRoot: Path, plan: ExecutionPlan): kotlinx.serialization.json.JsonObject {
     val sourceUnits = payload.jsonObject["source_units"]?.jsonArray
         ?: error("analyze_batch_request requires source_units")
     val language = sourceUnits.firstOrNull()?.jsonObject?.get("language")?.jsonPrimitive?.content
@@ -248,7 +354,7 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         "worker batches must contain exactly one source language"
     }
     if (language == "java") return buildJsonObject {
-        put("snapshots", buildJsonArray { JavaSemanticExtractor.analyze(sourceUnits, workspaceRoot).forEach(::add) })
+        put("snapshots", buildJsonArray { JavaSemanticExtractor.analyze(sourceUnits, workspaceRoot, plan.javaContexts).forEach(::add) })
         put("timings", buildJsonArray { JavaSemanticExtractor.consumeTimings().forEach { (phase, elapsed) -> add(buildJsonObject { put("phase", phase); put("elapsed_millis", elapsed) }) } })
         put("artifact_candidates", buildJsonArray { JavaSemanticExtractor.artifactCandidates().forEach { candidate ->
             add(buildJsonObject { put("locator", candidate.path.toString()); put("component", candidate.component); put("context", candidate.context) })
@@ -262,7 +368,7 @@ internal fun structuralBatch(payload: kotlinx.serialization.json.JsonElement, wo
         workerPhase("analyze-batch: structural extraction")
         val snapshots = sourceUnits.map { sourceUnit -> extractor.analyze(sourceUnit, workspaceRoot) }
         workerPhase("analyze-batch: Gradle compilation contexts")
-        val contexts = gradleContexts(workspaceRoot)
+        val contexts = plan.kotlinContexts
         workerPhase("analyze-batch: K2 semantic analysis")
         // Each Gradle component is compiled with its transitive project-source
         // dependencies. A workspace-wide K2 session incorrectly merges
@@ -364,12 +470,6 @@ private fun String.gradleComponentIdentity(): String {
         .removePrefix(":")
         .replace(':', '/')
     return "gradle:$projectPath:main"
-}
-
-private fun gradleContexts(workspaceRoot: Path): Map<String, GradleProjectImporter.KotlinCompilationContext> {
-    val hasBuild = listOf("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts")
-        .any { name -> workspaceRoot.resolve(name).toFile().isFile }
-    return if (hasBuild) GradleProjectImporter.kotlinCompilationContexts(workspaceRoot) else emptyMap()
 }
 
 private fun failureMessage(error: Throwable, fallback: String): String = generateSequence(error) { it.cause }

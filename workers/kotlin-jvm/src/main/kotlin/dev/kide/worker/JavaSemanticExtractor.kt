@@ -60,17 +60,17 @@ internal object JavaSemanticExtractor {
         val declarationIds: Map<String, String>,
     )
 
-    fun analyze(sourceUnits: List<JsonElement>, workspaceRoot: Path): List<JsonElement> {
+    fun analyze(
+        sourceUnits: List<JsonElement>,
+        workspaceRoot: Path,
+        contexts: List<JavaCompilationContext>,
+    ): List<JsonElement> {
         val timings = mutableListOf<Pair<String, Long>>()
         stagingMillis = 0
         metrics.clear()
         val selected = sourceUnits.associateBy { canonical(workspaceRoot.resolve(it.jsonObject.requiredString("path"))) }
         require(selected.isNotEmpty()) { "Java analysis requires source files" }
-        val projectContext = selected.values.map { it.jsonObject.requiredString("context") }.distinct().singleOrNull()
-            ?: error("Java batch must contain one project context fingerprint")
-        val importStarted = System.nanoTime()
-        val contexts = JavaCompilationContexts.forWorkspace(workspaceRoot, projectContext)
-        timings += "context_import" to (System.nanoTime() - importStarted) / 1_000_000
+        require(contexts.isNotEmpty()) { "execution plan contains no Java compilation contexts" }
         lastArtifactCandidates = contexts.flatMap { context ->
             context.classpath.map { path -> ResolvedJvmArtifact(path, context.component, context.artifactContext) }
         }.filter { candidate -> candidate.context.isNotEmpty() }

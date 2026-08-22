@@ -125,10 +125,10 @@ mod worker_framing_tests {
     use tempfile::tempdir;
 
     use crate::{
-        worker_framing, worker_proto, ArtifactBlobCache, ArtifactBlobKey, BackendKey, ByteRange,
-        Completeness, ComponentId, Fingerprint, Freshness, Language, Provenance, SourceOrigin,
-        SourceRange, SourceUnit, SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WorkspacePath,
-        WORKER_PROTOCOL_VERSION,
+        ArtifactBlobCache, ArtifactBlobKey, BackendKey, ByteRange, Completeness, ComponentId,
+        Fingerprint, Freshness, Language, Provenance, SourceOrigin, SourceRange, SourceUnit,
+        SourceUnitId, SymbolId, SymbolKind, SymbolRecord, WORKER_PROTOCOL_VERSION, WorkspacePath,
+        worker_framing, worker_proto,
     };
 
     #[test]
@@ -141,7 +141,11 @@ mod worker_framing_tests {
                     workspace_root: ".".to_owned(),
                     max_artifacts: 8,
                     cursor: Some("cursor-7".to_owned()),
-                    artifact_candidates: Vec::new(),
+                    execution_plan: Some(worker_proto::OpaqueExecutionPlan {
+                        backend: "fixture".to_owned(),
+                        resolved_fingerprint: "sha256:fixture".to_owned(),
+                        payload: Vec::new(),
+                    }),
                 },
             )),
         };
@@ -895,8 +899,8 @@ mod canonical;
 mod config;
 mod dependency_identity;
 mod discovery;
-mod input_inventory;
 mod freshness;
+mod input_inventory;
 mod orchestrator;
 mod protocol;
 mod query;
@@ -910,12 +914,12 @@ pub use canonical::*;
 pub use config::*;
 pub use dependency_identity::*;
 pub use discovery::*;
+pub use framework_query::*;
+pub use freshness::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
     ConfigurationInputStatus, reconcile_configuration_inputs,
 };
-pub use framework_query::*;
-pub use freshness::*;
 pub use orchestrator::*;
 pub use protocol::*;
 pub use query::*;

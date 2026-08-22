@@ -45,22 +45,3 @@ internal object JavaCompilationPlanner {
         return shards
     }
 }
-
-internal object JavaCompilationContexts {
-    private val cached = mutableMapOf<Pair<Path, String>, List<JavaCompilationContext>>()
-
-    /**
-     * Build imports are expensive. Core's project context fingerprint covers
-     * build configuration inputs, so it is the invalidation boundary for this
-     * worker-local cache. A new worker always starts cold.
-     */
-    fun forWorkspace(workspaceRoot: Path, projectContext: String): List<JavaCompilationContext> {
-        val workspace = workspaceRoot.toAbsolutePath().normalize()
-        return cached.getOrPut(workspace to projectContext) {
-            when {
-                java.nio.file.Files.isRegularFile(workspace.resolve("pom.xml")) -> MavenProjectImporter.javaCompilationContexts(workspace)
-                else -> GradleProjectImporter.javaCompilationContexts(workspace).values.toList()
-            }
-        }
-    }
-}

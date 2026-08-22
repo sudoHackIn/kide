@@ -416,11 +416,13 @@ required = true
         assert_eq!(resolved.package.manifest.version, "1.0.0");
         assert_eq!(resolved.package.manifest.capabilities[0].version, 1);
         assert_eq!(resolved.export_name, "controller");
-        assert!(resolved
-            .package
-            .manifest_digest
-            .as_str()
-            .starts_with("sha256:"));
+        assert!(
+            resolved
+                .package
+                .manifest_digest
+                .as_str()
+                .starts_with("sha256:")
+        );
         assert!(matches!(
             resolved.package.source,
             PackageSource::Workspace { .. }

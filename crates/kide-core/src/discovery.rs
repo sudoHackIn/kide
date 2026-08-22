@@ -14,8 +14,7 @@ use thiserror::Error;
 
 use crate::{
     BuildSystem, Component, ComponentId, DependencyEdge, Fingerprint, Language, ProjectManifest,
-    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WorkspacePath,
-    WORKER_PROTOCOL_VERSION,
+    Provenance, SourceOrigin, SourceUnit, SourceUnitId, WORKER_PROTOCOL_VERSION, WorkspacePath,
 };
 use crate::{
     input_inventory::{
@@ -24,7 +23,6 @@ use crate::{
     },
     workspace::{find_workspace_root, has_regular_file, workspace_id, workspace_path},
 };
-
 
 const EXCLUDED_DIRECTORIES: &[&str] = &[
     ".git",
@@ -121,12 +119,7 @@ pub fn discover_workspace(
         component.configuration =
             component_context_fingerprint(&component.id, &configuration_input_records);
     }
-    let source_units = source_units(
-        &root,
-        &files,
-        &components,
-        &component_roots,
-    )?;
+    let source_units = source_units(&root, &files, &components, &component_roots)?;
     let workspace_identity = workspace_id(&root);
     let provenance = Provenance {
         backend: "kide-filesystem-discovery".to_owned(),
@@ -400,22 +393,30 @@ mod tests {
                 "src/generated/kotlin/Generated.kt",
             ]
         );
-        assert!(from_root
-            .source_units
-            .iter()
-            .any(|source| source.language == Language::Kotlin));
-        assert!(from_root
-            .source_units
-            .iter()
-            .any(|source| source.language == Language::Java));
-        assert!(from_root
-            .source_units
-            .iter()
-            .any(|source| source.origin == SourceOrigin::Generated));
-        assert!(from_root
-            .configuration_inputs
-            .windows(2)
-            .all(|pair| pair[0].as_str() < pair[1].as_str()));
+        assert!(
+            from_root
+                .source_units
+                .iter()
+                .any(|source| source.language == Language::Kotlin)
+        );
+        assert!(
+            from_root
+                .source_units
+                .iter()
+                .any(|source| source.language == Language::Java)
+        );
+        assert!(
+            from_root
+                .source_units
+                .iter()
+                .any(|source| source.origin == SourceOrigin::Generated)
+        );
+        assert!(
+            from_root
+                .configuration_inputs
+                .windows(2)
+                .all(|pair| pair[0].as_str() < pair[1].as_str())
+        );
     }
 
     #[test]
@@ -456,12 +457,17 @@ mod tests {
         write(root.join("src/Main.java"), "class Main {}\n");
 
         let before = discover_workspace(root).expect("discovers lockfile");
-        assert!(before
-            .configuration_inputs
-            .contains(&WorkspacePath::new("pnpm-lock.yaml")));
+        assert!(
+            before
+                .configuration_inputs
+                .contains(&WorkspacePath::new("pnpm-lock.yaml"))
+        );
         let before_context = before.source_units[0].context.clone();
-        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages: {}\n")
-            .expect("updates lockfile");
+        fs::write(
+            root.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\npackages: {}\n",
+        )
+        .expect("updates lockfile");
         let after = discover_workspace(root).expect("rediscovers changed lockfile");
         assert_ne!(before_context, after.source_units[0].context);
         assert_ne!(before.manifest.fingerprint, after.manifest.fingerprint);

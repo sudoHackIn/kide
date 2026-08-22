@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Completeness, Fingerprint, Freshness, Location, Precision, Provenance, SourceOccurrence,
-    SymbolId, SymbolRecord, TypeRecord, WorkspacePath, CANONICAL_SCHEMA_VERSION,
-    INDEX_FORMAT_VERSION,
+    CANONICAL_SCHEMA_VERSION, Completeness, Fingerprint, Freshness, INDEX_FORMAT_VERSION, Location,
+    Precision, Provenance, SourceOccurrence, SymbolId, SymbolRecord, TypeRecord, WorkspacePath,
 };
 
 /// User intent accepted by position-oriented and symbol-oriented navigation

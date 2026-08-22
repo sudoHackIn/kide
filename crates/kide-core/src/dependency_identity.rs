@@ -6,7 +6,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::{Fingerprint, Provenance, CANONICAL_SCHEMA_VERSION};
+use crate::{CANONICAL_SCHEMA_VERSION, Fingerprint, Provenance};
 
 /// Version of the serialized dependency identity contract.
 pub const DEPENDENCY_IDENTITY_VERSION: u32 = 1;
@@ -85,7 +85,10 @@ impl ResolvedDependencyIdentity {
     }
 
     pub fn cache_key(&self) -> Fingerprint {
-        Fingerprint::new(format!("sha256:{:x}", Sha256::digest(self.canonical_bytes())))
+        Fingerprint::new(format!(
+            "sha256:{:x}",
+            Sha256::digest(self.canonical_bytes())
+        ))
     }
 }
 

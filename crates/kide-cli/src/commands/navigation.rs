@@ -179,7 +179,11 @@ pub(super) fn definition(
     Ok(status)
 }
 
-pub(super) fn references(context: &WorkspaceContext, value: String, short: bool) -> Result<QueryStatus> {
+pub(super) fn references(
+    context: &WorkspaceContext,
+    value: String,
+    short: bool,
+) -> Result<QueryStatus> {
     let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
@@ -347,7 +351,11 @@ pub(super) fn byte_to_location(text: &str, byte_offset: u64) -> Option<(usize, u
     Some((line, column))
 }
 
-pub(super) fn callers(context: &WorkspaceContext, value: String, human_output: bool) -> Result<QueryStatus> {
+pub(super) fn callers(
+    context: &WorkspaceContext,
+    value: String,
+    human_output: bool,
+) -> Result<QueryStatus> {
     let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
@@ -433,7 +441,11 @@ pub(super) fn cached_dependency_implementations(
     Ok(symbols)
 }
 
-pub(super) fn type_at(context: &WorkspaceContext, value: String, human_output: bool) -> Result<QueryStatus> {
+pub(super) fn type_at(
+    context: &WorkspaceContext,
+    value: String,
+    human_output: bool,
+) -> Result<QueryStatus> {
     let workspace = context.path();
     let location = parse_location(&value)?;
     let source_text = std::fs::read_to_string(workspace.join(location.path.as_str()))?;
@@ -484,7 +496,10 @@ pub(super) enum TargetResolution {
 }
 
 fn resolve_target(store: &IndexStore, workspace: &Path, value: &str) -> Result<TargetResolution> {
-    if value.starts_with("jvm:sha256:") || value.starts_with("kotlin:") || value.starts_with("java:") {
+    if value.starts_with("jvm:sha256:")
+        || value.starts_with("kotlin:")
+        || value.starts_with("java:")
+    {
         let symbol = SymbolId::new(value);
         return Ok(
             if store.symbol(&symbol)?.is_some()

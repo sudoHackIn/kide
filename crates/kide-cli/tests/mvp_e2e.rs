@@ -18,6 +18,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let directory = tempdir().expect("temporary workspace");
     let workspace = directory.path().join("spring-boot-crud");
     copy_fixture(&fixture_root(), &workspace);
+    initialize_workspace(&workspace);
     write_query(
         &workspace,
         "spring.repositories.kql",
@@ -49,10 +50,12 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     });
     assert_eq!(status["status"], "ok");
     assert_eq!(status["result"]["source_units"]["fresh"], 9);
-    assert!(status["result"]["workers_running"]
-        .as_array()
-        .expect("workers array")
-        .is_empty());
+    assert!(
+        status["result"]["workers_running"]
+            .as_array()
+            .expect("workers array")
+            .is_empty()
+    );
 
     let book_entity = measure("warm_symbols", || {
         run_json(
@@ -163,18 +166,78 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     let java_audit = measure("warm_java_symbols", || {
         run_json(
             &workspace,
-            ["--workspace", workspace.to_str().unwrap(), "symbols", "JavaBookAudit"],
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "symbols",
+                "JavaBookAudit",
+            ],
         )
     });
-    let java_audit_id = java_audit["result"]["symbols"][0]["id"].as_str().expect("JavaBookAudit id");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", java_audit_id])["status"], "ok");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "implementations", java_audit_id])["status"], "ok");
-    let audited = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "Audited"]);
-    let audited_id = audited["result"]["symbols"][0]["id"].as_str().expect("Audited id");
-    let java_selected = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "select", "--java-class", "--applies", audited_id]);
+    let java_audit_id = java_audit["result"]["symbols"][0]["id"]
+        .as_str()
+        .expect("JavaBookAudit id");
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "refs",
+                java_audit_id
+            ]
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "implementations",
+                java_audit_id
+            ]
+        )["status"],
+        "ok"
+    );
+    let audited = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "symbols",
+            "Audited",
+        ],
+    );
+    let audited_id = audited["result"]["symbols"][0]["id"]
+        .as_str()
+        .expect("Audited id");
+    let java_selected = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "select",
+            "--java-class",
+            "--applies",
+            audited_id,
+        ],
+    );
     assert_eq!(java_selected["symbol"]["name"], "JavaBookAuditController");
-    let controllers = run_json_lines(&workspace, ["--workspace", workspace.to_str().unwrap(), "query", "spring.controllers"]);
-    let controller_names = controllers.iter().map(|record| record["symbol"]["name"].as_str().expect("symbol name")).collect::<Vec<_>>();
+    let controllers = run_json_lines(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "query",
+            "spring.controllers",
+        ],
+    );
+    let controller_names = controllers
+        .iter()
+        .map(|record| record["symbol"]["name"].as_str().expect("symbol name"))
+        .collect::<Vec<_>>();
     assert!(controller_names.contains(&"BookController"));
     assert!(controller_names.contains(&"JavaBookAuditController"));
     let entities = run_json_lines(
@@ -219,8 +282,12 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
             &workspace,
             ["--workspace", workspace.to_str().unwrap(), "query", command],
         );
-        assert!(records.iter().any(|record| record["symbol"]["name"] == expected_name),
-            "{command} should select {expected_name}");
+        assert!(
+            records
+                .iter()
+                .any(|record| record["symbol"]["name"] == expected_name),
+            "{command} should select {expected_name}"
+        );
         let package = if command == "spring.boot.autoconfigurations" {
             "spring.boot"
         } else {
@@ -228,12 +295,46 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         };
         assert_eq!(records[0]["plan"]["packages"][0]["id"], package);
     }
-    let java_record = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "record"]);
-    let java_record_id = java_record["result"]["symbols"].as_array().expect("record symbols").iter()
+    let java_record = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "symbols",
+            "record",
+        ],
+    );
+    let java_record_id = java_record["result"]["symbols"]
+        .as_array()
+        .expect("record symbols")
+        .iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.book.JavaBookAudit.record")
-        .and_then(|symbol| symbol["id"].as_str()).expect("JavaBookAudit.record id");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "callers", java_record_id])["status"], "ok");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "type-at", "app/src/main/java/dev/kide/fixture/book/JavaBookAudit.java:22:19"])["status"], "ok");
+        .and_then(|symbol| symbol["id"].as_str())
+        .expect("JavaBookAudit.record id");
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "callers",
+                java_record_id
+            ]
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "type-at",
+                "app/src/main/java/dev/kide/fixture/book/JavaBookAudit.java:22:19"
+            ]
+        )["status"],
+        "ok"
+    );
 
     let entity_annotation = symbol["applied_symbols"]
         .as_array()
@@ -268,9 +369,11 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
             ],
         )
     });
-    assert!(text
-        .iter()
-        .any(|record| record["path"] == "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"));
+    assert!(
+        text.iter()
+            .any(|record| record["path"]
+                == "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt")
+    );
 
     let entity_file = workspace.join("app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt");
     fs::write(
@@ -293,8 +396,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
     });
     assert_eq!(
-        incremental["status"],
-        "ok",
+        incremental["status"], "ok",
         "incremental index result: {incremental}"
     );
     assert_eq!(incremental["analyzed"], 1);
@@ -309,6 +411,7 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     let directory = tempdir().expect("temporary workspace");
     let workspace = directory.path().join("java-semantic");
     copy_fixture(&java_fixture_root(), &workspace);
+    initialize_workspace(&workspace);
     write_query(
         &workspace,
         "api.implementations.kql",
@@ -324,20 +427,64 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(cold["analyzed"], 3);
     assert!(cold["worker_starts"].as_u64().unwrap_or_default() >= 1);
     assert!(cold["timing_millis"]["discovery"].is_number());
-    assert!(cold["timing_millis"]["source_worker"].as_u64().unwrap_or_default() > 0);
+    assert!(
+        cold["timing_millis"]["source_worker"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
     assert!(cold["timing_millis"]["source_commit"].is_number());
     assert!(peak_rss_kib > 0, "could not observe CLI RSS while indexing");
 
-    let status = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "status"]);
+    let status = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
     assert_eq!(status["result"]["source_units"]["fresh"], 3);
-    assert!(status["result"]["workers_running"].as_array().expect("workers array").is_empty());
+    assert!(
+        status["result"]["workers_running"]
+            .as_array()
+            .expect("workers array")
+            .is_empty()
+    );
 
-    let api = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "Api"]);
+    let api = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "symbols", "Api"],
+    );
     let api_symbol = api["result"]["symbols"][0].clone();
     let api_id = api_symbol["id"].as_str().expect("Api id");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "definition", api_id])["status"], "ok");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", api_id])["status"], "ok");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "implementations", api_id])["status"], "ok");
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "definition",
+                api_id
+            ]
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        run_json(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "refs", api_id]
+        )["status"],
+        "ok"
+    );
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "implementations",
+                api_id
+            ]
+        )["status"],
+        "ok"
+    );
     let implementations = run_json_lines(
         &workspace,
         [
@@ -349,22 +496,61 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
             &format!("api={api_id}"),
         ],
     );
-    assert!(implementations.iter().any(|record| {
-        record["symbol"]["qualified_name"] == "fixture.Impl"
-    }));
+    assert!(
+        implementations
+            .iter()
+            .any(|record| { record["symbol"]["qualified_name"] == "fixture.Impl" })
+    );
 
-    let name = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "name"]);
-    let api_name_id = name["result"]["symbols"].as_array().expect("name symbols").iter()
+    let name = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "symbols",
+            "name",
+        ],
+    );
+    let api_name_id = name["result"]["symbols"]
+        .as_array()
+        .expect("name symbols")
+        .iter()
         .find(|symbol| symbol["qualified_name"] == "fixture.Api.name")
         .and_then(|symbol| symbol["id"].as_str())
         .expect("Api.name id");
-    assert_eq!(run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "callers", api_name_id])["status"], "ok");
-    let type_at = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "type-at", "src/main/java/fixture/Use.java:4:18"]);
+    assert_eq!(
+        run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "callers",
+                api_name_id
+            ]
+        )["status"],
+        "ok"
+    );
+    let type_at = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "type-at",
+            "src/main/java/fixture/Use.java:4:18",
+        ],
+    );
     assert_eq!(type_at["status"], "ok");
     assert_eq!(type_at["result"]["ty"]["display"], "fixture.Api");
 
     let use_file = workspace.join("src/main/java/fixture/Use.java");
-    fs::write(&use_file, format!("{}\n// e2e body-only edit\n", fs::read_to_string(&use_file).expect("fixture source"))).expect("edits source");
+    fs::write(
+        &use_file,
+        format!(
+            "{}\n// e2e body-only edit\n",
+            fs::read_to_string(&use_file).expect("fixture source")
+        ),
+    )
+    .expect("edits source");
     let incremental = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
     assert_eq!(incremental["analyzed"], 1);
     assert_eq!(incremental["reused"], 2);
@@ -373,28 +559,68 @@ fn java_semantic_mvp_survives_cold_restarts_and_incremental_updates() {
 #[test]
 #[ignore = "requires the Kotlin worker distribution and KIDE_MAVEN_HOME; run Maven e2e"]
 fn maven_spring_crud_survives_cold_restarts_and_incremental_updates() {
-    assert!(std::env::var_os("KIDE_MAVEN_HOME").is_some(), "set KIDE_MAVEN_HOME for Maven e2e");
+    assert!(
+        std::env::var_os("KIDE_MAVEN_HOME").is_some(),
+        "set KIDE_MAVEN_HOME for Maven e2e"
+    );
     let directory = tempdir().expect("temporary workspace");
     let workspace = directory.path().join("maven-spring-boot-crud");
     copy_fixture(&maven_fixture_root(), &workspace);
+    initialize_workspace(&workspace);
 
     let cold = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
     assert_eq!(cold["status"], "ok", "cold index result: {cold}");
     assert_eq!(cold["analyzed"], 2);
 
-    let book = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "Book"]);
-    let book_id = book["result"]["symbols"].as_array().unwrap().iter()
+    let book = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "symbols",
+            "Book",
+        ],
+    );
+    let book_id = book["result"]["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|symbol| symbol["qualified_name"] == "dev.kide.fixture.domain.Book")
-        .and_then(|symbol| symbol["id"].as_str()).expect("Book symbol").to_owned();
-    let book_symbol = book["result"]["symbols"].as_array().unwrap().iter()
+        .and_then(|symbol| symbol["id"].as_str())
+        .expect("Book symbol")
+        .to_owned();
+    let book_symbol = book["result"]["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
         .find(|symbol| symbol["id"] == book_id)
         .expect("Book symbol record");
-    assert!(!book_symbol["applied_symbols"].as_array().expect("Book annotations").is_empty());
-    let repository = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "symbols", "BookRepository"]);
-    assert!(repository["result"]["symbols"].as_array().unwrap().iter().any(|symbol| {
-        symbol["qualified_name"] == "dev.kide.fixture.domain.BookRepository"
-    }));
-    let book_refs = run_json(&workspace, ["--workspace", workspace.to_str().unwrap(), "refs", &book_id]);
+    assert!(
+        !book_symbol["applied_symbols"]
+            .as_array()
+            .expect("Book annotations")
+            .is_empty()
+    );
+    let repository = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "symbols",
+            "BookRepository",
+        ],
+    );
+    assert!(
+        repository["result"]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| { symbol["qualified_name"] == "dev.kide.fixture.domain.BookRepository" })
+    );
+    let book_refs = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "refs", &book_id],
+    );
     assert_eq!(book_refs["status"], "ok", "Book refs result: {book_refs}");
 
     let unchanged = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
@@ -402,7 +628,14 @@ fn maven_spring_crud_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(unchanged["reused"], 2);
 
     let controller = workspace.join("app/src/main/java/dev/kide/fixture/app/BookController.java");
-    fs::write(&controller, format!("{}\n// Maven e2e edit\n", fs::read_to_string(&controller).unwrap())).unwrap();
+    fs::write(
+        &controller,
+        format!(
+            "{}\n// Maven e2e edit\n",
+            fs::read_to_string(&controller).unwrap()
+        ),
+    )
+    .unwrap();
     let incremental = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
     assert_eq!(incremental["analyzed"], 1);
     assert_eq!(incremental["reused"], 1);
@@ -424,7 +657,20 @@ fn java_fixture_root() -> std::path::PathBuf {
 }
 
 fn maven_fixture_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/maven-spring-boot-crud")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/maven-spring-boot-crud")
+}
+
+fn initialize_workspace(workspace: &Path) {
+    let initialized = run_json(
+        workspace,
+        [
+            "--workspace",
+            workspace.to_str().expect("workspace path"),
+            "init",
+        ],
+    );
+    assert_eq!(initialized["status"], "ok", "init result: {initialized}");
 }
 
 fn copy_fixture(source: &Path, destination: &Path) {
@@ -476,7 +722,12 @@ fn run_json<const N: usize>(workspace: &Path, args: [&str; N]) -> Value {
 fn run_json_measured<const N: usize>(workspace: &Path, args: [&str; N]) -> (Value, u128, u64) {
     let started = Instant::now();
     let (output, peak_rss_kib) = run_measured(workspace, args);
-    let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("CLI did not produce JSON: {error}; stderr={}", String::from_utf8_lossy(&output.stderr)));
+    let value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "CLI did not produce JSON: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     (value, started.elapsed().as_millis(), peak_rss_kib)
 }
 
@@ -490,9 +741,7 @@ fn run_json_lines<const N: usize>(workspace: &Path, args: [&str; N]) -> Vec<Valu
 }
 
 fn run<const N: usize>(workspace: &Path, args: [&str; N]) -> std::process::Output {
-    let output = command(workspace, args)
-        .output()
-        .expect("runs kide");
+    let output = command(workspace, args).output().expect("runs kide");
     assert!(
         output.status.success() || !output.stdout.is_empty(),
         "kide failed: {}",
@@ -502,14 +751,22 @@ fn run<const N: usize>(workspace: &Path, args: [&str; N]) -> std::process::Outpu
 }
 
 fn run_measured<const N: usize>(workspace: &Path, args: [&str; N]) -> (std::process::Output, u64) {
-    let mut child = command(workspace, args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("runs kide");
+    let mut child = command(workspace, args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("runs kide");
     let mut peak_rss_kib = 0;
     while child.try_wait().expect("polls kide").is_none() {
         peak_rss_kib = peak_rss_kib.max(process_tree_rss_kib(child.id()));
         thread::sleep(Duration::from_millis(20));
     }
     let output = child.wait_with_output().expect("collects kide output");
-    assert!(output.status.success() || !output.stdout.is_empty(), "kide failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success() || !output.stdout.is_empty(),
+        "kide failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     (output, peak_rss_kib)
 }
 
@@ -527,18 +784,30 @@ fn command<const N: usize>(workspace: &Path, args: [&str; N]) -> Command {
 
 fn process_tree_rss_kib(pid: u32) -> u64 {
     let mut pids = vec![pid];
-    let children = Command::new("pgrep").args(["-P", &pid.to_string()]).output().ok()
+    let children = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.lines().filter_map(|line| line.parse::<u32>().ok()).collect::<Vec<_>>())
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|line| line.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     pids.extend(children);
     pids.into_iter().map(process_rss_kib).sum()
 }
 
 fn process_rss_kib(pid: u32) -> u64 {
-    Command::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().ok()
+    Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|text| text.trim().parse().ok()).unwrap_or_default()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or_default()
 }
 
 fn gradle_installation() -> std::path::PathBuf {

@@ -6,10 +6,13 @@ use std::{
 
 use anyhow::{Result, bail};
 use kide_core::{
-    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, EffectiveConfiguration, IndexStore, WorkspaceDiscovery,
-    Provenance, QueryStatus, WorkerCapability, WorkerInstallation, WorkerLaunch, WorkerRegistry,
-    WorkerSupervisor, cache_catalog_artifact_with_metrics, collect_workspace_text,
-    index_batch_with_artifact_cache_and_provenance, index_selected_batches,
+    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION,
+    EffectiveConfiguration, IndexStore, ProjectManifestRequest, ProjectManifestResponse,
+    Provenance, QueryStatus, WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch,
+    WorkerMessage, WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
+    cache_catalog_artifact_with_metrics, collect_workspace_text,
+    index_batch_with_artifact_cache_provenance_and_execution_plan,
+    index_selected_batches_with_execution_plan,
 };
 
 pub(super) fn index(
@@ -27,9 +30,8 @@ pub(super) fn index(
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
     let configuration_input_records = discovery.configuration_input_records.clone();
-    let configuration_changes =
-        store.configuration_input_status(&configuration_input_records)?;
-    let sources = discovery.source_units;
+    let configuration_changes = store.configuration_input_status(&configuration_input_records)?;
+    let mut sources = discovery.source_units;
     if force {
         tracing::info!(target: "kide::cli", sources = sources.len(), "forcing source reanalysis");
         for source in &sources {
@@ -103,12 +105,30 @@ pub(super) fn index(
         );
         return Ok(QueryStatus::Ok);
     }
-    let registry = WorkerRegistry::new(vec![kotlin_worker_installation(
-        &discovery.root,
-        verbosity,
-    )?]);
+    let worker_installation = kotlin_worker_installation(&discovery.root, verbosity)?;
+    let resolved_plan = resolve_project_manifest(&worker_installation.launch)?;
+    let manifest = resolved_plan.manifest;
+    let execution_plan = resolved_plan.execution_plan;
+    if sources.iter().any(|source| {
+        !manifest
+            .components
+            .iter()
+            .any(|component| component.id == source.component)
+    }) {
+        bail!("resolved_manifest_does_not_cover_discovered_source_components");
+    }
+    for source in &mut sources {
+        source.context = manifest
+            .components
+            .iter()
+            .find(|component| component.id == source.component)
+            .expect("coverage checked above")
+            .configuration
+            .clone();
+    }
+    let registry = WorkerRegistry::new(vec![worker_installation]);
     let selection = registry.select_with_batch_limit(
-        &discovery.manifest,
+        &manifest,
         sources.clone(),
         &[WorkerCapability::FileAnalysisSnapshot],
         source_batch_limit()?,
@@ -139,9 +159,9 @@ pub(super) fn index(
         // Retain the cache-aware dependency catalog path for the common
         // single-backend workspace. Mixed workspaces use the global planner so
         // one batch cannot invalidate another language's source snapshots.
-        index_batch_with_artifact_cache_and_provenance(
+        index_batch_with_artifact_cache_provenance_and_execution_plan(
             &mut store,
-            &discovery.manifest,
+            &manifest,
             &sources,
             selection.batches[0].worker.installation.launch.clone(),
             &artifact_cache,
@@ -160,11 +180,26 @@ pub(super) fn index(
                     .backend_version
                     .clone(),
                 protocol_version: selection.batches[0].worker.capabilities.protocol_version,
-                analysis_options: discovery.manifest.fingerprint.clone(),
+                // JVM snapshots bind analysis options to their canonical
+                // component context. Compare that same owner identity on the
+                // next run; the workspace manifest remains the resolution
+                // barrier, not a per-file worker option.
+                analysis_options: sources
+                    .first()
+                    .expect("a selected batch has sources")
+                    .context
+                    .clone(),
             },
+            execution_plan,
         )?
     } else {
-        index_selected_batches(&mut store, &discovery.manifest, &sources, &selection)?
+        index_selected_batches_with_execution_plan(
+            &mut store,
+            &manifest,
+            &sources,
+            &selection,
+            execution_plan,
+        )?
     };
     let mut materialized_artifacts = Vec::new();
     if let Some(warm_limit) = warm_dependencies {
@@ -206,7 +241,7 @@ pub(super) fn index(
                 &mut store,
                 &mut worker,
                 &artifact_cache,
-                discovery.manifest.root.clone(),
+                manifest.root.clone(),
                 &descriptor.source_unit.id,
                 artifact_locator,
                 &staging,
@@ -496,6 +531,8 @@ pub(super) fn index(
             "schema_version": CANONICAL_SCHEMA_VERSION,
             "status": "ok",
             "freshness_strategy": configuration.freshness_strategy,
+            "worker_limits": configuration.workers,
+            "resolved_manifest": if verbosity > 1 { serde_json::to_value(&manifest)? } else { serde_json::Value::Null },
             "workspace": discovery.root,
             "reused": run.reused,
             "analyzed": run.analyzed,
@@ -524,6 +561,20 @@ pub(super) fn index(
     Ok(QueryStatus::Ok)
 }
 
+fn resolve_project_manifest(launch: &WorkerLaunch) -> Result<ProjectManifestResponse> {
+    let mut worker = WorkerSupervisor::new(launch.clone());
+    worker.handshake("index-build-resolution")?;
+    let response = worker.request(WorkerEnvelope::new(
+        "index-project-manifest",
+        WorkerMessage::ProjectManifestRequest(ProjectManifestRequest {
+            workspace_root: WorkspacePath::new("."),
+        }),
+    ))?;
+    match response.message {
+        WorkerMessage::ProjectManifestResponse(response) => Ok(response),
+        received => bail!("invalid_project_manifest_response={received:?}"),
+    }
+}
 
 /// Temporary external scheduling override. Workspace configuration will own
 /// this same policy once the config schema includes index execution limits.

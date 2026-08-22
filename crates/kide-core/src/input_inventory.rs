@@ -44,32 +44,60 @@ pub struct ConfigurationInputReconciliation {
 }
 
 pub(crate) const CONFIGURATION_FILE_NAMES: &[&str] = &[
-    "settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts",
-    "gradle.properties", "pom.xml", "Cargo.toml", "package.json", "package-lock.json",
-    "npm-shrinkwrap.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock",
-    ".yarnrc.yml", "bun.lock", "bun.lockb", ".npmrc",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.gradle",
+    "build.gradle.kts",
+    "gradle.properties",
+    "pom.xml",
+    "Cargo.toml",
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "yarn.lock",
+    ".yarnrc.yml",
+    "bun.lock",
+    "bun.lockb",
+    ".npmrc",
 ];
 
 pub(crate) fn is_configuration_input(root: &Path, path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| CONFIGURATION_FILE_NAMES.contains(&name))
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| CONFIGURATION_FILE_NAMES.contains(&name))
         || path.strip_prefix(root).ok().is_some_and(|relative| {
             relative == Path::new("gradle/wrapper/gradle-wrapper.properties")
                 || relative == Path::new(".kide/config.toml")
         })
 }
 
-pub(crate) fn component_scope(root: &Path, path: &Path, components: &[Component]) -> Vec<ComponentId> {
+pub(crate) fn component_scope(
+    root: &Path,
+    path: &Path,
+    components: &[Component],
+) -> Vec<ComponentId> {
     if path.parent() == Some(root)
         || path.strip_prefix(root).ok() == Some(Path::new(".kide/config.toml"))
     {
-        return components.iter().map(|component| component.id.clone()).collect();
+        return components
+            .iter()
+            .map(|component| component.id.clone())
+            .collect();
     }
-    let deepest = components.iter()
+    let deepest = components
+        .iter()
         .filter(|component| path.starts_with(root.join(component.root.as_str())))
         .map(|component| component.root.as_str().len())
-        .max().unwrap_or_default();
-    components.iter()
-        .filter(|component| path.starts_with(root.join(component.root.as_str())) && component.root.as_str().len() == deepest)
+        .max()
+        .unwrap_or_default();
+    components
+        .iter()
+        .filter(|component| {
+            path.starts_with(root.join(component.root.as_str()))
+                && component.root.as_str().len() == deepest
+        })
         .map(|component| component.id.clone())
         .collect()
 }
@@ -77,7 +105,10 @@ pub(crate) fn component_scope(root: &Path, path: &Path, components: &[Component]
 /// Content identity of one tracked input. The path is stored separately, so a
 /// rename is observable even when file contents are unchanged.
 pub(crate) fn fingerprint_file(path: &Path) -> Result<Fingerprint, io::Error> {
-    Ok(Fingerprint::new(format!("sha256:{:x}", Sha256::digest(fs::read(path)?))))
+    Ok(Fingerprint::new(format!(
+        "sha256:{:x}",
+        Sha256::digest(fs::read(path)?)
+    )))
 }
 
 pub fn reconcile_configuration_inputs(

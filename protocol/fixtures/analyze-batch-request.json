@@ -5,6 +5,11 @@
   "payload": {
     "workspace": "workspace:demo",
     "project_fingerprint": "sha256:project-model",
+    "execution_plan": {
+      "backend": "kide-kotlin-jvm",
+      "resolved_fingerprint": "sha256:project-model",
+      "payload": []
+    },
     "requested_facts": ["symbols", "occurrences", "references", "types"],
     "source_units": [
       {

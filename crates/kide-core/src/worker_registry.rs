@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::{
-    query_package::PackageCapability,
     BuildSystem, ComponentId, Language, ProjectManifest, SourceUnit, WorkerCapabilities,
     WorkerCapability, WorkerLaunch, WorkerSupervisor, WorkerSupervisorError,
+    query_package::PackageCapability,
 };
 
 /// Default for callers that have not yet supplied workspace scheduling policy.
@@ -155,7 +155,10 @@ impl WorkerRegistry {
         required: &[WorkerCapability],
         max_source_units_per_batch: usize,
     ) -> Result<WorkerSelection, WorkerRegistryError> {
-        assert!(max_source_units_per_batch > 0, "worker batch limit must be positive");
+        assert!(
+            max_source_units_per_batch > 0,
+            "worker batch limit must be positive"
+        );
         let discovered = self.discover()?;
         Ok(select_discovered_with_batch_limit(
             manifest,
@@ -189,7 +192,10 @@ pub fn select_discovered_with_batch_limit(
     mut workers: Vec<DiscoveredWorker>,
     max_source_units_per_batch: usize,
 ) -> WorkerSelection {
-    assert!(max_source_units_per_batch > 0, "worker batch limit must be positive");
+    assert!(
+        max_source_units_per_batch > 0,
+        "worker batch limit must be positive"
+    );
     sources.sort_by_key(|source| {
         (
             source.component.as_str().to_owned(),
@@ -236,14 +242,16 @@ pub fn select_discovered_with_batch_limit(
                     .all(|capability| worker.capabilities.capabilities.contains(capability))
         });
         match worker {
-            Some(worker) => source_units.chunks(max_source_units_per_batch).for_each(|chunk| {
-                selection.batches.push(WorkerBatch {
-                    worker: worker.clone(),
-                    component: component.clone(),
-                    language: language.clone(),
-                    source_units: chunk.to_vec(),
-                });
-            }),
+            Some(worker) => source_units
+                .chunks(max_source_units_per_batch)
+                .for_each(|chunk| {
+                    selection.batches.push(WorkerBatch {
+                        worker: worker.clone(),
+                        component: component.clone(),
+                        language: language.clone(),
+                        source_units: chunk.to_vec(),
+                    });
+                }),
             None => selection.unsupported.push(UnsupportedBatch {
                 component,
                 language,
@@ -263,11 +271,7 @@ pub fn negotiate_query_capabilities(
 ) -> Vec<QueryCapabilityNegotiation> {
     let mut requirements = requirements.to_vec();
     requirements.sort_by(|left, right| {
-        (&left.name, left.version, left.required).cmp(&(
-            &right.name,
-            right.version,
-            right.required,
-        ))
+        (&left.name, left.version, left.required).cmp(&(&right.name, right.version, right.required))
     });
     requirements
         .into_iter()
@@ -335,10 +339,9 @@ fn language_key(language: &Language) -> String {
 mod tests {
     use super::*;
     use crate::{
-        Component, Fingerprint, ProjectManifest, Provenance, SourceOrigin, SourceUnitId,
-        SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
-        SemanticQueryResultKind, WorkerIdentity, WorkspaceId, WorkspacePath,
-        WORKER_PROTOCOL_VERSION,
+        Component, Fingerprint, ProjectManifest, Provenance, SemanticQueryCapability,
+        SemanticQueryParameter, SemanticQueryParameterType, SemanticQueryResultKind, SourceOrigin,
+        SourceUnitId, WORKER_PROTOCOL_VERSION, WorkerIdentity, WorkspaceId, WorkspacePath,
     };
 
     fn source(component: &str, language: Language, path: &str) -> SourceUnit {
@@ -479,13 +482,23 @@ mod tests {
     fn shards_large_component_language_batches_deterministically() {
         let limit = 2;
         let sources = (0..(limit + 1))
-            .map(|index| source("gradle:kotlin", Language::Kotlin, &format!("src/File{index}.kt")))
+            .map(|index| {
+                source(
+                    "gradle:kotlin",
+                    Language::Kotlin,
+                    &format!("src/File{index}.kt"),
+                )
+            })
             .collect::<Vec<_>>();
         let selection = select_discovered_with_batch_limit(
             &manifest(),
             sources,
             &[WorkerCapability::FileAnalysisSnapshot],
-            vec![worker("kotlin", vec![Language::Kotlin], vec![BuildSystem::Gradle])],
+            vec![worker(
+                "kotlin",
+                vec![Language::Kotlin],
+                vec![BuildSystem::Gradle],
+            )],
             limit,
         );
 
@@ -493,17 +506,19 @@ mod tests {
         assert_eq!(selection.batches.len(), 2);
         assert_eq!(selection.batches[0].source_units.len(), limit);
         assert_eq!(selection.batches[1].source_units.len(), 1);
-        assert_eq!(selection.batches[0].source_units[0].path.as_str(), "src/File0.kt");
-        assert_eq!(selection.batches[1].source_units[0].path.as_str(), "src/File2.kt");
+        assert_eq!(
+            selection.batches[0].source_units[0].path.as_str(),
+            "src/File0.kt"
+        );
+        assert_eq!(
+            selection.batches[1].source_units[0].path.as_str(),
+            "src/File2.kt"
+        );
     }
 
     #[test]
     fn negotiates_versioned_package_capabilities_deterministically() {
-        let mut kotlin = worker(
-            "kotlin",
-            vec![Language::Kotlin],
-            vec![BuildSystem::Gradle],
-        );
+        let mut kotlin = worker("kotlin", vec![Language::Kotlin], vec![BuildSystem::Gradle]);
         kotlin.capabilities.semantic_query_capabilities = vec![
             SemanticQueryCapability {
                 name: "hierarchy.direct".to_owned(),
@@ -556,10 +571,7 @@ mod tests {
                     "hierarchy.direct",
                     QueryCapabilityStatus::IncompatibleVersion
                 ),
-                (
-                    "missing.optional",
-                    QueryCapabilityStatus::Missing
-                ),
+                ("missing.optional", QueryCapabilityStatus::Missing),
             ]
         );
         assert_eq!(negotiated[0].providers, vec!["kotlin"]);
@@ -569,17 +581,11 @@ mod tests {
             QueryCapabilitySupport::Unsupported
         );
         assert_eq!(
-            query_capability_support(&negotiate_query_capabilities(
-                &requirements[..1],
-                &[]
-            )),
+            query_capability_support(&negotiate_query_capabilities(&requirements[..1], &[])),
             QueryCapabilitySupport::Partial
         );
         assert_eq!(
-            query_capability_support(&negotiate_query_capabilities(
-                &requirements[2..],
-                &[kotlin]
-            )),
+            query_capability_support(&negotiate_query_capabilities(&requirements[2..], &[kotlin])),
             QueryCapabilitySupport::Complete
         );
     }

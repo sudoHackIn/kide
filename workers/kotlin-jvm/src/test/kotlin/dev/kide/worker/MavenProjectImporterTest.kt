@@ -139,6 +139,7 @@ class MavenProjectImporterTest {
                 sourceUnit(app, controllerSource),
             ),
             root,
+            contexts,
         ).map { it.jsonObject }
         assertTrue(
             JavaSemanticExtractor.artifactCandidates().any { it.path.fileName.toString().startsWith("spring-web-") },
@@ -150,7 +151,7 @@ class MavenProjectImporterTest {
         val controller = snapshots.single { snapshot ->
             snapshot["source_unit"]!!.jsonObject["path"]!!.jsonPrimitive.content.endsWith("BookController.java")
         }
-        val incrementalController = JavaSemanticExtractor.analyze(listOf(sourceUnit(app, controllerSource)), root)
+        val incrementalController = JavaSemanticExtractor.analyze(listOf(sourceUnit(app, controllerSource)), root, contexts)
             .single().jsonObject
 
         assertEquals(3, manifest["components"]!!.jsonArray.size)

@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    thread,
     time::Instant,
 };
 
@@ -10,9 +11,9 @@ use thiserror::Error;
 
 use crate::{
     AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError,
-    ArtifactBlobKey, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
-    ArtifactMaterializationRequest, FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore,
-    IndexStoreError, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
+    ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
+    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError,
+    OpaqueExecutionPlan, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
     WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
     WorkerSupervisor, WorkerSupervisorError, WorkspacePath, plan_invalidation,
 };
@@ -116,12 +117,42 @@ pub enum IndexOrchestratorError {
     InvalidResponse { received: Box<WorkerMessage> },
     #[error("no compatible worker for {count} source batch(es)")]
     UnsupportedBatches { count: usize },
+    #[error(
+        "execution plan from {backend} targets {actual:?}, but the resolved manifest is {expected:?}"
+    )]
+    ExecutionPlanManifestMismatch {
+        backend: String,
+        actual: Fingerprint,
+        expected: Fingerprint,
+    },
     #[error("worker {worker} no longer supports batch {component} ({language:?})")]
     WorkerNoLongerCompatible {
         worker: String,
         component: String,
         language: crate::Language,
     },
+    #[error("dependency discovery worker panicked")]
+    DependencyWorkerPanicked,
+    #[error(
+        "dependency descriptor for component {component} used context {actual:?}, expected resolved context {expected:?}"
+    )]
+    DependencyContextMismatch {
+        component: String,
+        expected: Fingerprint,
+        actual: Fingerprint,
+    },
+    #[error("dependency descriptor belongs to unknown resolved component {component}")]
+    UnknownDependencyComponent { component: String },
+}
+
+/// The dependency lane returns data only. The coordinator remains the sole
+/// owner of SQLite and publishes this catalog after the source lane commits.
+#[derive(Debug)]
+struct DependencyCatalog {
+    descriptors: Vec<ArtifactDescriptor>,
+    artifact_locators: BTreeMap<String, String>,
+    worker_starts: u64,
+    elapsed_millis: u128,
 }
 
 /// Applies one global invalidation plan, then runs each selected worker for
@@ -135,6 +166,29 @@ pub fn index_selected_batches(
     current: &[SourceUnit],
     selection: &WorkerSelection,
 ) -> Result<IndexRun, IndexOrchestratorError> {
+    index_selected_batches_with_execution_plan(
+        store,
+        manifest,
+        current,
+        selection,
+        OpaqueExecutionPlan {
+            backend: "legacy".into(),
+            resolved_fingerprint: manifest.fingerprint.clone(),
+            payload: Vec::new(),
+        },
+    )
+}
+
+/// Runs selected source batches while reusing the transient artifact plan
+/// emitted by the build-resolution worker.
+pub fn index_selected_batches_with_execution_plan(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    current: &[SourceUnit],
+    selection: &WorkerSelection,
+    execution_plan: OpaqueExecutionPlan,
+) -> Result<IndexRun, IndexOrchestratorError> {
+    validate_execution_plan(manifest, &execution_plan)?;
     if !selection.unsupported.is_empty() {
         return Err(IndexOrchestratorError::UnsupportedBatches {
             count: selection.unsupported.len(),
@@ -178,8 +232,25 @@ pub fn index_selected_batches(
     // A worker is disposable at the boundary of an index run, but reuse it
     // within that run. This keeps memory bounded while making a cold index
     // with many source shards pay the JVM startup cost only once per launch.
+    // Dependency discovery has no SQLite ownership and is independent of
+    // source snapshots once build resolution has completed. Start it before
+    // the source lane so its cold worker and resolver work overlap with
+    // source analysis. It currently uses one worker because the paginated
+    // protocol has no independent artifact partitions yet.
+    let dependency_lane = (!reanalyze.is_empty()).then(|| {
+        let launch = selection
+            .batches
+            .first()
+            .expect("a supported selection has at least one batch")
+            .worker
+            .installation
+            .launch
+            .clone();
+        let manifest = manifest.clone();
+        let dependency_plan = execution_plan.clone();
+        thread::spawn(move || discover_dependency_catalog(launch, manifest, dependency_plan))
+    });
     let mut supervisors = Vec::<(WorkerLaunch, WorkerSupervisor)>::new();
-    let mut artifact_candidates = BTreeMap::new();
     for (index, batch) in selection.batches.iter().enumerate() {
         let requested = batch
             .source_units
@@ -213,43 +284,22 @@ pub fn index_selected_batches(
             index,
             supervisor,
             &mut run,
-            &mut artifact_candidates,
+            &execution_plan,
         )?;
     }
-    if !reanalyze.is_empty() {
-        let catalog_batch = selection
-            .batches
-            .first()
-            .expect("a supported selection has at least one batch");
-        let supervisor = if let Some(position) = supervisors
-            .iter()
-            .position(|(launch, _)| launch == &catalog_batch.worker.installation.launch)
-        {
-            &mut supervisors[position].1
-        } else {
-            supervisors.push((
-                catalog_batch.worker.installation.launch.clone(),
-                WorkerSupervisor::new(catalog_batch.worker.installation.launch.clone()),
-            ));
-            let supervisor = &mut supervisors
-                .last_mut()
-                .expect("a supervisor was just added")
-                .1;
-            supervisor.handshake("index-dependency-catalog")?;
-            supervisor
-        };
-        let catalog_started = Instant::now();
-        run.artifact_locators = index_dependency_catalog(
-            store,
-            supervisor,
-            artifact_candidates.into_values().collect(),
-        )?;
-        run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
+    if let Some(dependency_lane) = dependency_lane {
+        let catalog = dependency_lane
+            .join()
+            .map_err(|_| IndexOrchestratorError::DependencyWorkerPanicked)??;
+        store.replace_artifact_descriptors(&catalog.descriptors)?;
+        run.artifact_locators = catalog.artifact_locators;
+        run.worker_starts += catalog.worker_starts;
+        run.dependency_catalog_millis += catalog.elapsed_millis;
     }
-    run.worker_starts = supervisors
+    run.worker_starts += supervisors
         .iter()
         .map(|(_, supervisor)| supervisor.start_count())
-        .sum();
+        .sum::<u64>();
     store.put_manifest(manifest)?;
     Ok(run)
 }
@@ -265,7 +315,7 @@ fn analyze_selected_batch(
     batch_index: usize,
     supervisor: &mut WorkerSupervisor,
     run: &mut IndexRun,
-    artifact_candidates: &mut BTreeMap<String, ArtifactCandidate>,
+    execution_plan: &OpaqueExecutionPlan,
 ) -> Result<(), IndexOrchestratorError> {
     // `is_running` also reaps an exited or idle process. A restarted worker
     // must handshake again before it can receive a batch.
@@ -299,6 +349,7 @@ fn analyze_selected_batch(
                 AnalysisFact::Types,
             ],
             source_units: requested.clone(),
+            execution_plan: execution_plan.clone(),
         }),
     ))?;
     let worker_millis = worker_started.elapsed().as_millis();
@@ -317,11 +368,6 @@ fn analyze_selected_batch(
             received: Box::new(response.message),
         });
     };
-    for candidate in &response.artifact_candidates {
-        artifact_candidates
-            .entry(candidate.locator.clone())
-            .or_insert_with(|| candidate.clone());
-    }
     let snapshots = validate_batch(&requested, response.snapshots)?;
     let mut worker_phases = BTreeMap::new();
     for timing in response.timings {
@@ -608,7 +654,15 @@ pub fn index_batch(
     current: &[SourceUnit],
     launch: WorkerLaunch,
 ) -> Result<IndexRun, IndexOrchestratorError> {
-    index_batch_with_optional_cache(store, manifest, current, launch, None, None)
+    index_batch_with_optional_cache(
+        store,
+        manifest,
+        current,
+        launch,
+        None,
+        None,
+        legacy_execution_plan(manifest),
+    )
 }
 
 /// Cache-aware dependency indexing. A hit loads stored graph sections without
@@ -629,6 +683,7 @@ pub fn index_batch_with_artifact_cache(
         launch,
         Some((cache, staging_directory)),
         None,
+        legacy_execution_plan(manifest),
     )
 }
 
@@ -648,7 +703,48 @@ pub fn index_batch_with_artifact_cache_and_provenance(
         launch,
         Some((cache, staging_directory)),
         Some(provenance),
+        legacy_execution_plan(manifest),
     )
+}
+
+/// Same as [`index_batch_with_artifact_cache_and_provenance`], but consumes
+/// the ephemeral dependency plan emitted by build resolution instead of
+/// asking the dependency lane to resolve Maven/Gradle again.
+#[allow(clippy::too_many_arguments)]
+pub fn index_batch_with_artifact_cache_provenance_and_execution_plan(
+    store: &mut IndexStore,
+    manifest: &ProjectManifest,
+    current: &[SourceUnit],
+    launch: WorkerLaunch,
+    cache: &ArtifactBlobCache,
+    staging_directory: &Path,
+    provenance: Provenance,
+    execution_plan: OpaqueExecutionPlan,
+) -> Result<IndexRun, IndexOrchestratorError> {
+    validate_execution_plan(manifest, &execution_plan)?;
+    index_batch_with_optional_cache(
+        store,
+        manifest,
+        current,
+        launch,
+        Some((cache, staging_directory)),
+        Some(provenance),
+        execution_plan,
+    )
+}
+
+fn validate_execution_plan(
+    manifest: &ProjectManifest,
+    execution_plan: &OpaqueExecutionPlan,
+) -> Result<(), IndexOrchestratorError> {
+    if execution_plan.resolved_fingerprint != manifest.fingerprint {
+        return Err(IndexOrchestratorError::ExecutionPlanManifestMismatch {
+            backend: execution_plan.backend.clone(),
+            actual: execution_plan.resolved_fingerprint.clone(),
+            expected: manifest.fingerprint.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn index_batch_with_optional_cache(
@@ -658,6 +754,7 @@ fn index_batch_with_optional_cache(
     launch: WorkerLaunch,
     _artifact_cache: Option<(&ArtifactBlobCache, &Path)>,
     current_provenance: Option<Provenance>,
+    execution_plan: OpaqueExecutionPlan,
 ) -> Result<IndexRun, IndexOrchestratorError> {
     let persisted_sources = store
         .source_units()?
@@ -716,6 +813,15 @@ fn index_batch_with_optional_cache(
         store.put_manifest(manifest)?;
         return Ok(run);
     }
+    // Artifact discovery starts from the resolved build model, not from a
+    // source batch response. Running it separately lets its resolver overlap
+    // the one source worker without handing SQLite to another thread.
+    let dependency_lane = thread::spawn({
+        let launch = launch.clone();
+        let manifest = manifest.clone();
+        let dependency_plan = execution_plan.clone();
+        move || discover_dependency_catalog(launch, manifest, dependency_plan)
+    });
     let mut supervisor = WorkerSupervisor::new(launch);
     tracing::debug!(target: "kide::index", "starting worker handshake");
     supervisor.handshake("index-handshake")?;
@@ -734,6 +840,7 @@ fn index_batch_with_optional_cache(
                 AnalysisFact::Types,
             ],
             source_units: reanalyze.clone(),
+            execution_plan: execution_plan.clone(),
         }),
     ))?;
     let worker_millis = worker_started.elapsed().as_millis();
@@ -761,13 +868,6 @@ fn index_batch_with_optional_cache(
         *worker_metrics.entry(metric.name.clone()).or_default() += metric.value;
         *run.worker_metrics.entry(metric.name).or_default() += metric.value;
     }
-    // Keep the same cold worker alive for its dependency catalog request;
-    // API-impact persistence below may perform SQLite work beyond its idle
-    // timeout but requires no worker state.
-    let catalog_started = Instant::now();
-    run.artifact_locators =
-        index_dependency_catalog(store, &mut supervisor, response.artifact_candidates.clone())?;
-    run.dependency_catalog_millis += catalog_started.elapsed().as_millis();
     let previous_inputs = store.analysis_inputs()?;
     let mut api_dependents = Vec::new();
     let mut entries = Vec::with_capacity(reanalyze.len());
@@ -798,6 +898,13 @@ fn index_batch_with_optional_cache(
         }
     }
     run.source_commit_millis += commit_started.elapsed().as_millis();
+    let catalog = dependency_lane
+        .join()
+        .map_err(|_| IndexOrchestratorError::DependencyWorkerPanicked)??;
+    store.replace_artifact_descriptors(&catalog.descriptors)?;
+    run.artifact_locators = catalog.artifact_locators;
+    run.worker_starts += catalog.worker_starts;
+    run.dependency_catalog_millis += catalog.elapsed_millis;
     let source = reanalyze.first().expect("non-empty batch");
     run.batches.push(BatchIndexMetrics {
         component: source.component.as_str().to_owned(),
@@ -815,22 +922,38 @@ fn index_batch_with_optional_cache(
         "source batch committed"
     );
     store.put_manifest(manifest)?;
-    run.worker_starts = supervisor.start_count();
+    run.worker_starts += supervisor.start_count();
     Ok(run)
 }
 
-fn index_dependency_catalog(
-    store: &mut IndexStore,
-    supervisor: &mut WorkerSupervisor,
-    artifact_candidates: Vec<ArtifactCandidate>,
-) -> Result<BTreeMap<String, String>, IndexOrchestratorError> {
+fn legacy_execution_plan(manifest: &ProjectManifest) -> OpaqueExecutionPlan {
+    OpaqueExecutionPlan {
+        backend: "legacy".into(),
+        resolved_fingerprint: manifest.fingerprint.clone(),
+        payload: Vec::new(),
+    }
+}
+
+fn discover_dependency_catalog(
+    launch: WorkerLaunch,
+    manifest: ProjectManifest,
+    execution_plan: OpaqueExecutionPlan,
+) -> Result<DependencyCatalog, IndexOrchestratorError> {
+    let started = Instant::now();
+    let mut supervisor = WorkerSupervisor::new(launch);
+    supervisor.handshake("index-dependency-catalog")?;
     tracing::info!(
         target: "kide::index",
-        candidates = artifact_candidates.len(),
+        backend = execution_plan.backend,
         "starting dependency catalog phase"
     );
     let mut cursor = None;
     let mut page = 0_u64;
+    let expected_contexts = manifest
+        .components
+        .into_iter()
+        .map(|component| (component.id.as_str().to_owned(), component.configuration))
+        .collect::<BTreeMap<_, _>>();
     let mut descriptors = BTreeMap::new();
     let mut artifact_locators = BTreeMap::new();
     loop {
@@ -840,7 +963,7 @@ fn index_dependency_catalog(
                 workspace_root: WorkspacePath::new("."),
                 max_artifacts: 64,
                 cursor: cursor.clone(),
-                artifact_candidates: artifact_candidates.clone(),
+                execution_plan: execution_plan.clone(),
             }),
         ))?;
         let WorkerMessage::ArtifactDiscoveryResponse(response) = response.message else {
@@ -849,6 +972,18 @@ fn index_dependency_catalog(
             });
         };
         for descriptor in response.artifacts {
+            let expected = expected_contexts
+                .get(descriptor.source_unit.component.as_str())
+                .ok_or_else(|| IndexOrchestratorError::UnknownDependencyComponent {
+                    component: descriptor.source_unit.component.as_str().to_owned(),
+                })?;
+            if descriptor.source_unit.context != *expected {
+                return Err(IndexOrchestratorError::DependencyContextMismatch {
+                    component: descriptor.source_unit.component.as_str().to_owned(),
+                    expected: expected.clone(),
+                    actual: descriptor.source_unit.context.clone(),
+                });
+            }
             descriptors.insert(descriptor.source_unit.id.as_str().to_owned(), descriptor);
         }
         for locator in response.artifact_locators {
@@ -861,15 +996,18 @@ fn index_dependency_catalog(
             }
             None => {
                 let artifacts = descriptors.len();
-                store
-                    .replace_artifact_descriptors(&descriptors.into_values().collect::<Vec<_>>())?;
                 tracing::info!(
                     target: "kide::index",
                     artifacts,
                     pages = page + 1,
                     "dependency catalog phase complete"
                 );
-                return Ok(artifact_locators);
+                return Ok(DependencyCatalog {
+                    descriptors: descriptors.into_values().collect(),
+                    artifact_locators,
+                    worker_starts: supervisor.start_count(),
+                    elapsed_millis: started.elapsed().as_millis(),
+                });
             }
         }
     }

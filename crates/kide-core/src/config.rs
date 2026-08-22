@@ -39,12 +39,35 @@ pub enum ArtifactCacheScope {
     Workspace,
 }
 
+/// Process budget shared by source and dependency analysis lanes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkerLimits {
+    /// Hard cap across all worker lanes.
+    pub max_total: usize,
+    /// Maximum concurrent dependency artifact workers.
+    pub dependency_workers: usize,
+    /// Maximum source-batch workers. This remains one until compilation
+    /// contexts are cacheable across JVM/K2 processes.
+    pub source_batch_workers: usize,
+}
+
+impl Default for WorkerLimits {
+    fn default() -> Self {
+        Self {
+            max_total: 4,
+            dependency_workers: 2,
+            source_batch_workers: 1,
+        }
+    }
+}
+
 /// Typed effective configuration passed from the CLI into Core services.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EffectiveConfiguration {
     pub schema_version: u32,
     pub freshness_strategy: FreshnessStrategy,
     pub artifact_cache_scope: ArtifactCacheScope,
+    pub workers: WorkerLimits,
 }
 
 impl Default for EffectiveConfiguration {
@@ -53,6 +76,7 @@ impl Default for EffectiveConfiguration {
             schema_version: CONFIGURATION_SCHEMA_VERSION,
             freshness_strategy: FreshnessStrategy::FreshOnly,
             artifact_cache_scope: ArtifactCacheScope::User,
+            workers: WorkerLimits::default(),
         }
     }
 }
@@ -78,6 +102,15 @@ struct ConfigurationLayer {
     schema_version: Option<u32>,
     freshness_strategy: Option<FreshnessStrategy>,
     artifact_cache_scope: Option<ArtifactCacheScope>,
+    workers: Option<WorkerLimitsLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerLimitsLayer {
+    max_total: Option<usize>,
+    dependency_workers: Option<usize>,
+    source_batch_workers: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -97,6 +130,10 @@ pub enum ConfigurationError {
         found: u32,
         supported: u32,
     },
+    #[error(
+        "invalid worker limits in `{path}`: source and dependency workers must be positive and their sum must not exceed max_total"
+    )]
+    InvalidWorkerLimits { path: PathBuf },
     #[error("failed to create KIDE configuration directory `{path}`: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
     #[error("KIDE configuration already exists at `{0}`")]
@@ -106,7 +143,7 @@ pub enum ConfigurationError {
 }
 
 /// The deterministic starter file written by `kide init`.
-pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n\n# Share immutable dependency blobs between this user's workspaces. Set to\n# \"workspace\" for an isolated, project-local cache. KIDE_ARTIFACT_CACHE_DIR\n# is an explicit override for CI and tests.\nartifact_cache_scope = \"user\"\n";
+pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n\n# Share immutable dependency blobs between this user's workspaces. Set to\n# \"workspace\" for an isolated, project-local cache. KIDE_ARTIFACT_CACHE_DIR\n# is an explicit override for CI and tests.\nartifact_cache_scope = \"user\"\n\n# Total process budget for future parallel analysis lanes. Source batches stay\n# sequential by default so one JVM/K2 worker can reuse its compilation context.\n[workers]\nmax_total = 4\ndependency_workers = 2\nsource_batch_workers = 1\n";
 
 /// The local ignore policy installed beside the checked-in configuration.
 /// Git applies this file automatically to `.kide` contents; root `.gitignore`
@@ -148,7 +185,10 @@ pub fn load_workspace_configuration(
 /// Resolves the artifact cache once, before command dispatch. The environment
 /// override is intentionally stronger than tracked configuration so CI and
 /// isolated tests never need to edit a checkout.
-pub fn artifact_cache_root(workspace_root: &Path, configuration: &EffectiveConfiguration) -> PathBuf {
+pub fn artifact_cache_root(
+    workspace_root: &Path,
+    configuration: &EffectiveConfiguration,
+) -> PathBuf {
     if let Some(root) = std::env::var_os("KIDE_ARTIFACT_CACHE_DIR") {
         return PathBuf::from(root);
     }
@@ -242,6 +282,27 @@ fn apply_layer(
     if let Some(scope) = layer.artifact_cache_scope {
         effective.artifact_cache_scope = scope;
     }
+    if let Some(workers) = layer.workers {
+        if let Some(value) = workers.max_total {
+            effective.workers.max_total = value;
+        }
+        if let Some(value) = workers.dependency_workers {
+            effective.workers.dependency_workers = value;
+        }
+        if let Some(value) = workers.source_batch_workers {
+            effective.workers.source_batch_workers = value;
+        }
+        if effective.workers.max_total == 0
+            || effective.workers.dependency_workers == 0
+            || effective.workers.source_batch_workers == 0
+            || effective.workers.dependency_workers + effective.workers.source_batch_workers
+                > effective.workers.max_total
+        {
+            return Err(ConfigurationError::InvalidWorkerLimits {
+                path: path.to_path_buf(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -279,7 +340,10 @@ mod tests {
             loaded.effective.freshness_strategy,
             FreshnessStrategy::FreshOnly
         );
-        assert_eq!(loaded.effective.artifact_cache_scope, ArtifactCacheScope::User);
+        assert_eq!(
+            loaded.effective.artifact_cache_scope,
+            ArtifactCacheScope::User
+        );
         assert_eq!(loaded.sources.global, Some(global));
         assert_eq!(
             loaded.sources.workspace,
@@ -339,5 +403,34 @@ mod tests {
             artifact_cache_root(workspace.path(), &configuration),
             workspace.path().join(".kide/artifact-cache")
         );
+    }
+
+    #[test]
+    fn worker_limits_layer_and_validate_as_one_shared_budget() {
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("global.toml"),
+            "[workers]\nmax_total = 6\ndependency_workers = 3\nsource_batch_workers = 1\n",
+        )
+        .unwrap();
+        let loaded = load_configuration(
+            workspace.path(),
+            Some(&workspace.path().join("global.toml")),
+        )
+        .unwrap();
+        assert_eq!(loaded.effective.workers.max_total, 6);
+        assert_eq!(loaded.effective.workers.dependency_workers, 3);
+        fs::write(
+            workspace.path().join("invalid.toml"),
+            "[workers]\nmax_total = 2\ndependency_workers = 2\nsource_batch_workers = 1\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load_configuration(
+                workspace.path(),
+                Some(&workspace.path().join("invalid.toml"))
+            ),
+            Err(ConfigurationError::InvalidWorkerLimits { .. })
+        ));
     }
 }

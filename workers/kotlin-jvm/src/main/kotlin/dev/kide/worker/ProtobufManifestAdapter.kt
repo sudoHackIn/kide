@@ -93,9 +93,10 @@ internal object ProtobufManifestAdapter {
                 .setFromComponentId(edge["from"]!!.jsonPrimitive.content)
                 .setScope(edge["scope"]!!.jsonPrimitive.content)
                 .apply {
-                    when (edge["target_kind"]!!.jsonPrimitive.content) {
-                        "component" -> setComponentId(edge["component"]!!.jsonPrimitive.content)
-                        "artifact" -> setArtifactFingerprint(edge["content"]!!.jsonPrimitive.content)
+                    val target = edge["target"]?.jsonObject ?: edge
+                    when (target["target_kind"]!!.jsonPrimitive.content) {
+                        "component" -> setComponentId(target["component"]!!.jsonPrimitive.content)
+                        "artifact" -> setArtifactFingerprint(target["content"]!!.jsonPrimitive.content)
                         else -> error("unsupported dependency target kind")
                     }
                 }.build()

@@ -1,12 +1,12 @@
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 
 use kide_core::{
-    execute_semantic_capability, materialize_artifact, plan_semantic_capability, AnalysisFact,
-    AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, BuildSystem, ComponentId,
-    DiscoveredWorker, Fingerprint, Language, SemanticCapabilityError, SemanticQueryBudget,
-    SemanticQueryResponseState, SourceOrigin, SourceUnit, SourceUnitId, WorkerEnvelope,
-    WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry, WorkerSupervisor,
-    WorkerSupervisorError, WorkspaceId, WorkspacePath,
+    AnalysisFact, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactDescriptor, BuildSystem,
+    ComponentId, DiscoveredWorker, Fingerprint, Language, OpaqueExecutionPlan,
+    SemanticCapabilityError, SemanticQueryBudget, SemanticQueryResponseState, SourceOrigin,
+    SourceUnit, SourceUnitId, WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage,
+    WorkerRegistry, WorkerSupervisor, WorkerSupervisorError, WorkspaceId, WorkspacePath,
+    execute_semantic_capability, materialize_artifact, plan_semantic_capability,
 };
 use tempfile::tempdir;
 
@@ -251,6 +251,11 @@ fn batch(request_id: &str, count: usize) -> WorkerEnvelope {
         WorkerMessage::AnalyzeBatchRequest(AnalyzeBatchRequest {
             workspace: WorkspaceId::new("workspace:fixture"),
             project_fingerprint: Fingerprint::new("sha256:project"),
+            execution_plan: OpaqueExecutionPlan {
+                backend: "kide-fixture-worker".to_owned(),
+                resolved_fingerprint: Fingerprint::new("sha256:project"),
+                payload: vec![1],
+            },
             requested_facts: vec![AnalysisFact::Symbols],
             source_units: (0..count).map(source_unit).collect(),
         }),

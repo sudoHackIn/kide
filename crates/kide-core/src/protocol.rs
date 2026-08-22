@@ -149,6 +149,16 @@ pub struct ProjectManifestRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectManifestResponse {
     pub manifest: ProjectManifest,
+    pub execution_plan: OpaqueExecutionPlan,
+}
+
+/// Backend-owned, run-local execution inputs. Core may compare the owner and
+/// resolved fingerprint, but must never inspect or persist `payload`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpaqueExecutionPlan {
+    pub backend: String,
+    pub resolved_fingerprint: Fingerprint,
+    pub payload: Vec<u8>,
 }
 
 /// Facts requested from a language worker for every source unit in a batch.
@@ -170,6 +180,7 @@ pub struct AnalyzeBatchRequest {
     pub project_fingerprint: Fingerprint,
     pub requested_facts: Vec<AnalysisFact>,
     pub source_units: Vec<SourceUnit>,
+    pub execution_plan: OpaqueExecutionPlan,
 }
 
 /// A complete replacement fact set for exactly one source-unit content snapshot.
@@ -281,8 +292,7 @@ pub struct ArtifactDiscoveryRequest {
     pub workspace_root: WorkspacePath,
     pub max_artifacts: u32,
     pub cursor: Option<String>,
-    #[serde(default)]
-    pub artifact_candidates: Vec<ArtifactCandidate>,
+    pub execution_plan: OpaqueExecutionPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

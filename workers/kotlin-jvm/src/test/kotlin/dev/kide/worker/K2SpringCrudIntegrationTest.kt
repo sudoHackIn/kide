@@ -16,8 +16,8 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val contexts = GradleProjectImporter.kotlinCompilationContexts(root)
 
-        assertEquals(setOf("domain"), contexts.getValue("gradle::app:main").projectDependencyModuleNames)
-        assertEquals(":domain", contexts.getValue("gradle::domain:main").gradlePath)
+        assertEquals(setOf("domain"), contexts.getValue("gradle:app:main").projectDependencyModuleNames)
+        assertEquals(":domain", contexts.getValue("gradle:domain:main").gradlePath)
     }
 
     @Test
@@ -47,12 +47,12 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val payload = buildJsonObject {
             put("source_units", buildJsonArray {
-                add(sourceUnit("gradle::domain:main", "domain/src/main/kotlin/dev/kide/fixture/domain/Book.kt"))
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookSummary.kt"))
+                add(sourceUnit("gradle:domain:main", "domain/src/main/kotlin/dev/kide/fixture/domain/Book.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookSummary.kt"))
             })
         }
 
-        val snapshots = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
+        val snapshots = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
         val domain = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("domain/Book.kt") }
         val app = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookSummary.kt") }
         val constructor = domain["symbols"]!!.jsonArray
@@ -74,7 +74,7 @@ class K2SpringCrudIntegrationTest {
             })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val references = snapshot["references"]!!.jsonArray.map { it.jsonObject }
         assertTrue(
             references.any { reference -> reference["target"]!!.toString().contains("jvm:sha256:") },
@@ -87,12 +87,12 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val payload = buildJsonObject {
             put("source_units", buildJsonArray {
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
             })
         }
 
-        val snapshots = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
+        val snapshots = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
         val entity = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookEntity.kt") }
         val controller = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookController.kt") }
         val entityId = entity["symbols"]!!.jsonArray
@@ -111,11 +111,11 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val payload = buildJsonObject {
             put("source_units", buildJsonArray {
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookController.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/book/BookEntity.kt"))
             })
         }
-        val snapshots = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
+        val snapshots = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.map { it.jsonObject }
         val controller = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookController.kt") }
         val entity = snapshots.single { it["source_unit"]!!.jsonObject["path"]!!.toString().contains("BookEntity.kt") }
 
@@ -134,10 +134,10 @@ class K2SpringCrudIntegrationTest {
         val root = Path.of(System.getProperty("user.dir"), "..", "..", "fixtures", "spring-boot-crud").normalize()
         val payload = buildJsonObject {
             put("source_units", buildJsonArray {
-                add(sourceUnit("gradle::app:main", "app/src/main/kotlin/dev/kide/fixture/FeatureConfiguration.kt"))
+                add(sourceUnit("gradle:app:main", "app/src/main/kotlin/dev/kide/fixture/FeatureConfiguration.kt"))
             })
         }
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val applications = snapshot["applications"]!!.jsonArray.map { it.jsonObject }
         val outer = applications.single { it["target"]!!.toString().contains("ConditionalOnProperty") }
         assertTrue(outer["arguments"]!!.jsonArray.any { argument ->
@@ -170,4 +170,11 @@ class K2SpringCrudIntegrationTest {
         put("content", "fixture")
         put("context", "fixture")
     }
+
+    private fun executionPlan(root: Path) = ExecutionPlan(
+        manifest = buildJsonObject { put("fingerprint", "fixture") },
+        artifacts = emptyList(),
+        javaContexts = emptyList(),
+        kotlinContexts = GradleProjectImporter.kotlinCompilationContexts(root),
+    )
 }

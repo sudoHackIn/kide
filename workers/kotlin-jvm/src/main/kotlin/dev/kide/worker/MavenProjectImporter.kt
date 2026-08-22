@@ -17,6 +17,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.apache.maven.model.Model
 import org.apache.maven.model.Plugin
@@ -126,12 +128,30 @@ internal object MavenProjectImporter {
         val maven = selectMaven(root, environment)
         val modules = effectiveReactor(root, canonicalPath(root, root.resolve("pom.xml"), "Maven workspace POM"), maven, environment)
         val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        val resolutions = modules.associateWith { module ->
+            MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates)
+        }
+        val classpath = resolutions.mapValues { (_, resolution) ->
+            resolution.artifacts.map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }
+                .distinct()
+                .sorted()
+        }
+        val contexts = modules.associate { module ->
+            componentId(root, module) to component(root, module, classpath[module].orEmpty())
+                .jsonObject["configuration"]!!.jsonPrimitive.content
+        }
         return modules.flatMap { module ->
             if (module.model.packaging == "pom") return@flatMap emptyList()
             val component = componentId(root, module)
-            val context = fingerprint(listOf(Files.readAllBytes(module.pom)))
-            MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates).artifacts
-                .map { artifact -> ResolvedArtifact(artifact.path, component, context, artifact.coordinate, artifact.version) }
+            resolutions.getValue(module).artifacts.map { artifact ->
+                ResolvedArtifact(
+                    artifact.path,
+                    component,
+                    contexts.getValue(component),
+                    artifact.coordinate,
+                    artifact.version,
+                )
+            }
         }.distinctBy { it.path.toAbsolutePath().normalize() }.sortedBy { it.path.toString() }
     }
 
@@ -176,6 +196,7 @@ internal object MavenProjectImporter {
             listOf(
                 Files.readAllBytes(module.pom),
                 sourceSets.joinToString("\n").encodeToByteArray(),
+                classpath.joinToString("\n").encodeToByteArray(),
             ),
         )
         val relative = workspacePath(root, module.directory)

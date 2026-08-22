@@ -23,7 +23,7 @@ class KotlinStructuralBatchTest {
             })
         }
 
-        val result = structuralBatch(payload, root)
+        val result = structuralBatch(payload, root, executionPlan(root))
 
         assertEquals(2, result.jsonObject["snapshots"]!!.jsonArray.size)
         val use = result.jsonObject["snapshots"]!!.jsonArray
@@ -49,7 +49,7 @@ class KotlinStructuralBatchTest {
             put("source_units", buildJsonArray { add(sourceUnit("Overload.kt")) })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
 
         val call = snapshot["calls"]!!.jsonArray.single().jsonObject
         val expected = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }.single { symbol ->
@@ -74,7 +74,7 @@ class KotlinStructuralBatchTest {
             put("source_units", buildJsonArray { add(sourceUnit("Hierarchy.kt")) })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
         val child = symbols.single { it["name"]!!.toString().contains("Child") }["id"]!!.toString()
         val base = symbols.single { it["name"]!!.toString().contains("Base") }["id"]!!.toString()
@@ -102,7 +102,7 @@ class KotlinStructuralBatchTest {
             put("source_units", buildJsonArray { add(sourceUnit("Receivers.kt")) })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
         val decorate = symbols.single { it["name"]!!.toString().contains("decorate") }["id"]!!.toString()
         val suffix = symbols.single { it["name"]!!.toString().contains("suffix") }["id"]!!.toString()
@@ -126,7 +126,7 @@ class KotlinStructuralBatchTest {
             put("source_units", buildJsonArray { add(sourceUnit("Overrides.kt")) })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
         val methods = symbols.filter { it["name"]!!.toString().contains("process") }
         val parentMethod = methods.single { it["qualified_name"]!!.toString().contains("Parent.process") }["id"]!!.toString()
@@ -153,7 +153,7 @@ class KotlinStructuralBatchTest {
             put("source_units", buildJsonArray { add(sourceUnit("GenericAlias.kt")) })
         }
 
-        val snapshot = structuralBatch(payload, root).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
+        val snapshot = structuralBatch(payload, root, executionPlan(root)).jsonObject["snapshots"]!!.jsonArray.single().jsonObject
         val symbols = snapshot["symbols"]!!.jsonArray.map { it.jsonObject }
         val echo = symbols.single { it["name"]!!.toString().contains("echo") }["id"]!!.toString()
         val constructor = symbols.single { it["kind"]!!.toString().contains("constructor") }["id"]!!.toString()
@@ -171,4 +171,11 @@ class KotlinStructuralBatchTest {
         put("content", "sha256:test")
         put("context", "sha256:context")
     }
+
+    private fun executionPlan(root: java.nio.file.Path) = ExecutionPlan(
+        manifest = buildJsonObject { put("fingerprint", "sha256:test") },
+        artifacts = emptyList(),
+        javaContexts = emptyList(),
+        kotlinContexts = emptyMap(),
+    )
 }

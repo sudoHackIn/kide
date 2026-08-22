@@ -105,6 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some("fixture-page-1") => (vec![second_descriptor()], None),
                         Some(_) => continue,
                     }
+                } else if mode == "planned" && !request.execution_plan.payload.is_empty() {
+                    (vec![descriptor()], None)
                 } else {
                     (Vec::new(), None)
                 };
@@ -125,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             language: "java".into(),
                             origin: "dependency".into(),
                             content_fingerprint: "sha256:fixture-artifact".into(),
-                            context_fingerprint: "sha256:fixture-context".into(),
+                            context_fingerprint: "sha256:project".into(),
                         }),
                         provenances: vec![artifact_proto::ArtifactProvenance {
                             backend: "kide-fixture-worker".into(),
@@ -206,7 +208,7 @@ fn descriptor() -> ArtifactDescriptor {
             language: Language::Java,
             origin: SourceOrigin::Dependency,
             content: kide_core::Fingerprint::new("sha256:fixture-artifact"),
-            context: kide_core::Fingerprint::new("sha256:fixture-context"),
+            context: kide_core::Fingerprint::new("sha256:project"),
         },
         provenance: provenance(),
         resolved_identity: None,

@@ -144,8 +144,8 @@ pub(crate) use output::{exit_code, print_response};
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use clap::{CommandFactory, Parser};
+    use std::path::Path;
 
     use super::input::{target_from_pipe_text, target_from_symbols};
     use super::navigation::{
@@ -310,15 +310,31 @@ mod tests {
             .expect("snapshot");
         drop(store);
         assert_eq!(
-            callers(&context(workspace.path()), target.as_str().to_owned(), false).unwrap(),
+            callers(
+                &context(workspace.path()),
+                target.as_str().to_owned(),
+                false
+            )
+            .unwrap(),
             kide_core::QueryStatus::Ok
         );
         assert_eq!(
-            implementations(&context(workspace.path()), target.as_str().to_owned(), false, false).unwrap(),
+            implementations(
+                &context(workspace.path()),
+                target.as_str().to_owned(),
+                false,
+                false
+            )
+            .unwrap(),
             kide_core::QueryStatus::NoResult
         );
         assert_eq!(
-            type_at(&context(workspace.path()), "src/Main.kt:1:16".to_owned(), false).unwrap(),
+            type_at(
+                &context(workspace.path()),
+                "src/Main.kt:1:16".to_owned(),
+                false
+            )
+            .unwrap(),
             kide_core::QueryStatus::Ok
         );
     }
@@ -412,15 +428,20 @@ mod tests {
                 &workspace.path().join(".kide/artifact-cache"),
                 &target,
             )
-                .expect("cached hierarchy")
-                .into_iter()
-                .map(|symbol| symbol.id)
-                .collect::<Vec<_>>(),
+            .expect("cached hierarchy")
+            .into_iter()
+            .map(|symbol| symbol.id)
+            .collect::<Vec<_>>(),
             vec![implementation]
         );
         assert_eq!(
-            implementations(&context(workspace.path()), target.as_str().into(), false, false)
-                .expect("CLI fallback"),
+            implementations(
+                &context(workspace.path()),
+                target.as_str().into(),
+                false,
+                false
+            )
+            .expect("CLI fallback"),
             kide_core::QueryStatus::Ok
         );
     }

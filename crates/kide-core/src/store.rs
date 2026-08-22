@@ -10,16 +10,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::{
-    AnalysisInput, ApplicationValue, ArtifactDescriptor, ByteRange, CallEdge, ComponentId,
-    ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord, FileAnalysisSnapshot,
-    Fingerprint, HierarchyEdge, LexicalMatch, ProjectManifest, Provenance, ReferenceEdge,
-    SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
-    WorkspacePath, ArtifactBlobKey, ResolvedDependencyIdentity, INDEX_FORMAT_VERSION,
-    WORKER_PROTOCOL_VERSION, reconcile_configuration_inputs,
+    AnalysisInput, ApplicationValue, ArtifactBlobKey, ArtifactDescriptor, ByteRange, CallEdge,
+    ComponentId, ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord,
+    FileAnalysisSnapshot, Fingerprint, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
+    ProjectManifest, Provenance, ReferenceEdge, ResolvedDependencyIdentity, SourceOccurrence,
+    SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
+    WORKER_PROTOCOL_VERSION, WorkspacePath, reconcile_configuration_inputs,
 };
 
 const MIGRATION_1: &str = r#"
@@ -717,7 +717,12 @@ impl IndexStore {
                byte_length = excluded.byte_length,
                accessed_at = CURRENT_TIMESTAMP
              WHERE artifact_blob_catalog.identity_json = excluded.identity_json",
-            params![blob_key.as_str(), identity_json, i64::try_from(byte_length).map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: byte_length })?],
+            params![
+                blob_key.as_str(),
+                identity_json,
+                i64::try_from(byte_length)
+                    .map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: byte_length })?
+            ],
         )?;
         if inserted == 0 {
             return Err(IndexStoreError::ArtifactBlobIdentityMismatch {
@@ -752,13 +757,15 @@ impl IndexStore {
                     let identity: String = row.get(1)?;
                     Ok((
                         Fingerprint::new(row.get::<_, String>(0)?),
-                        serde_json::from_str::<ResolvedDependencyIdentity>(&identity).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                identity.len(),
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?,
+                        serde_json::from_str::<ResolvedDependencyIdentity>(&identity).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    identity.len(),
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?,
                         row.get::<_, Option<i64>>(2)?,
                     ))
                 },
@@ -769,7 +776,10 @@ impl IndexStore {
                     blob_key,
                     identity,
                     byte_length: byte_length
-                        .map(|value| u64::try_from(value).map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: 0 }))
+                        .map(|value| {
+                            u64::try_from(value)
+                                .map_err(|_| IndexStoreError::ByteOffsetOutOfRange { value: 0 })
+                        })
                         .transpose()?,
                 })
             })
@@ -783,20 +793,31 @@ impl IndexStore {
         &mut self,
         cache: &crate::ArtifactBlobCache,
     ) -> Result<usize, IndexStoreError> {
-        let references = self.connection.prepare(
-            "SELECT reference.source_unit_id, catalog.identity_json
+        let references = self
+            .connection
+            .prepare(
+                "SELECT reference.source_unit_id, catalog.identity_json
              FROM project_artifact_blob_refs AS reference
              JOIN artifact_blob_catalog AS catalog USING (blob_key)",
-        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        let missing = references.into_iter().filter_map(|(source_unit, identity)| {
-            let identity = serde_json::from_str::<ResolvedDependencyIdentity>(&identity).ok()?;
-            match cache.open_blob(&ArtifactBlobKey::from_identity(identity)) {
-                Ok(Some(_)) => None,
-                Ok(None) | Err(crate::ArtifactBlobCacheError::InvalidHeader) => Some(source_unit),
-                Err(_) => None,
-            }
-        }).collect::<Vec<_>>();
+        let missing = references
+            .into_iter()
+            .filter_map(|(source_unit, identity)| {
+                let identity =
+                    serde_json::from_str::<ResolvedDependencyIdentity>(&identity).ok()?;
+                match cache.open_blob(&ArtifactBlobKey::from_identity(identity)) {
+                    Ok(Some(_)) => None,
+                    Ok(None) | Err(crate::ArtifactBlobCacheError::InvalidHeader) => {
+                        Some(source_unit)
+                    }
+                    Err(_) => None,
+                }
+            })
+            .collect::<Vec<_>>();
         let transaction = self.connection.transaction()?;
         for source_unit in &missing {
             transaction.execute(
@@ -1767,11 +1788,11 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        selector::{select, LanguageView, Selector, SelectorPredicate, SelectorState},
         BackendKey, ByteRange, CallEdge, Completeness, Component, ComponentId, DiagnosticSeverity,
         Fingerprint, Freshness, HierarchyEdge, Language, OccurrenceKind, Precision,
         ProjectManifest, Provenance, SourceOccurrence, SourceOrigin, SourceRange, SymbolKind,
         WorkspaceId, WorkspacePath,
+        selector::{LanguageView, Selector, SelectorPredicate, SelectorState, select},
     };
 
     use super::*;
@@ -1786,7 +1807,10 @@ mod tests {
             components: vec![ComponentId::new("maven:root:main")],
         }];
         let initial = store.replace_configuration_inputs(&first).unwrap();
-        assert_eq!(initial.inputs[0].state, crate::ConfigurationInputState::Added);
+        assert_eq!(
+            initial.inputs[0].state,
+            crate::ConfigurationInputState::Added
+        );
         assert_eq!(store.configuration_inputs().unwrap(), first);
 
         let second = vec![ConfigurationInput {
@@ -1808,7 +1832,10 @@ mod tests {
         );
         assert_eq!(
             changed.affected_components,
-            vec![ComponentId::new("maven:root:main"), ComponentId::new("npm:root:main")]
+            vec![
+                ComponentId::new("maven:root:main"),
+                ComponentId::new("npm:root:main")
+            ]
         );
     }
 
@@ -1879,13 +1906,22 @@ mod tests {
     #[test]
     fn batch_replace_rolls_back_when_any_snapshot_is_invalid() {
         let directory = tempdir().expect("temporary index directory");
-        let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+        let mut store =
+            IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
         let first = source_unit("sha256:first");
-        let second = SourceUnit { id: SourceUnitId::new("fixture:second"), path: WorkspacePath::new("src/Second.java"), ..first.clone() };
+        let second = SourceUnit {
+            id: SourceUnitId::new("fixture:second"),
+            path: WorkspacePath::new("src/Second.java"),
+            ..first.clone()
+        };
         let valid = snapshot(first.clone());
         let invalid = snapshot(first.clone());
 
-        assert!(store.replace_snapshots_batch(&[(&first, &valid), (&second, &invalid)]).is_err());
+        assert!(
+            store
+                .replace_snapshots_batch(&[(&first, &valid), (&second, &invalid)])
+                .is_err()
+        );
         assert!(store.source_unit(&first.id).expect("reads store").is_none());
     }
 
@@ -2022,10 +2058,12 @@ mod tests {
         );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
-        assert!(store
-            .symbols_named("PaymentService")
-            .expect("reads facts")
-            .is_empty());
+        assert!(
+            store
+                .symbols_named("PaymentService")
+                .expect("reads facts")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2162,10 +2200,12 @@ mod tests {
                 .expect("uses applied-symbol posting"),
             matching.symbols
         );
-        assert!(store
-            .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
-            .expect("empty posting")
-            .is_empty());
+        assert!(
+            store
+                .symbols_with_applied_symbol(&SymbolId::new("jvm:missing.Annotation"))
+                .expect("empty posting")
+                .is_empty()
+        );
         let selected = select(
             &store,
             &Selector {
@@ -2299,25 +2339,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![dependency.id.clone()]
         );
-        assert!(store
-            .artifact_candidates_with_qualified_name("jakarta.persistence.Missing")
-            .expect("reads empty candidate set")
-            .is_empty());
-        assert!(store
-            .source_unit(&dependency.id)
-            .expect("does not materialize graph")
-            .is_none());
+        assert!(
+            store
+                .artifact_candidates_with_qualified_name("jakarta.persistence.Missing")
+                .expect("reads empty candidate set")
+                .is_empty()
+        );
+        assert!(
+            store
+                .source_unit(&dependency.id)
+                .expect("does not materialize graph")
+                .is_none()
+        );
         store
             .replace_artifact_descriptors(&[])
             .expect("atomically replaces catalog");
-        assert!(store
-            .artifact_candidates_with_qualified_name("jakarta.persistence.Entity")
-            .expect("removes stale locator")
-            .is_empty());
-        assert!(store
-            .artifact_descriptors()
-            .expect("reads replaced catalog")
-            .is_empty());
+        assert!(
+            store
+                .artifact_candidates_with_qualified_name("jakarta.persistence.Entity")
+                .expect("removes stale locator")
+                .is_empty()
+        );
+        assert!(
+            store
+                .artifact_descriptors()
+                .expect("reads replaced catalog")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2360,10 +2408,12 @@ mod tests {
                 .expect("reconciles missing blob"),
             1
         );
-        assert!(store
-            .artifact_blob_for(&source.id)
-            .expect("reads reconciled catalog")
-            .is_none());
+        assert!(
+            store
+                .artifact_blob_for(&source.id)
+                .expect("reads reconciled catalog")
+                .is_none()
+        );
     }
 
     fn source_unit(content: &str) -> SourceUnit {

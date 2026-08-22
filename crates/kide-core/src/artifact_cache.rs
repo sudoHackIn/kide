@@ -362,12 +362,16 @@ mod tests {
         let second = ArtifactBlobCache::open(directory.path()).expect("opens second cache");
         let key = key();
 
-        assert!(first
-            .publish(&key, b"opaque binary facts")
-            .expect("publishes"));
-        assert!(!second
-            .publish(&key, b"different payload")
-            .expect("reuses existing"));
+        assert!(
+            first
+                .publish(&key, b"opaque binary facts")
+                .expect("publishes")
+        );
+        assert!(
+            !second
+                .publish(&key, b"different payload")
+                .expect("reuses existing")
+        );
         assert_eq!(
             second.load(&key).expect("loads"),
             Some(b"opaque binary facts".to_vec())
@@ -385,9 +389,11 @@ mod tests {
         let key = key();
         let source = Cursor::new(b"streamed payload".to_vec());
 
-        assert!(cache
-            .publish_stream(&key, 16, source)
-            .expect("streams blob"));
+        assert!(
+            cache
+                .publish_stream(&key, 16, source)
+                .expect("streams blob")
+        );
         assert_eq!(
             cache.load(&key).expect("loads"),
             Some(b"streamed payload".to_vec())
@@ -454,9 +460,11 @@ mod tests {
         fs::write(&staged, &payload).expect("writes staged payload");
         let digest: [u8; 32] = Sha256::digest(&payload).into();
 
-        assert!(cache
-            .promote_staged(&key(), &staged, payload.len() as u64, digest)
-            .expect("promotes staged blob"));
+        assert!(
+            cache
+                .promote_staged(&key(), &staged, payload.len() as u64, digest)
+                .expect("promotes staged blob")
+        );
         assert_eq!(cache.load(&key()).expect("loads cache"), Some(payload));
     }
 

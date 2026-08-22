@@ -1,20 +1,21 @@
 use thiserror::Error;
 
 use crate::{
-    worker_proto, AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest,
-    ApplicationArgument, ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
-    ArtifactAnalysisResponse, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactLocator,
-    ArtifactDiscoveryResponse, ArtifactMaterializationRequest, ArtifactMaterializationResponse,
-    BackendKey, BuildSystem, CallEdge, Component, ComponentId, DependencyEdge, DependencyTarget,
-    DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot, Fingerprint, HierarchyEdge,
-    Language, OccurrenceKind, PhaseTiming, Precision, ProjectManifest, Provenance, ReferenceEdge,
-    SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
-    SemanticQueryCapability, SemanticQueryParameter, SemanticQueryParameterType,
-    SemanticQueryRequest, SemanticQueryResponse, SemanticQueryResponseState,
-    SemanticQueryResultKind, SourceOccurrence, SourceOrigin, SourceRange, SourceSet, SourceUnit,
-    SourceUnitId, SymbolId, SymbolKind, SymbolRecord, Toolchain, TypeId, TypeRecord,
-    WorkerCapabilities, WorkerCapability, WorkerEnvelope, WorkerError, WorkerErrorCode,
-    WorkerIdentity, WorkerMessage, WorkerMetric, WorkspaceId, WorkspacePath,
+    AnalysisBatchResponse, AnalysisDelta, AnalysisFact, AnalyzeBatchRequest, ApplicationArgument,
+    ApplicationFact, ApplicationId, ApplicationValue, ArtifactAnalysisRequest,
+    ArtifactAnalysisResponse, ArtifactCandidate, ArtifactDescriptor, ArtifactDiscoveryRequest,
+    ArtifactDiscoveryResponse, ArtifactLocator, ArtifactMaterializationRequest,
+    ArtifactMaterializationResponse, BackendKey, BuildSystem, CallEdge, Component, ComponentId,
+    DependencyEdge, DependencyTarget, DiagnosticRecord, DiagnosticSeverity, FileAnalysisSnapshot,
+    Fingerprint, HierarchyEdge, Language, OccurrenceKind, PhaseTiming, Precision, ProjectManifest,
+    Provenance, ReferenceEdge, SemanticQueryArgument, SemanticQueryArgumentValue,
+    SemanticQueryBudget, SemanticQueryCapability, SemanticQueryParameter,
+    SemanticQueryParameterType, SemanticQueryRequest, SemanticQueryResponse,
+    SemanticQueryResponseState, SemanticQueryResultKind, SourceOccurrence, SourceOrigin,
+    SourceRange, SourceSet, SourceUnit, SourceUnitId, SymbolId, SymbolKind, SymbolRecord,
+    Toolchain, TypeId, TypeRecord, WorkerCapabilities, WorkerCapability, WorkerEnvelope,
+    WorkerError, WorkerErrorCode, WorkerIdentity, WorkerMessage, WorkerMetric, WorkspaceId,
+    WorkspacePath, worker_proto,
 };
 
 #[derive(Debug, Error)]
@@ -385,6 +386,7 @@ pub fn envelope(value: &WorkerEnvelope) -> Result<worker_proto::Envelope, Adapte
         WorkerMessage::ProjectManifestResponse(response) => {
             Message::ProjectManifestResponse(worker_proto::ProjectManifestResponse {
                 manifest: Some(manifest(&response.manifest)),
+                execution_plan: Some(execution_plan(&response.execution_plan)),
             })
         }
         WorkerMessage::AnalyzeBatchRequest(request) => {
@@ -454,6 +456,9 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
                         .manifest
                         .ok_or(AdapterError::Missing("project_manifest_response.manifest"))?,
                 )?,
+                execution_plan: decode_execution_plan(response.execution_plan.ok_or(
+                    AdapterError::Missing("project_manifest_response.execution_plan"),
+                )?)?,
             })
         }
         Message::AnalyzeBatchRequest(request) => {
@@ -473,11 +478,9 @@ pub fn decode_envelope(value: worker_proto::Envelope) -> Result<WorkerEnvelope, 
                 workspace_root: WorkspacePath::new(request.workspace_root),
                 max_artifacts: request.max_artifacts,
                 cursor: request.cursor,
-                artifact_candidates: request
-                    .artifact_candidates
-                    .into_iter()
-                    .map(decode_artifact_candidate)
-                    .collect::<Result<Vec<_>, _>>()?,
+                execution_plan: decode_execution_plan(request.execution_plan.ok_or(
+                    AdapterError::Missing("artifact_discovery_request.execution_plan"),
+                )?)?,
             })
         }
         Message::ArtifactDiscoveryResponse(response) => {
@@ -612,6 +615,7 @@ pub fn analyze_batch_request(value: &AnalyzeBatchRequest) -> worker_proto::Analy
             .map(|fact| format!("{fact:?}").to_lowercase())
             .collect(),
         source_units: value.source_units.iter().map(source_unit).collect(),
+        execution_plan: Some(execution_plan(&value.execution_plan)),
     }
 }
 
@@ -643,6 +647,9 @@ pub fn decode_analyze_batch_request(
             .into_iter()
             .map(decode_source_unit)
             .collect::<Result<Vec<_>, _>>()?,
+        execution_plan: decode_execution_plan(value.execution_plan.ok_or(
+            AdapterError::Missing("analyze_batch_request.execution_plan"),
+        )?)?,
     })
 }
 
@@ -1554,12 +1561,29 @@ pub fn discovery_request(
         workspace_root: request.workspace_root.as_str().to_owned(),
         max_artifacts: request.max_artifacts,
         cursor: request.cursor.clone(),
-        artifact_candidates: request
-            .artifact_candidates
-            .iter()
-            .map(artifact_candidate)
-            .collect(),
+        execution_plan: Some(execution_plan(&request.execution_plan)),
     }
+}
+
+fn execution_plan(value: &crate::OpaqueExecutionPlan) -> worker_proto::OpaqueExecutionPlan {
+    worker_proto::OpaqueExecutionPlan {
+        backend: value.backend.clone(),
+        resolved_fingerprint: value.resolved_fingerprint.as_str().to_owned(),
+        payload: value.payload.clone(),
+    }
+}
+
+fn decode_execution_plan(
+    value: worker_proto::OpaqueExecutionPlan,
+) -> Result<crate::OpaqueExecutionPlan, AdapterError> {
+    if value.backend.is_empty() || value.resolved_fingerprint.is_empty() {
+        return Err(AdapterError::Invalid("opaque execution plan"));
+    }
+    Ok(crate::OpaqueExecutionPlan {
+        backend: value.backend,
+        resolved_fingerprint: Fingerprint::new(value.resolved_fingerprint),
+        payload: value.payload,
+    })
 }
 
 fn artifact_candidate(value: &ArtifactCandidate) -> worker_proto::ArtifactCandidate {
@@ -1592,9 +1616,14 @@ pub fn discovery_response(
     worker_proto::ArtifactDiscoveryResponse {
         artifacts: response.artifacts.iter().map(descriptor).collect(),
         next_cursor: response.next_cursor.clone(),
-        artifact_locators: response.artifact_locators.iter().map(|locator| worker_proto::ArtifactLocator {
-            source_unit_id: locator.source_unit.as_str().to_owned(), locator: locator.locator.clone(),
-        }).collect(),
+        artifact_locators: response
+            .artifact_locators
+            .iter()
+            .map(|locator| worker_proto::ArtifactLocator {
+                source_unit_id: locator.source_unit.as_str().to_owned(),
+                locator: locator.locator.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -1690,9 +1719,14 @@ pub fn decode_discovery_response(
             .map(decode_descriptor)
             .collect::<Result<Vec<_>, _>>()?,
         next_cursor: value.next_cursor,
-        artifact_locators: value.artifact_locators.into_iter().map(|locator| ArtifactLocator {
-            source_unit: SourceUnitId::new(locator.source_unit_id), locator: locator.locator,
-        }).collect(),
+        artifact_locators: value
+            .artifact_locators
+            .into_iter()
+            .map(|locator| ArtifactLocator {
+                source_unit: SourceUnitId::new(locator.source_unit_id),
+                locator: locator.locator,
+            })
+            .collect(),
     })
 }
 

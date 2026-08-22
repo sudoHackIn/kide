@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
 
 use crate::{
+    ArtifactBlobCache, ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, SymbolId,
+    SymbolRecord,
     artifact_blob_layout::{ArtifactBlobLayout, ArtifactBlobLayoutError, ArtifactBlobSections},
     artifact_proto,
     artifact_proto_adapter::{self, ArtifactProtoError},
-    ArtifactBlobCache, ArtifactBlobCacheError, ArtifactBlobKey, ArtifactDescriptor, SymbolId,
-    SymbolRecord,
 };
 
 #[derive(Debug, Error)]
@@ -85,7 +85,9 @@ pub fn direct_implementations(
                 .entries
                 .into_iter()
                 .enumerate()
-                .filter_map(|(ordinal, entry)| subtype_ids.contains(&entry.id).then_some(ordinal as u32));
+                .filter_map(|(ordinal, entry)| {
+                    subtype_ids.contains(&entry.id).then_some(ordinal as u32)
+                });
             let mut by_block = BTreeMap::<u32, Vec<u32>>::new();
             for ordinal in ordinals {
                 by_block
@@ -97,7 +99,10 @@ pub fn direct_implementations(
             for (_, ordinals) in by_block {
                 let block = sections.symbol_detail_block(&mut blob, ordinals[0])?;
                 for ordinal in ordinals {
-                    symbols.push(artifact_proto_adapter::decode_symbol_detail(block.clone(), ordinal)?);
+                    symbols.push(artifact_proto_adapter::decode_symbol_detail(
+                        block.clone(),
+                        ordinal,
+                    )?);
                 }
             }
             return Ok(symbols);

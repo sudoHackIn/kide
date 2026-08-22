@@ -19,6 +19,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -62,13 +65,15 @@ internal object GradleProjectImporter {
         connector(root).connect().use { connection ->
             val environment = connection.getModel(BuildEnvironment::class.java)
             val project = connection.getModel(IdeaProject::class.java)
+            val contexts = manifest(root, environment, project).jsonObject["components"]!!.jsonArray
+                .associate { component ->
+                    component.jsonObject["id"]!!.jsonPrimitive.content to
+                        component.jsonObject["configuration"]!!.jsonPrimitive.content
+                }
             return project.modules.flatMap { module ->
-                val context = fingerprint(listOf(
-                    "gradle=${environment.gradle.gradleVersion}".encodeToByteArray(),
-                    "module=${module.gradleProject.path}".encodeToByteArray(),
-                ))
+                val component = componentId(module)
                 module.dependencies.filterIsInstance<IdeaSingleEntryLibraryDependency>().map { dependency ->
-                    ResolvedArtifact(dependency.file.toPath(), componentId(module), context)
+                    ResolvedArtifact(dependency.file.toPath(), component, contexts.getValue(component))
                 }
             }.distinctBy { it.path.toAbsolutePath().normalize() }.sortedBy { it.path.toString() }
         }
@@ -303,6 +308,9 @@ internal object GradleProjectImporter {
             .map { dependency -> artifactFingerprint(dependency.file.toPath()) }
             .distinct()
             .sorted()
+        val dependencies = module.dependencies.mapNotNull { dependency ->
+            dependencyFact(componentId(module), dependency, componentIds)
+        }.sortedWith(compareBy(DependencyFact::scope, DependencyFact::target))
         val compilerConfiguration = fingerprint(
             buildList {
                 add("gradle=${environment.gradle.gradleVersion}".encodeToByteArray())
@@ -310,11 +318,11 @@ internal object GradleProjectImporter {
                 add("module=${module.gradleProject.path}".encodeToByteArray())
                 sourceSets.forEach { add(it.canonicalText.encodeToByteArray()) }
                 externalArtifacts.forEach { add(it.encodeToByteArray()) }
+                dependencies.forEach { dependency ->
+                    add("dependency=${dependency.scope}:${dependency.target}".encodeToByteArray())
+                }
             },
         )
-        val dependencies = module.dependencies.mapNotNull { dependency ->
-            dependencyFact(componentId(module), dependency, componentIds)
-        }
         val languageNames = languages(sourceSets)
         val component = buildJsonObject {
             put("id", componentId(module))
@@ -390,8 +398,10 @@ internal object GradleProjectImporter {
         else -> null
     }
 
-    private fun componentId(module: IdeaModule): String =
-        "gradle:${module.gradleProject.path.ifBlank { ":" }}:main"
+    private fun componentId(module: IdeaModule): String {
+        val path = module.gradleProject.path.removePrefix(":").replace(':', '/')
+        return "gradle:${path.ifBlank { "root" }}:main"
+    }
 
     private fun gradleJvmVersion(environment: BuildEnvironment): String =
         // Tooling API exposes the daemon JDK home and JVM arguments, but no
@@ -415,7 +425,9 @@ internal object GradleProjectImporter {
     private fun configurationInputBytes(root: Path): List<ByteArray> =
         Files.walk(root, 3).use { paths ->
             paths.filter { path ->
-                path.isRegularFile() && path.fileName.toString() in configurationNames
+                path.isRegularFile() &&
+                    !path.startsWith(root.resolve(".kide")) &&
+                    path.fileName.toString() in configurationNames
             }.sorted().map { path ->
                 val relative = workspacePath(root, path)
                 relative.encodeToByteArray() + byteArrayOf(0) + Files.readAllBytes(path)
@@ -425,11 +437,14 @@ internal object GradleProjectImporter {
     private fun artifactFingerprint(path: Path): String =
         when {
             path.isRegularFile() -> fingerprint(listOf(Files.readAllBytes(path)))
-            path.isDirectory() -> Files.walk(path).use { paths ->
-                fingerprint(paths.filter { it.isRegularFile() }.sorted().map { file ->
-                    path.relativize(file).toString().encodeToByteArray() + byteArrayOf(0) + Files.readAllBytes(file)
-                }.toList())
-            }
+            // Gradle may expose another project's mutable build/classes
+            // directory as a library dependency. Its bytes change after a
+            // normal compile, so hashing them would invalidate every consumer
+            // on each index run. The project dependency edge owns freshness;
+            // this merely gives the directory a stable build-model identity.
+            path.isDirectory() -> fingerprint(listOf(
+                "directory:${path.toAbsolutePath().normalize()}".encodeToByteArray(),
+            ))
             else -> fingerprint(listOf(path.toString().encodeToByteArray()))
         }
 

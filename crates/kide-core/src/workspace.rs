@@ -32,20 +32,28 @@ pub(crate) fn workspace_id(root: &Path) -> WorkspaceId {
     ))
 }
 
-pub(crate) fn workspace_path(root: &Path, path: &Path) -> Result<WorkspacePath, WorkspacePathError> {
+pub(crate) fn workspace_path(
+    root: &Path,
+    path: &Path,
+) -> Result<WorkspacePath, WorkspacePathError> {
     let relative = path.strip_prefix(root).map_err(|_| WorkspacePathError {
-        path: path.to_path_buf(), workspace_root: root.to_path_buf(),
+        path: path.to_path_buf(),
+        workspace_root: root.to_path_buf(),
     })?;
-    let text = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-    Ok(WorkspacePath::new(if text.is_empty() { "." } else { &text }))
+    let text = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    Ok(WorkspacePath::new(if text.is_empty() {
+        "."
+    } else {
+        &text
+    }))
 }
 
 /// Resolves an invocation path to the closest authoritative workspace marker.
 /// Gradle settings win over a nested build manifest; a build manifest wins
 /// over an enclosing Git repository.
-pub fn find_workspace_root(
-    invocation: impl AsRef<Path>,
-) -> Result<PathBuf, WorkspaceRootError> {
+pub fn find_workspace_root(invocation: impl AsRef<Path>) -> Result<PathBuf, WorkspaceRootError> {
     let invocation = invocation.as_ref();
     let canonical = fs::canonicalize(invocation).map_err(|source| WorkspaceRootError::Io {
         path: invocation.to_path_buf(),
@@ -56,12 +64,11 @@ pub fn find_workspace_root(
         source,
     })?;
     let start = if metadata.is_file() {
-        canonical
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| WorkspaceRootError::UnsupportedInvocationPath {
+        canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+            WorkspaceRootError::UnsupportedInvocationPath {
                 path: canonical.clone(),
-            })?
+            }
+        })?
     } else if metadata.is_dir() {
         canonical
     } else {
@@ -93,10 +100,7 @@ pub fn find_workspace_root(
     Ok(settings_root.or(build_root).or(git_root).unwrap_or(start))
 }
 
-pub(crate) fn has_regular_file(
-    directory: &Path,
-    name: &str,
-) -> Result<bool, WorkspaceRootError> {
+pub(crate) fn has_regular_file(directory: &Path, name: &str) -> Result<bool, WorkspaceRootError> {
     file_type(directory, name).map(|kind| kind.is_some_and(|kind| kind.is_file()))
 }
 
@@ -104,10 +108,7 @@ fn has_directory(directory: &Path, name: &str) -> Result<bool, WorkspaceRootErro
     file_type(directory, name).map(|kind| kind.is_some_and(|kind| kind.is_dir()))
 }
 
-fn file_type(
-    directory: &Path,
-    name: &str,
-) -> Result<Option<fs::FileType>, WorkspaceRootError> {
+fn file_type(directory: &Path, name: &str) -> Result<Option<fs::FileType>, WorkspaceRootError> {
     let path = directory.join(name);
     match fs::symlink_metadata(&path) {
         Ok(metadata) => Ok(Some(metadata.file_type())),

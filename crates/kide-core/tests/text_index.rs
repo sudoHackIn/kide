@@ -1,6 +1,6 @@
 use kide_core::{
-    collect_workspace_text, document_from_bytes, position_at, IndexStore, TextDocumentSkip,
-    WorkspacePath,
+    IndexStore, TextDocumentSkip, WorkspacePath, collect_workspace_text, document_from_bytes,
+    position_at,
 };
 use tempfile::tempdir;
 
@@ -34,10 +34,12 @@ fn syncs_changed_and_deleted_documents_with_unicode_locations() {
     store
         .sync_text_documents(&[changed])
         .expect("replaces complete inventory");
-    assert!(store
-        .lexical_matches(directory.path(), "needle")
-        .expect("searches updated inventory")
-        .is_empty());
+    assert!(
+        store
+            .lexical_matches(directory.path(), "needle")
+            .expect("searches updated inventory")
+            .is_empty()
+    );
 }
 
 #[test]

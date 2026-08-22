@@ -32,6 +32,11 @@
         "protocol_version": 1,
         "analysis_options": "sha256:default"
       }
+    },
+    "execution_plan": {
+      "backend": "kide-gradle",
+      "resolved_fingerprint": "sha256:project-model",
+      "payload": []
     }
   }
 }

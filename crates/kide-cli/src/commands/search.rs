@@ -2,14 +2,15 @@ use std::path::Path;
 
 use anyhow::Result;
 use kide_core::{
-    document_from_bytes, ArtifactBlobCache, Completeness, Freshness, IndexStore, Precision,
+    ArtifactBlobCache, CANONICAL_SCHEMA_VERSION, Completeness, Freshness, IndexStore, Precision,
     QueryPayload, QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolRecord,
-    CANONICAL_SCHEMA_VERSION,
+    document_from_bytes,
 };
 
 use super::{
+    WorkspaceContext,
     navigation::{print_query_response, print_short_symbols},
-    print_response, WorkspaceContext,
+    print_response,
 };
 
 pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<QueryStatus> {
@@ -187,7 +188,11 @@ pub(super) fn text_search(
     })
 }
 
-pub(super) fn symbols(context: &WorkspaceContext, query: String, short: bool) -> Result<QueryStatus> {
+pub(super) fn symbols(
+    context: &WorkspaceContext,
+    query: String,
+    short: bool,
+) -> Result<QueryStatus> {
     let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let mut symbols = store.symbols_named(&query)?;
@@ -303,9 +308,9 @@ fn cached_dependency_symbols(
 #[cfg(test)]
 mod tests {
     use kide_core::{
-        artifact_blob_layout::ArtifactBlobLayout, artifact_proto, ArtifactBlobKey,
-        ArtifactDescriptor, ComponentId, Fingerprint, Language, Provenance, SourceOrigin,
-        SourceUnit, SourceUnitId, SymbolId, SymbolLocator, WORKER_PROTOCOL_VERSION,
+        ArtifactBlobKey, ArtifactDescriptor, ComponentId, Fingerprint, Language, Provenance,
+        SourceOrigin, SourceUnit, SourceUnitId, SymbolId, SymbolLocator, WORKER_PROTOCOL_VERSION,
+        artifact_blob_layout::ArtifactBlobLayout, artifact_proto,
     };
     use tempfile::tempdir;
 
@@ -379,11 +384,7 @@ mod tests {
                 ..Default::default()
             }],
         };
-        let key = ArtifactBlobKey::new(
-            source.content.clone(),
-            source.context.clone(),
-            &provenance,
-        );
+        let key = ArtifactBlobKey::new(source.content.clone(), source.context.clone(), &provenance);
         cache
             .publish(&key, ArtifactBlobLayout::encode(&graph).bytes())
             .expect("publishes");

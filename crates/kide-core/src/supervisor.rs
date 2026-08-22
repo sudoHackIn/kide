@@ -17,8 +17,8 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    worker_framing, worker_proto_adapter, HandshakeRequest, HandshakeResponse, WorkerEnvelope,
-    WorkerError, WorkerErrorCode, WorkerMessage, WORKER_PROTOCOL_VERSION,
+    HandshakeRequest, HandshakeResponse, WORKER_PROTOCOL_VERSION, WorkerEnvelope, WorkerError,
+    WorkerErrorCode, WorkerMessage, worker_framing, worker_proto_adapter,
 };
 
 /// Command and lifetime limits for one disposable backend implementation.
