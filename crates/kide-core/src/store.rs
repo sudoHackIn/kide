@@ -17,8 +17,8 @@ use crate::{
     AnalysisInput, ApplicationValue, ArtifactBlobKey, ArtifactDescriptor, ByteRange, CallEdge,
     ComponentId, ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord,
     FileAnalysisSnapshot, Fingerprint, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
-    ProjectManifest, Provenance, ReferenceEdge, ResolvedDependencyIdentity, SourceOccurrence,
-    SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
+    ProjectManifest, Provenance, ReferenceEdge, ResolvedDependencyIdentity, SourceFileMetadata,
+    SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
     WORKER_PROTOCOL_VERSION, WorkspacePath, reconcile_configuration_inputs,
 };
 
@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS project_artifact_blob_refs (
 );
 CREATE INDEX IF NOT EXISTS project_artifact_blob_refs_by_blob
     ON project_artifact_blob_refs(blob_key, source_unit_id);
+"#;
+const MIGRATION_11: &str = r#"
+CREATE TABLE IF NOT EXISTS source_file_metadata (
+    workspace_path TEXT PRIMARY KEY,
+    byte_size INTEGER NOT NULL,
+    modified_nanos TEXT NOT NULL,
+    content_fingerprint TEXT NOT NULL
+);
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -444,6 +452,20 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
         }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 11",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_11)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
+        }
         Ok(())
     }
 
@@ -497,6 +519,53 @@ impl IndexStore {
                 })
             })
             .collect()
+    }
+
+    pub fn source_file_metadata(&self) -> Result<Vec<SourceFileMetadata>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT workspace_path, byte_size, modified_nanos, content_fingerprint
+             FROM source_file_metadata ORDER BY workspace_path",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(SourceFileMetadata {
+                    path: WorkspacePath::new(row.get::<_, String>(0)?),
+                    byte_size: row.get::<_, i64>(1)?,
+                    modified_nanos: row.get::<_, String>(2)?.parse().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    content: Fingerprint::new(row.get::<_, String>(3)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IndexStoreError::from)
+    }
+
+    pub fn replace_source_file_metadata(
+        &mut self,
+        current: &[SourceFileMetadata],
+    ) -> Result<(), IndexStoreError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM source_file_metadata", [])?;
+        for item in current {
+            transaction.execute(
+                "INSERT INTO source_file_metadata
+                    (workspace_path, byte_size, modified_nanos, content_fingerprint)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    item.path.as_str(),
+                    item.byte_size,
+                    item.modified_nanos.to_string(),
+                    item.content.as_str()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn configuration_input_status(
@@ -1836,6 +1905,31 @@ mod tests {
                 ComponentId::new("maven:root:main"),
                 ComponentId::new("npm:root:main")
             ]
+        );
+    }
+
+    #[test]
+    fn source_file_metadata_round_trips_after_reopening_the_store() {
+        let directory = tempdir().expect("temporary index directory");
+        let path = directory.path().join("index.sqlite3");
+        let expected = vec![SourceFileMetadata {
+            path: WorkspacePath::new("src/App.kt"),
+            byte_size: 42,
+            modified_nanos: 1_234_567_890,
+            content: Fingerprint::new("sha256:source-content"),
+        }];
+
+        IndexStore::open(&path)
+            .expect("opens store")
+            .replace_source_file_metadata(&expected)
+            .expect("stores source metadata");
+
+        assert_eq!(
+            IndexStore::open(&path)
+                .expect("reopens store")
+                .source_file_metadata()
+                .expect("loads source metadata"),
+            expected
         );
     }
 

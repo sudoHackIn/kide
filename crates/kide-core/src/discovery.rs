@@ -65,6 +65,18 @@ pub struct WorkspaceDiscovery {
 pub fn discover_workspace(
     invocation: impl AsRef<Path>,
 ) -> Result<WorkspaceDiscovery, DiscoveryError> {
+    discover_workspace_with_source_fingerprints(invocation, |path| {
+        fs::read(path).map(|bytes| fingerprint_bytes(&bytes))
+    })
+}
+
+/// Builds workspace discovery while delegating source-content identity to the
+/// caller. This keeps the generic discovery model independent from the cache
+/// that may safely reuse a prior SHA-256 after validating filesystem metadata.
+pub fn discover_workspace_with_source_fingerprints(
+    invocation: impl AsRef<Path>,
+    mut source_fingerprint: impl FnMut(&Path) -> Result<Fingerprint, io::Error>,
+) -> Result<WorkspaceDiscovery, DiscoveryError> {
     let root = find_workspace_root(invocation)?;
     let mut files = Vec::new();
     let mut skipped_symlinks = Vec::new();
@@ -119,7 +131,13 @@ pub fn discover_workspace(
         component.configuration =
             component_context_fingerprint(&component.id, &configuration_input_records);
     }
-    let source_units = source_units(&root, &files, &components, &component_roots)?;
+    let source_units = source_units(
+        &root,
+        &files,
+        &components,
+        &component_roots,
+        &mut source_fingerprint,
+    )?;
     let workspace_identity = workspace_id(&root);
     let provenance = Provenance {
         backend: "kide-filesystem-discovery".to_owned(),
@@ -265,6 +283,7 @@ fn source_units(
     files: &[PathBuf],
     components: &[Component],
     component_roots: &[PathBuf],
+    source_fingerprint: &mut impl FnMut(&Path) -> Result<Fingerprint, io::Error>,
 ) -> Result<Vec<SourceUnit>, DiscoveryError> {
     let mut roots_and_components = component_roots
         .iter()
@@ -299,11 +318,10 @@ fn source_units(
                 .map(|(_, component)| *component)
                 .unwrap_or(fallback);
             let path_in_workspace = workspace_path(root, path)?;
-            let content =
-                fingerprint_bytes(&fs::read(path).map_err(|source| DiscoveryError::Io {
-                    path: path.clone(),
-                    source,
-                })?);
+            let content = source_fingerprint(path).map_err(|source| DiscoveryError::Io {
+                path: path.clone(),
+                source,
+            })?;
             let origin = if is_generated_source(&path_in_workspace) {
                 SourceOrigin::Generated
             } else {
@@ -446,6 +464,27 @@ mod tests {
         assert_ne!(before_app.content, after_app.content);
         assert_eq!(before_app.context, after_app.context);
         assert_eq!(before.manifest.fingerprint, after.manifest.fingerprint);
+    }
+
+    #[test]
+    fn source_fingerprint_callback_can_reuse_a_cached_content_fingerprint() {
+        let fixture = fixture_workspace();
+        let expected = Fingerprint::new("sha256:cached-content");
+        let mut observed_paths = Vec::new();
+
+        let discovery = discover_workspace_with_source_fingerprints(fixture.path(), |path| {
+            observed_paths.push(path.to_path_buf());
+            Ok(expected.clone())
+        })
+        .expect("discovers with cached fingerprints");
+
+        assert_eq!(observed_paths.len(), discovery.source_units.len());
+        assert!(
+            discovery
+                .source_units
+                .iter()
+                .all(|source| source.content == expected)
+        );
     }
 
     #[test]

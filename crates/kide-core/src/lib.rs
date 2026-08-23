@@ -918,7 +918,7 @@ pub use framework_query::*;
 pub use freshness::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
-    ConfigurationInputStatus, reconcile_configuration_inputs,
+    ConfigurationInputStatus, SourceFileMetadata, reconcile_configuration_inputs,
 };
 pub use orchestrator::*;
 pub use protocol::*;
@@ -928,6 +928,7 @@ pub use store::*;
 pub use supervisor::*;
 pub use text_index::*;
 pub use worker_registry::*;
+pub use workspace::find_workspace_root;
 
 /// Version of the normalized records and JSON envelopes owned by KIDE Core.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
@@ -936,4 +937,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 10;
+pub const INDEX_FORMAT_VERSION: u32 = 11;

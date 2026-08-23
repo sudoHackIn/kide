@@ -19,6 +19,17 @@ pub struct ConfigurationInput {
     pub components: Vec<ComponentId>,
 }
 
+/// Cheap filesystem checkpoint for one source file. Its SHA-256 remains the
+/// authoritative identity; size and mtime merely decide whether it can be
+/// reused without reading the file again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceFileMetadata {
+    pub path: WorkspacePath,
+    pub byte_size: i64,
+    pub modified_nanos: i128,
+    pub content: Fingerprint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationInputState {

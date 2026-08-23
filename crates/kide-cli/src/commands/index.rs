@@ -1,7 +1,9 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Result, bail};
@@ -9,15 +11,74 @@ use kide_core::{
     ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, Component,
     ComponentId, ConfigurationInput, EffectiveConfiguration, Fingerprint, IndexStore,
     OpaqueExecutionPlan, ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus,
-    WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage,
-    WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
+    SourceFileMetadata, WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch,
+    WorkerMessage, WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
     cache_catalog_artifact_with_metrics, collect_workspace_text,
     index_batch_with_artifact_cache_provenance_and_execution_plan,
     index_selected_batches_with_execution_plan,
 };
 use sha2::{Digest, Sha256};
 
-pub(super) fn index(
+pub(super) fn index_with_source_metadata(
+    invocation: &Path,
+    configuration: EffectiveConfiguration,
+    artifact_cache_root: PathBuf,
+    verbosity: u8,
+    force: bool,
+    warm_dependencies: Option<u32>,
+    materialize_only: bool,
+) -> Result<QueryStatus> {
+    let root = kide_core::find_workspace_root(invocation)?;
+    let cached = IndexStore::open(IndexStore::default_path(&root))?
+        .source_file_metadata()?
+        .into_iter()
+        .map(|item| (item.path.as_str().to_owned(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut observed = Vec::new();
+    let discovery = kide_core::discover_workspace_with_source_fingerprints(&root, |path| {
+        let key = path
+            .strip_prefix(&root)
+            .expect("workspace path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = fs::metadata(path)?;
+        let modified_nanos = metadata
+            .modified()?
+            .duration_since(UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos();
+        let modified_nanos = i128::try_from(modified_nanos).map_err(std::io::Error::other)?;
+        let byte_size = i64::try_from(metadata.len()).map_err(std::io::Error::other)?;
+        let content = if let Some(previous) = cached.get(&key).filter(|previous| {
+            previous.byte_size == byte_size && previous.modified_nanos == modified_nanos
+        }) {
+            previous.content.clone()
+        } else {
+            let bytes = fs::read(path)?;
+            Fingerprint::new(format!("sha256:{:x}", Sha256::digest(bytes)))
+        };
+        observed.push(SourceFileMetadata {
+            path: WorkspacePath::new(key),
+            byte_size,
+            modified_nanos,
+            content: content.clone(),
+        });
+        Ok(content)
+    })?;
+    let result = index(
+        discovery,
+        configuration,
+        artifact_cache_root,
+        verbosity,
+        force,
+        warm_dependencies,
+        materialize_only,
+    )?;
+    IndexStore::open(IndexStore::default_path(&root))?.replace_source_file_metadata(&observed)?;
+    Ok(result)
+}
+
+fn index(
     discovery: WorkspaceDiscovery,
     configuration: EffectiveConfiguration,
     artifact_cache_root: PathBuf,
@@ -117,10 +178,10 @@ pub(super) fn index(
             .inputs
             .iter()
             .all(|input| input.state == kide_core::ConfigurationInputState::Current))
-        // The resolved build model is authoritative for workspace identity;
-        // filesystem discovery can use a different generic identity. One
-        // index database owns exactly one current resolved manifest.
-        .then(|| store.latest_manifest())
+    // The resolved build model is authoritative for workspace identity;
+    // filesystem discovery can use a different generic identity. One
+    // index database owns exactly one current resolved manifest.
+    .then(|| store.latest_manifest())
     .transpose()?
     .flatten();
     let reused_build_resolution = cached_manifest.is_some();

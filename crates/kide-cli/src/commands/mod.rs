@@ -84,10 +84,10 @@ fn dispatch_configured(
             warm_dependencies,
             materialize_only,
         } => {
-            let discovery = kide_core::discover_workspace(path)?;
-            let index_context = WorkspaceContext::load_required(&discovery.root)?;
-            index::index(
-                discovery,
+            let root = kide_core::find_workspace_root(&path)?;
+            let index_context = WorkspaceContext::load_required(&root)?;
+            index::index_with_source_metadata(
+                &path,
                 index_context.configuration,
                 index_context.artifact_cache_root,
                 verbosity,

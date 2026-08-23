@@ -43,6 +43,20 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(unchanged["worker_starts"], 0);
     assert_eq!(unchanged["build_resolution_reused"], true);
 
+    let forced = measure("forced_index", || {
+        run_json(
+            &workspace,
+            [
+                "index",
+                "--force",
+                workspace.to_str().expect("workspace path"),
+            ],
+        )
+    });
+    assert_eq!(forced["status"], "ok", "forced index result: {forced}");
+    assert_eq!(forced["build_resolution_reused"], false);
+    assert!(forced["worker_starts"].as_u64().unwrap_or_default() >= 1);
+
     let status = measure("warm_status", || {
         run_json(
             &workspace,
