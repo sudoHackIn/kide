@@ -19,7 +19,7 @@ use crate::{
     FileAnalysisSnapshot, Fingerprint, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
     ProjectManifest, Provenance, ReferenceEdge, ResolvedDependencyIdentity, SourceFileMetadata,
     SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
-    WORKER_PROTOCOL_VERSION, WorkspacePath, reconcile_configuration_inputs,
+    WORKER_PROTOCOL_VERSION, WorkspaceCheckpoint, WorkspacePath, reconcile_configuration_inputs,
 };
 
 const MIGRATION_1: &str = r#"
@@ -214,6 +214,22 @@ CREATE TABLE IF NOT EXISTS source_file_metadata (
     modified_nanos TEXT NOT NULL,
     content_fingerprint TEXT NOT NULL
 );
+"#;
+const MIGRATION_12: &str = r#"
+CREATE TABLE IF NOT EXISTS workspace_checkpoints (
+    workspace_id TEXT PRIMARY KEY,
+    manifest_fingerprint TEXT NOT NULL,
+    configuration_inputs_fingerprint TEXT NOT NULL,
+    source_inputs_fingerprint TEXT NOT NULL
+);
+"#;
+const MIGRATION_13: &str = r#"
+ALTER TABLE workspace_checkpoints
+    ADD COLUMN artifact_catalog_fingerprint TEXT NOT NULL DEFAULT '';
+"#;
+const MIGRATION_14: &str = r#"
+ALTER TABLE workspace_checkpoints
+    ADD COLUMN publication_state TEXT NOT NULL DEFAULT 'committed';
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -466,6 +482,48 @@ impl IndexStore {
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
         }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 12",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_12)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (12)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 13",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_13)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (13)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 14",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_14)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (14)", [])?;
+        }
         Ok(())
     }
 
@@ -489,6 +547,32 @@ impl IndexStore {
                 manifest.provenance.protocol_version,
                 serde_json::to_string(manifest)?,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn workspace_checkpoint(&self) -> Result<Option<WorkspaceCheckpoint>, IndexStoreError> {
+        self.connection.query_row(
+            "SELECT workspace_id, manifest_fingerprint, configuration_inputs_fingerprint, source_inputs_fingerprint, artifact_catalog_fingerprint, publication_state FROM workspace_checkpoints ORDER BY workspace_id LIMIT 1",
+            [],
+            |row| Ok(WorkspaceCheckpoint {
+                workspace: crate::WorkspaceId::new(row.get::<_, String>(0)?),
+                manifest: Fingerprint::new(row.get::<_, String>(1)?),
+                configuration_inputs: Fingerprint::new(row.get::<_, String>(2)?),
+                source_inputs: Fingerprint::new(row.get::<_, String>(3)?),
+                artifact_catalog: Fingerprint::new(row.get::<_, String>(4)?),
+                committed: row.get::<_, String>(5)? == "committed",
+            }),
+        ).optional().map_err(IndexStoreError::from)
+    }
+
+    pub fn put_workspace_checkpoint(
+        &self,
+        checkpoint: &WorkspaceCheckpoint,
+    ) -> Result<(), IndexStoreError> {
+        self.connection.execute(
+            "INSERT INTO workspace_checkpoints (workspace_id, manifest_fingerprint, configuration_inputs_fingerprint, source_inputs_fingerprint, artifact_catalog_fingerprint, publication_state) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(workspace_id) DO UPDATE SET manifest_fingerprint=excluded.manifest_fingerprint, configuration_inputs_fingerprint=excluded.configuration_inputs_fingerprint, source_inputs_fingerprint=excluded.source_inputs_fingerprint, artifact_catalog_fingerprint=excluded.artifact_catalog_fingerprint, publication_state=excluded.publication_state",
+            params![checkpoint.workspace.as_str(), checkpoint.manifest.as_str(), checkpoint.configuration_inputs.as_str(), checkpoint.source_inputs.as_str(), checkpoint.artifact_catalog.as_str(), if checkpoint.committed { "committed" } else { "pending" }],
         )?;
         Ok(())
     }
@@ -1930,6 +2014,33 @@ mod tests {
                 .source_file_metadata()
                 .expect("loads source metadata"),
             expected
+        );
+    }
+
+    #[test]
+    fn workspace_checkpoint_round_trips_after_reopening_the_store() {
+        let directory = tempdir().expect("temporary index directory");
+        let path = directory.path().join("index.sqlite3");
+        let expected = WorkspaceCheckpoint {
+            workspace: WorkspaceId::new("workspace:checkpoint"),
+            manifest: Fingerprint::new("sha256:manifest"),
+            configuration_inputs: Fingerprint::new("sha256:configuration"),
+            source_inputs: Fingerprint::new("sha256:sources"),
+            artifact_catalog: Fingerprint::new("sha256:catalog"),
+            committed: true,
+        };
+
+        IndexStore::open(&path)
+            .expect("opens store")
+            .put_workspace_checkpoint(&expected)
+            .expect("stores checkpoint");
+
+        assert_eq!(
+            IndexStore::open(&path)
+                .expect("reopens store")
+                .workspace_checkpoint()
+                .expect("loads checkpoint"),
+            Some(expected)
         );
     }
 

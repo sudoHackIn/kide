@@ -13,7 +13,8 @@ use kide_core::{
     OpaqueExecutionPlan, ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus,
     SourceFileMetadata, WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch,
     WorkerMessage, WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
-    cache_catalog_artifact_with_metrics, collect_workspace_text,
+    cache_catalog_artifact_with_metrics, collect_workspace_text, fingerprint_artifact_catalog,
+    fingerprint_configuration_inputs, fingerprint_source_inputs,
     index_batch_with_artifact_cache_provenance_and_execution_plan,
     index_selected_batches_with_execution_plan,
 };
@@ -410,6 +411,14 @@ fn index(
     let text_inventory = collect_workspace_text(&discovery.root)?;
     store.sync_text_documents(&text_inventory.documents)?;
     store.replace_configuration_inputs(&configuration_input_records)?;
+    store.put_workspace_checkpoint(&kide_core::WorkspaceCheckpoint {
+        workspace: manifest.workspace.clone(),
+        manifest: manifest.fingerprint.clone(),
+        configuration_inputs: fingerprint_configuration_inputs(&configuration_input_records),
+        source_inputs: fingerprint_source_inputs(&sources),
+        artifact_catalog: fingerprint_artifact_catalog(&store.artifact_descriptors()?),
+        committed: true,
+    })?;
     let mut slowest_materializations = materialized_artifacts.clone();
     slowest_materializations.sort_by_key(|artifact| {
         std::cmp::Reverse(
@@ -670,7 +679,7 @@ fn resolve_project_manifest(launch: &WorkerLaunch) -> Result<ProjectManifestResp
 
 /// The global config layer has no workspace-relative path, but its effective
 /// semantic result must still invalidate a cached build plan deterministically.
-fn effective_configuration_input(
+pub(super) fn effective_configuration_input(
     configuration: &EffectiveConfiguration,
     components: &[Component],
 ) -> Result<ConfigurationInput> {
@@ -723,6 +732,16 @@ pub(super) fn kotlin_worker_installation(
         OsString::from("KIDE_WORKSPACE_ROOT"),
         workspace.as_os_str().to_os_string(),
     );
+    if kide_core::load_workspace_configuration(workspace)?
+        .effective
+        .maven
+        .best_effort_dependencies
+    {
+        launch.environment.insert(
+            OsString::from("KIDE_MAVEN_BEST_EFFORT"),
+            OsString::from("1"),
+        );
+    }
     if let Some(gradle_home) = std::env::var_os("GRADLE_HOME") {
         launch
             .environment

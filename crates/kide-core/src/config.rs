@@ -51,6 +51,21 @@ pub struct WorkerLimits {
     pub source_batch_workers: usize,
 }
 
+/// Maven worker policy. This controls whether unavailable external artifacts
+/// remain explicit unresolved inputs instead of aborting project import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MavenOptions {
+    pub best_effort_dependencies: bool,
+}
+
+impl Default for MavenOptions {
+    fn default() -> Self {
+        Self {
+            best_effort_dependencies: true,
+        }
+    }
+}
+
 impl Default for WorkerLimits {
     fn default() -> Self {
         Self {
@@ -68,6 +83,7 @@ pub struct EffectiveConfiguration {
     pub freshness_strategy: FreshnessStrategy,
     pub artifact_cache_scope: ArtifactCacheScope,
     pub workers: WorkerLimits,
+    pub maven: MavenOptions,
 }
 
 impl Default for EffectiveConfiguration {
@@ -77,6 +93,7 @@ impl Default for EffectiveConfiguration {
             freshness_strategy: FreshnessStrategy::FreshOnly,
             artifact_cache_scope: ArtifactCacheScope::User,
             workers: WorkerLimits::default(),
+            maven: MavenOptions::default(),
         }
     }
 }
@@ -103,6 +120,7 @@ struct ConfigurationLayer {
     freshness_strategy: Option<FreshnessStrategy>,
     artifact_cache_scope: Option<ArtifactCacheScope>,
     workers: Option<WorkerLimitsLayer>,
+    maven: Option<MavenOptionsLayer>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,6 +129,12 @@ struct WorkerLimitsLayer {
     max_total: Option<usize>,
     dependency_workers: Option<usize>,
     source_batch_workers: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MavenOptionsLayer {
+    best_effort_dependencies: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -143,7 +167,7 @@ pub enum ConfigurationError {
 }
 
 /// The deterministic starter file written by `kide init`.
-pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n\n# Share immutable dependency blobs between this user's workspaces. Set to\n# \"workspace\" for an isolated, project-local cache. KIDE_ARTIFACT_CACHE_DIR\n# is an explicit override for CI and tests.\nartifact_cache_scope = \"user\"\n\n# Total process budget for future parallel analysis lanes. Source batches stay\n# sequential by default so one JVM/K2 worker can reuse its compilation context.\n[workers]\nmax_total = 4\ndependency_workers = 2\nsource_batch_workers = 1\n";
+pub const WORKSPACE_CONFIGURATION_TEMPLATE: &str = "# KIDE workspace configuration schema.\n# Workspace values override the optional global file selected by KIDE_GLOBAL_CONFIG.\nschema_version = 1\n\n# Do not serve semantic answers whose source owners changed after indexing.\n# Set to \"allow_stale\" only when callers explicitly handle `status: stale`.\nfreshness_strategy = \"fresh_only\"\n\n# Share immutable dependency blobs between this user's workspaces. Set to\n# \"workspace\" for an isolated, project-local cache. KIDE_ARTIFACT_CACHE_DIR\n# is an explicit override for CI and tests.\nartifact_cache_scope = \"user\"\n\n# Continue Maven import when a private or unavailable external dependency cannot\n# be resolved. Such dependencies remain explicit unresolved compiler inputs, so\n# source facts remain available but dependent semantic facts may be incomplete.\n[maven]\nbest_effort_dependencies = true\n\n# Total process budget for future parallel analysis lanes. Source batches stay\n# sequential by default so one JVM/K2 worker can reuse its compilation context.\n[workers]\nmax_total = 4\ndependency_workers = 2\nsource_batch_workers = 1\n";
 
 /// The local ignore policy installed beside the checked-in configuration.
 /// Git applies this file automatically to `.kide` contents; root `.gitignore`
@@ -303,6 +327,11 @@ fn apply_layer(
             });
         }
     }
+    if let Some(maven) = layer.maven
+        && let Some(value) = maven.best_effort_dependencies
+    {
+        effective.maven.best_effort_dependencies = value;
+    }
     Ok(())
 }
 
@@ -316,6 +345,7 @@ mod tests {
         let workspace = tempdir().unwrap();
         let loaded = load_configuration(workspace.path(), None).unwrap();
         assert_eq!(loaded.effective, EffectiveConfiguration::default());
+        assert!(loaded.effective.maven.best_effort_dependencies);
         assert_eq!(loaded.sources, ConfigurationSources::default());
     }
 
@@ -382,6 +412,11 @@ mod tests {
             loaded.effective.freshness_strategy,
             FreshnessStrategy::FreshOnly
         );
+        assert!(loaded.effective.maven.best_effort_dependencies);
+        assert!(WORKSPACE_CONFIGURATION_TEMPLATE.contains(
+            "# Continue Maven import when a private or unavailable external dependency cannot"
+        ));
+        assert!(WORKSPACE_CONFIGURATION_TEMPLATE.contains("best_effort_dependencies = true"));
         assert_eq!(
             fs::read_to_string(workspace.path().join(".kide/.gitignore")).unwrap(),
             WORKSPACE_GITIGNORE_TEMPLATE

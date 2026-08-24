@@ -99,6 +99,10 @@ internal object MavenProjectImporter {
                 .flatMap { dependency -> sourceRootsByModule.getValue(dependency) }
                 .distinct().sortedBy(Path::toString)
             val resolution = MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates)
+            val classpathFingerprints = resolution.artifacts
+                .map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }
+                .distinct()
+                .sorted()
             JavaCompilationContext(
                 component = componentId(root, module),
                 sourceFiles = compilationSources,
@@ -108,7 +112,8 @@ internal object MavenProjectImporter {
                 jdkHome = Path.of(System.getProperty("java.home")),
                 languageLevel = javaLanguageLevel(module.model),
                 unresolvedDependencies = resolution.unresolvedCoordinates,
-                artifactContext = fingerprint(listOf(Files.readAllBytes(module.pom))),
+                artifactContext = component(root, module, classpathFingerprints)
+                    .jsonObject["configuration"]!!.jsonPrimitive.content,
             )
         }
     }

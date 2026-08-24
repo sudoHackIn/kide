@@ -73,14 +73,26 @@ pub fn discover_workspace(
 /// Builds workspace discovery while delegating source-content identity to the
 /// caller. This keeps the generic discovery model independent from the cache
 /// that may safely reuse a prior SHA-256 after validating filesystem metadata.
+#[tracing::instrument(
+    target = "kide::discovery",
+    level = "debug",
+    skip(invocation, source_fingerprint)
+)]
 pub fn discover_workspace_with_source_fingerprints(
     invocation: impl AsRef<Path>,
     mut source_fingerprint: impl FnMut(&Path) -> Result<Fingerprint, io::Error>,
 ) -> Result<WorkspaceDiscovery, DiscoveryError> {
-    let root = find_workspace_root(invocation)?;
+    let root = {
+        let _span =
+            tracing::debug_span!(target: "kide::discovery", "find_workspace_root").entered();
+        find_workspace_root(invocation)?
+    };
     let mut files = Vec::new();
     let mut skipped_symlinks = Vec::new();
-    collect_files(&root, &root, &mut files, &mut skipped_symlinks)?;
+    {
+        let _span = tracing::debug_span!(target: "kide::discovery", "walk_filesystem").entered();
+        collect_files(&root, &root, &mut files, &mut skipped_symlinks)?;
+    }
     files.sort();
     skipped_symlinks.sort();
 
@@ -99,7 +111,10 @@ pub fn discover_workspace_with_source_fingerprints(
         .iter()
         .map(|path| workspace_path(&root, path))
         .collect::<Result<Vec<_>, _>>()?;
-    let workspace_configuration = fingerprint_files(&root, &configuration_paths)?;
+    let workspace_configuration = {
+        let _span = tracing::debug_span!(target: "kide::discovery", "fingerprint_configuration", inputs = configuration_paths.len()).entered();
+        fingerprint_files(&root, &configuration_paths)?
+    };
 
     let mut component_roots = component_roots(&configuration_paths)?;
     if !component_roots.contains(&root) {
@@ -131,13 +146,16 @@ pub fn discover_workspace_with_source_fingerprints(
         component.configuration =
             component_context_fingerprint(&component.id, &configuration_input_records);
     }
-    let source_units = source_units(
-        &root,
-        &files,
-        &components,
-        &component_roots,
-        &mut source_fingerprint,
-    )?;
+    let source_units = {
+        let _span = tracing::debug_span!(target: "kide::discovery", "fingerprint_sources", files = files.len()).entered();
+        source_units(
+            &root,
+            &files,
+            &components,
+            &component_roots,
+            &mut source_fingerprint,
+        )?
+    };
     let workspace_identity = workspace_id(&root);
     let provenance = Provenance {
         backend: "kide-filesystem-discovery".to_owned(),

@@ -66,6 +66,18 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(status["status"], "ok");
     assert_eq!(status["result"]["source_units"]["fresh"], 9);
     assert!(
+        status["result"]["dependency_blobs"]["cataloged"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
+    assert!(
+        status["result"]["dependency_blobs"]["missing"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+    );
+    assert!(
         status["result"]["workers_running"]
             .as_array()
             .expect("workers array")
@@ -406,6 +418,7 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         )
     });
     assert_eq!(stale["result"]["source_units"]["stale"], 1);
+    assert_eq!(stale["metadata"]["freshness"], "stale");
 
     let incremental = measure("incremental_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])
@@ -416,6 +429,12 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     );
     assert_eq!(incremental["analyzed"], 1);
     assert_eq!(incremental["reused"], 8);
+
+    let refreshed = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert_eq!(refreshed["metadata"]["freshness"], "fresh");
 }
 
 /// Java source indexing exercises the same persisted navigation contract as

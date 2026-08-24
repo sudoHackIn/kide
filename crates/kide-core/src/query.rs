@@ -150,8 +150,20 @@ pub struct StatusResult {
     pub manifest: Freshness,
     pub source_units: IndexCounts,
     pub configuration_inputs: ConfigurationInputCounts,
+    pub dependency_blobs: ArtifactCoverage,
     pub affected_components: Vec<crate::ComponentId>,
     pub workers_running: Vec<String>,
+}
+
+/// Availability of lazily materialized dependency facts. `invalid` means a
+/// blob was found but failed its fixed-header verification; `missing` means no
+/// usable blob is currently linked to a cataloged dependency.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCoverage {
+    pub cataloged: u64,
+    pub cached: u64,
+    pub missing: u64,
+    pub invalid: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +203,7 @@ mod tests {
                     unsupported: 0,
                 },
                 configuration_inputs: ConfigurationInputCounts::default(),
+                dependency_blobs: ArtifactCoverage::default(),
                 affected_components: Vec::new(),
                 workers_running: Vec::new(),
             }),

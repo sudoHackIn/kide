@@ -9,7 +9,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{Component, ComponentId, Fingerprint, WorkspacePath};
+use crate::{
+    ArtifactDescriptor, Component, ComponentId, Fingerprint, SourceUnit, WorkspaceId, WorkspacePath,
+};
 
 /// One individually verifiable configuration or dependency-resolution input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +30,81 @@ pub struct SourceFileMetadata {
     pub byte_size: i64,
     pub modified_nanos: i128,
     pub content: Fingerprint,
+}
+
+/// The final marker of one completely published workspace index generation.
+/// It is written only after the manifest, source snapshots, catalog and input
+/// inventory have been updated. Its absence therefore makes freshness unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpoint {
+    pub workspace: WorkspaceId,
+    pub manifest: Fingerprint,
+    pub configuration_inputs: Fingerprint,
+    pub source_inputs: Fingerprint,
+    pub artifact_catalog: Fingerprint,
+    pub committed: bool,
+}
+
+pub fn fingerprint_configuration_inputs(inputs: &[ConfigurationInput]) -> Fingerprint {
+    let mut entries = inputs
+        .iter()
+        .map(|input| {
+            format!(
+                "{}\u{0}{}\u{0}{}",
+                input.path.as_str(),
+                input.fingerprint.as_str(),
+                input
+                    .components
+                    .iter()
+                    .map(|component| component.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    fingerprint_entries(entries)
+}
+
+pub fn fingerprint_source_inputs(sources: &[SourceUnit]) -> Fingerprint {
+    let mut entries = sources
+        .iter()
+        .map(|source| {
+            format!(
+                "{}\u{0}{}\u{0}{}",
+                source.id.as_str(),
+                source.content.as_str(),
+                source.path.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    fingerprint_entries(entries)
+}
+
+pub fn fingerprint_artifact_catalog(descriptors: &[ArtifactDescriptor]) -> Fingerprint {
+    let mut entries = descriptors
+        .iter()
+        .map(|descriptor| {
+            format!(
+                "{}\u{0}{}\u{0}{}",
+                descriptor.source_unit.id.as_str(),
+                descriptor.source_unit.content.as_str(),
+                descriptor.source_unit.context.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    fingerprint_entries(entries)
+}
+
+fn fingerprint_entries(entries: Vec<String>) -> Fingerprint {
+    let mut digest = Sha256::new();
+    for entry in entries {
+        digest.update(entry.as_bytes());
+        digest.update([0]);
+    }
+    Fingerprint::new(format!("sha256:{:x}", digest.finalize()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

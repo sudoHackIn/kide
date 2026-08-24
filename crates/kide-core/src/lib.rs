@@ -918,7 +918,9 @@ pub use framework_query::*;
 pub use freshness::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
-    ConfigurationInputStatus, SourceFileMetadata, reconcile_configuration_inputs,
+    ConfigurationInputStatus, SourceFileMetadata, WorkspaceCheckpoint,
+    fingerprint_artifact_catalog, fingerprint_configuration_inputs, fingerprint_source_inputs,
+    reconcile_configuration_inputs,
 };
 pub use orchestrator::*;
 pub use protocol::*;
@@ -937,4 +939,4 @@ pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
 ///
 /// The storage engine may evolve independently, but a reader must reject a
 /// newer incompatible format rather than treating it as fresh data.
-pub const INDEX_FORMAT_VERSION: u32 = 11;
+pub const INDEX_FORMAT_VERSION: u32 = 13;

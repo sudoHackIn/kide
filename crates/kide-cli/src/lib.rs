@@ -1,12 +1,18 @@
 //! Testable command library behind the tiny `kide` process entry point.
 
-use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
+use std::{
+    fs::File,
+    io::{BufWriter, IsTerminal},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use anyhow::Result;
 use clap::{ArgAction, Parser, Subcommand};
 use kide_core::{
     CANONICAL_SCHEMA_VERSION, QueryProblem, QueryResponse, QueryStatus, ResultMetadata,
 };
+use tracing_subscriber::prelude::*;
 
 mod commands;
 
@@ -125,12 +131,19 @@ pub fn run_cli() -> ExitCode {
 
 fn run() -> Result<QueryStatus> {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+    let _trace_guard = init_logging(cli.verbose)?;
     let human_output = !cli.json && std::io::stdout().is_terminal();
     commands::dispatch(cli, human_output)
 }
 
-fn init_logging(verbosity: u8) {
+#[allow(dead_code)] // Variants retain Drop guards until CLI shutdown.
+enum TraceGuard {
+    None,
+    Chrome(tracing_chrome::FlushGuard),
+    Flame(tracing_flame::FlushGuard<BufWriter<File>>),
+}
+
+fn init_logging(verbosity: u8) -> Result<TraceGuard> {
     let fallback = match verbosity {
         0 => "kide=warn",
         1 | 2 => "kide=info",
@@ -138,11 +151,22 @@ fn init_logging(verbosity: u8) {
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(fallback));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let formatting = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .compact()
-        .init();
+        .compact();
+    let subscriber = tracing_subscriber::registry().with(filter).with(formatting);
+    if let Some(path) = std::env::var_os("KIDE_TRACE_FLAME") {
+        let (flame, guard) = tracing_flame::FlameLayer::with_file(path)?;
+        subscriber.with(flame).init();
+        Ok(TraceGuard::Flame(guard))
+    } else if let Some(path) = std::env::var_os("KIDE_TRACE_CHROME") {
+        let (chrome, guard) = tracing_chrome::ChromeLayerBuilder::new().file(path).build();
+        subscriber.with(chrome).init();
+        Ok(TraceGuard::Chrome(guard))
+    } else {
+        subscriber.init();
+        Ok(TraceGuard::None)
+    }
 }

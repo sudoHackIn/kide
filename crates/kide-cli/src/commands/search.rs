@@ -2,9 +2,10 @@ use std::path::Path;
 
 use anyhow::Result;
 use kide_core::{
-    ArtifactBlobCache, CANONICAL_SCHEMA_VERSION, Completeness, Freshness, IndexStore, Precision,
-    QueryPayload, QueryProblem, QueryResponse, QueryStatus, ResultMetadata, SymbolRecord,
-    document_from_bytes,
+    ArtifactBlobCache, ArtifactBlobCacheError, CANONICAL_SCHEMA_VERSION, Completeness, Freshness,
+    IndexStore, Precision, QueryPayload, QueryProblem, QueryResponse, QueryStatus, ResultMetadata,
+    SymbolRecord, document_from_bytes, fingerprint_artifact_catalog,
+    fingerprint_configuration_inputs, fingerprint_source_inputs,
 };
 
 use super::{
@@ -13,9 +14,18 @@ use super::{
     print_response,
 };
 
+#[tracing::instrument(
+    target = "kide::status",
+    level = "info",
+    skip(context),
+    fields(workspace = %context.path().display(), human_output)
+)]
 pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<QueryStatus> {
     let workspace = context.path();
-    let store = IndexStore::open(IndexStore::default_path(workspace))?;
+    let store = {
+        let _span = tracing::debug_span!(target: "kide::status", "open_index").entered();
+        IndexStore::open(IndexStore::default_path(workspace))?
+    };
     let Some(manifest) = store.latest_manifest()? else {
         return print_query_response(QueryStatus::NoResult, None, Vec::new());
     };
@@ -26,8 +36,16 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         unsupported: 0,
     };
     let discovery = kide_core::discover_workspace(workspace)?;
-    let configuration_status =
-        store.configuration_input_status(&discovery.configuration_input_records)?;
+    let mut current_configuration_inputs = discovery.configuration_input_records.clone();
+    current_configuration_inputs.push(super::index::effective_configuration_input(
+        &context.configuration,
+        &manifest.components,
+    )?);
+    let configuration_status = {
+        let _span = tracing::debug_span!(target: "kide::status", "reconcile_configuration_inputs")
+            .entered();
+        store.configuration_input_status(&current_configuration_inputs)?
+    };
     let mut configuration_counts = kide_core::ConfigurationInputCounts::default();
     for input in &configuration_status.inputs {
         match input.state {
@@ -37,7 +55,12 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             kide_core::ConfigurationInputState::Missing => configuration_counts.missing += 1,
         }
     }
-    for source in store.source_units()? {
+    let persisted_sources = {
+        let _span = tracing::debug_span!(target: "kide::status", "read_source_units").entered();
+        store.source_units()?
+    };
+    let _span = tracing::debug_span!(target: "kide::status", "validate_source_units", sources = persisted_sources.len()).entered();
+    for source in persisted_sources {
         match source.origin {
             kide_core::SourceOrigin::Source | kide_core::SourceOrigin::Generated => {
                 let current = std::fs::read(workspace.join(source.path.as_str()))
@@ -52,10 +75,27 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             kide_core::SourceOrigin::Dependency => counts.unknown += 1,
         }
     }
+    drop(_span);
     let configuration_stale = configuration_counts.added > 0
         || configuration_counts.changed > 0
         || configuration_counts.missing > 0;
-    let freshness = if counts.stale > 0 || configuration_stale {
+    let (checkpoint, artifact_descriptors) = {
+        let _span =
+            tracing::debug_span!(target: "kide::status", "read_checkpoint_and_catalog").entered();
+        (store.workspace_checkpoint()?, store.artifact_descriptors()?)
+    };
+    let checkpoint_matches = checkpoint.as_ref().is_some_and(|checkpoint| {
+        checkpoint.committed
+            && checkpoint.workspace == manifest.workspace
+            && checkpoint.manifest == manifest.fingerprint
+            && checkpoint.configuration_inputs
+                == fingerprint_configuration_inputs(&current_configuration_inputs)
+            && checkpoint.source_inputs == fingerprint_source_inputs(&discovery.source_units)
+            && checkpoint.artifact_catalog == fingerprint_artifact_catalog(&artifact_descriptors)
+    });
+    let freshness = if checkpoint.is_none() {
+        Freshness::Unknown
+    } else if counts.stale > 0 || configuration_stale || !checkpoint_matches {
         Freshness::Stale
     } else if counts.unknown > 0 {
         Freshness::Unknown
@@ -67,6 +107,30 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
     } else {
         Completeness::Partial
     };
+    let cache = ArtifactBlobCache::open(context.artifact_cache_root())?;
+    let mut dependency_blobs = kide_core::ArtifactCoverage::default();
+    let _span = tracing::debug_span!(target: "kide::status", "validate_dependency_blobs", artifacts = artifact_descriptors.len()).entered();
+    for descriptor in artifact_descriptors {
+        dependency_blobs.cataloged += 1;
+        let Some(blob) = store.artifact_blob_for(&descriptor.source_unit.id)? else {
+            dependency_blobs.missing += 1;
+            continue;
+        };
+        match cache.open_blob(&kide_core::ArtifactBlobKey::from_identity(blob.identity)) {
+            Ok(Some(_)) => dependency_blobs.cached += 1,
+            Ok(None) => dependency_blobs.missing += 1,
+            Err(
+                ArtifactBlobCacheError::InvalidHeader
+                | ArtifactBlobCacheError::TruncatedPayload { .. },
+            ) => dependency_blobs.invalid += 1,
+            Err(ArtifactBlobCacheError::Io(_)) => dependency_blobs.missing += 1,
+            Err(
+                ArtifactBlobCacheError::StagedLengthMismatch { .. }
+                | ArtifactBlobCacheError::StagedChecksumMismatch,
+            ) => dependency_blobs.invalid += 1,
+        }
+    }
+    drop(_span);
     let mut provenance = store
         .analysis_inputs()?
         .into_iter()
@@ -94,6 +158,7 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         manifest: freshness,
         source_units: counts,
         configuration_inputs: configuration_counts,
+        dependency_blobs,
         affected_components: configuration_status.affected_components,
         workers_running: Vec::new(),
     });
