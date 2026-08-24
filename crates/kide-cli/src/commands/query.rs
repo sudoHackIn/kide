@@ -82,6 +82,7 @@ struct CapabilityProviderRecord {
     protocol_version: u32,
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", name = "generic_query", skip(context, args, params), fields(workspace = %context.path().display(), arguments = args.len(), parameters = params.len(), human, verbosity))]
 pub(super) fn run(
     context: &WorkspaceContext,
     args: Vec<String>,
@@ -146,7 +147,11 @@ fn invoke(
     verbosity: u8,
 ) -> Result<QueryStatus> {
     let workspace = context.path();
-    let resolved = load(workspace, name)?;
+    let resolved = {
+        let _span = tracing::debug_span!(target: "kide::query", "load_query_package", query = name)
+            .entered();
+        load(workspace, name)?
+    };
     let values = params.into_iter().collect::<BTreeMap<_, _>>();
     let bound = resolved.query.bind(&values)?;
     let requirements = requirements(&resolved);
@@ -161,6 +166,8 @@ fn invoke(
     let workers = if !needs_discovery {
         Vec::new()
     } else {
+        let _span =
+            tracing::debug_span!(target: "kide::query", "discover_capability_providers").entered();
         WorkerRegistry::new(vec![kotlin_worker_installation(workspace, verbosity)?]).discover()?
     };
     let negotiations = negotiate_query_capabilities(&requirements, &workers);
@@ -209,7 +216,11 @@ fn execute_resolved(
     }
 
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
-    let mut result = execute(&store, &resolved.query.program, &bound)?;
+    let mut result = {
+        let _span =
+            tracing::debug_span!(target: "kide::query", "resolve_indexed_selector").entered();
+        execute(&store, &resolved.query.program, &bound)?
+    };
     let mut capability_provenance = Vec::new();
     let mut capability_partial = negotiations.iter().any(|item| {
         !item.required
@@ -258,7 +269,10 @@ fn execute_resolved(
                 step.name
             );
         }
-        let response = execute_capability(worker, &capability_plan)?;
+        let response = {
+            let _span = tracing::debug_span!(target: "kide::query", "execute_capability", capability = %step.name).entered();
+            execute_capability(worker, &capability_plan)?
+        };
         if let Some(record) = plan
             .capabilities
             .iter_mut()

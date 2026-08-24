@@ -12,10 +12,29 @@ pub(super) fn freshness_problem(
     store: &IndexStore,
     payload: &QueryPayload,
 ) -> Result<Option<QueryProblem>> {
+    let _gate = tracing::debug_span!(
+        target: "kide::freshness",
+        "freshness_gate",
+        payload = payload_kind(payload),
+    )
+    .entered();
     if context.configuration.freshness_strategy != kide_core::FreshnessStrategy::FreshOnly {
         return Ok(None);
     }
-    let persisted_inputs = store.configuration_inputs()?;
+    let persisted_inputs = {
+        let _span = tracing::debug_span!(
+            target: "kide::freshness",
+            "load_configuration_inputs",
+        )
+        .entered();
+        store.configuration_inputs()?
+    };
+    let _configuration = tracing::debug_span!(
+        target: "kide::freshness",
+        "fingerprint_configuration_inputs",
+        inputs = persisted_inputs.len(),
+    )
+    .entered();
     for input in &persisted_inputs {
         if input.path.as_str() == ".kide/effective-config" {
             continue;
@@ -54,7 +73,8 @@ pub(super) fn freshness_problem(
             }));
         }
     }
-    let owners = match payload {
+    drop(_configuration);
+    let owner_ids = match payload {
         QueryPayload::Symbols { symbols } | QueryPayload::Implementations { symbols } => symbols
             .iter()
             .map(|symbol| symbol.declaration.source_unit.clone())
@@ -71,14 +91,32 @@ pub(super) fn freshness_problem(
         QueryPayload::TypeAt { occurrence, .. } => vec![occurrence.range.source_unit.clone()],
         _ => Vec::new(),
     };
-    for owner in owners
+    let owner_ids = owner_ids
         .into_iter()
         .map(|owner| owner.as_str().to_owned())
-        .collect::<BTreeSet<_>>()
-    {
-        let Some(source) = store.source_unit(&kide_core::SourceUnitId::new(owner))? else {
-            continue;
-        };
+        .collect::<BTreeSet<_>>();
+    let owners = {
+        let _span = tracing::debug_span!(
+            target: "kide::freshness",
+            "load_owner_snapshots",
+            owners = owner_ids.len(),
+        )
+        .entered();
+        owner_ids
+            .into_iter()
+            .map(|owner| store.source_unit(&kide_core::SourceUnitId::new(owner)))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    };
+    let _sources = tracing::debug_span!(
+        target: "kide::freshness",
+        "stat_or_hash_owners",
+        owners = owners.len(),
+    )
+    .entered();
+    for source in owners {
         if source.origin == kide_core::SourceOrigin::Dependency {
             continue;
         }
@@ -95,4 +133,18 @@ pub(super) fn freshness_problem(
         }
     }
     Ok(None)
+}
+
+fn payload_kind(payload: &QueryPayload) -> &'static str {
+    match payload {
+        QueryPayload::Index(_) => "index",
+        QueryPayload::Symbols { .. } => "symbols",
+        QueryPayload::Definition { .. } => "definition",
+        QueryPayload::Refs { .. } => "refs",
+        QueryPayload::Callers { .. } => "callers",
+        QueryPayload::Implementations { .. } => "implementations",
+        QueryPayload::TypeAt { .. } => "type_at",
+        QueryPayload::Status { .. } => "status",
+        QueryPayload::Selector { .. } => "selector",
+    }
 }

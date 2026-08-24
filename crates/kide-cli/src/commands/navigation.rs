@@ -25,6 +25,7 @@ pub(super) fn fan_out(
     Ok(status)
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, applies, component, qualified_prefix), fields(workspace = %context.path().display(), human_output))]
 pub(super) fn select_symbols(
     context: &WorkspaceContext,
     applies: String,
@@ -124,6 +125,7 @@ fn print_short_symbol(
     Ok(())
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, value), fields(workspace = %context.path().display(), human_output))]
 pub(super) fn definition(
     context: &WorkspaceContext,
     value: String,
@@ -168,7 +170,11 @@ pub(super) fn definition(
             }],
         ),
     };
-    if status == QueryStatus::Ok
+    // JSON output is gated by `print_query_response`; the human path emits its
+    // own facts and therefore checks here.  Keeping the paths exclusive avoids
+    // hashing the same owner twice for machine-readable definition requests.
+    if human_output
+        && status == QueryStatus::Ok
         && let Some(payload) = result.as_ref()
         && let Some(problem) = freshness_problem(context, &store, payload)?
     {
@@ -189,6 +195,7 @@ pub(super) fn definition(
     print_query_response(context, &store, status, result, problems)
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, value), fields(workspace = %context.path().display(), short))]
 pub(super) fn references(
     context: &WorkspaceContext,
     value: String,
@@ -376,6 +383,7 @@ pub(super) fn byte_to_location(text: &str, byte_offset: u64) -> Option<(usize, u
     Some((line, column))
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, value), fields(workspace = %context.path().display(), human_output))]
 pub(super) fn callers(
     context: &WorkspaceContext,
     value: String,
@@ -420,6 +428,7 @@ pub(super) fn callers(
     print_query_response(context, &store, status, result, problems)
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, value), fields(workspace = %context.path().display(), transitive, human_output))]
 pub(super) fn implementations(
     context: &WorkspaceContext,
     value: String,
@@ -496,6 +505,7 @@ pub(super) fn cached_dependency_implementations(
     Ok(symbols)
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, value), fields(workspace = %context.path().display(), human_output))]
 pub(super) fn type_at(
     context: &WorkspaceContext,
     value: String,
@@ -532,7 +542,10 @@ pub(super) fn type_at(
         None => (QueryStatus::NoResult, None),
     };
     let mut problems = Vec::new();
-    if status == QueryStatus::Ok
+    // JSON output is gated by `print_query_response`; the human path emits its
+    // own facts and therefore checks here.
+    if human_output
+        && status == QueryStatus::Ok
         && let Some(payload) = result.as_ref()
         && let Some(problem) = freshness_problem(context, &store, payload)?
     {

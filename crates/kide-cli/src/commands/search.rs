@@ -280,6 +280,7 @@ pub(super) fn text_search(
     })
 }
 
+#[tracing::instrument(target = "kide::command", level = "info", skip(context, query), fields(workspace = %context.path().display(), short))]
 pub(super) fn symbols(
     context: &WorkspaceContext,
     query: String,
