@@ -444,7 +444,7 @@ pub fn materialize_artifact(
     .entered();
     let key = ArtifactBlobKey::for_descriptor(&artifact);
     let cache_check_started = Instant::now();
-    let cached = cache.open_blob(&key)?.is_some();
+    let cached = cache_hit_or_remove_invalid(cache, &key)?;
     let cache_check_millis = cache_check_started.elapsed().as_millis() as u64;
     if cached {
         return Ok(MaterializationMetrics {
@@ -621,7 +621,7 @@ pub fn cache_catalog_artifact_with_metrics(
         return Ok((MaterializationOutcome::NotCataloged, None));
     };
     let key = ArtifactBlobKey::for_descriptor(&descriptor);
-    if cache.open_blob(&key)?.is_some() {
+    if cache_hit_or_remove_invalid(cache, &key)? {
         return Ok((MaterializationOutcome::AlreadyMaterialized, None));
     }
     if budget.remaining_artifacts == 0 {
@@ -646,6 +646,25 @@ pub fn cache_catalog_artifact_with_metrics(
         Ok((MaterializationOutcome::Materialized, Some(metrics)))
     } else {
         Ok((MaterializationOutcome::AlreadyMaterialized, Some(metrics)))
+    }
+}
+
+/// A malformed immutable blob is never a cache hit. Delete only the exact
+/// key after validation has rejected it, so a worker can atomically publish a
+/// verified replacement in this same run.
+fn cache_hit_or_remove_invalid(
+    cache: &ArtifactBlobCache,
+    key: &ArtifactBlobKey,
+) -> Result<bool, IndexOrchestratorError> {
+    match cache.open_blob(key) {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(ArtifactBlobCacheError::InvalidHeader)
+        | Err(ArtifactBlobCacheError::TruncatedPayload { .. }) => {
+            cache.remove_invalid(key)?;
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

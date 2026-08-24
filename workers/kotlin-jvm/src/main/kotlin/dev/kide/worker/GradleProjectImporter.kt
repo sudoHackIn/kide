@@ -311,17 +311,17 @@ internal object GradleProjectImporter {
         val dependencies = module.dependencies.mapNotNull { dependency ->
             dependencyFact(componentId(module), dependency, componentIds)
         }.sortedWith(compareBy(DependencyFact::scope, DependencyFact::target))
-        val compilerConfiguration = fingerprint(
-            buildList {
-                add("gradle=${environment.gradle.gradleVersion}".encodeToByteArray())
-                add("jvm=${gradleJvmVersion(environment)}".encodeToByteArray())
-                add("module=${module.gradleProject.path}".encodeToByteArray())
-                sourceSets.forEach { add(it.canonicalText.encodeToByteArray()) }
-                externalArtifacts.forEach { add(it.encodeToByteArray()) }
-                dependencies.forEach { dependency ->
-                    add("dependency=${dependency.scope}:${dependency.target}".encodeToByteArray())
-                }
-            },
+        val compilerConfiguration = ComponentContextDigest.fingerprint(
+            component = componentId(module),
+            sourceSets = sourceSets.map(SourceSetFact::canonicalText),
+            artifacts = externalArtifacts,
+            dependencyEdges = dependencies.map { dependency -> "${dependency.scope}:${dependency.target}" },
+            toolchain = listOf(
+                "build-tool=gradle:${environment.gradle.gradleVersion}",
+                "jvm=${gradleJvmVersion(environment)}",
+                "module=${module.gradleProject.path}",
+                "kotlin=${KotlinVersion.CURRENT}",
+            ),
         )
         val languageNames = languages(sourceSets)
         val component = buildJsonObject {

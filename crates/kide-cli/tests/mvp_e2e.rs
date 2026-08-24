@@ -131,6 +131,62 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(materialize_only["materialized"], 1, "{materialize_only}");
     assert_eq!(materialize_only["worker_starts"], 1, "{materialize_only}");
 
+    let cached_dependencies = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert!(
+        cached_dependencies["result"]["dependency_blobs"]["cached"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 2,
+        "{cached_dependencies}"
+    );
+    assert!(
+        cached_dependencies["result"]["dependency_blobs"]["cached_bytes"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "{cached_dependencies}"
+    );
+
+    // A corrupt shared-cache file is visible to status and planned as a miss;
+    // the bounded warmup deletes only that invalid entry and republishes it.
+    let corrupted_blob = first_artifact_blob(&workspace.join(".kide/artifact-cache"));
+    fs::write(&corrupted_blob, b"not a KIDE artifact blob").expect("corrupts cache blob");
+    let corrupt_status = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert_eq!(corrupt_status["result"]["dependency_blobs"]["invalid"], 1);
+    let corrupt_plan = run_json(&workspace, ["index", "--plan", workspace.to_str().unwrap()]);
+    assert!(
+        corrupt_plan["dependencies"]["cache_misses"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "{corrupt_plan}"
+    );
+    let repaired = run_json(
+        &workspace,
+        [
+            "index",
+            "--materialize-only",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(repaired["materialized"], 1, "{repaired}");
+    let repaired_status = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert_eq!(repaired_status["result"]["dependency_blobs"]["invalid"], 0);
+    let cached_dependency_bytes = repaired_status["result"]["dependency_blobs"]["cached_bytes"]
+        .as_u64()
+        .expect("cached dependency bytes");
+
     let book_entity = measure("warm_symbols", || {
         run_json(
             &workspace,
@@ -497,6 +553,45 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         ["--workspace", workspace.to_str().unwrap(), "status"],
     );
     assert_eq!(refreshed["metadata"]["freshness"], "fresh");
+    assert_eq!(
+        refreshed["result"]["dependency_blobs"]["cached_bytes"], cached_dependency_bytes,
+        "a source-only change must not invalidate dependency blobs"
+    );
+
+    // A build dependency change is different: plan must not claim the old
+    // resolved manifest is usable, and the rebuilt component context causes a
+    // precise dependency cache miss when materialization is requested.
+    let build_file = workspace.join("app/build.gradle.kts");
+    let original_build = fs::read_to_string(&build_file).expect("fixture build file");
+    fs::write(
+        &build_file,
+        original_build.replace(
+            "    implementation(\"org.springframework.boot:spring-boot-starter-actuator\")",
+            "    implementation(\"org.springframework.boot:spring-boot-starter-actuator\")\n    implementation(\"org.springframework.boot:spring-boot-starter-json\")",
+        ),
+    )
+    .expect("changes dependency declaration");
+    let changed_dependency_plan =
+        run_json(&workspace, ["index", "--plan", workspace.to_str().unwrap()]);
+    assert_eq!(changed_dependency_plan["manifest"], "resolve_required");
+    let changed_dependency = run_json(
+        &workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        changed_dependency["dependency_analyzed"], 1,
+        "{changed_dependency}"
+    );
+    assert!(
+        changed_dependency["analyzed"].as_u64().unwrap_or_default() > 0
+            && changed_dependency["reused"].as_u64().unwrap_or_default() > 0,
+        "a dependency context change must reindex affected owners without rebuilding the whole workspace: {changed_dependency}"
+    );
 }
 
 /// Java source indexing exercises the same persisted navigation contract as
@@ -723,6 +818,28 @@ fn maven_spring_crud_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(unchanged["analyzed"], 0);
     assert_eq!(unchanged["reused"], 2);
 
+    let warmed = run_json(
+        &workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(warmed["dependency_analyzed"], 1, "{warmed}");
+    let cache_before_source_edit = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert!(
+        cache_before_source_edit["result"]["dependency_blobs"]["cached_bytes"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "{cache_before_source_edit}"
+    );
+
     let controller = workspace.join("app/src/main/java/dev/kide/fixture/app/BookController.java");
     fs::write(
         &controller,
@@ -735,6 +852,135 @@ fn maven_spring_crud_survives_cold_restarts_and_incremental_updates() {
     let incremental = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
     assert_eq!(incremental["analyzed"], 1);
     assert_eq!(incremental["reused"], 1);
+    let cache_after_source_edit = run_json(
+        &workspace,
+        ["--workspace", workspace.to_str().unwrap(), "status"],
+    );
+    assert_eq!(
+        cache_after_source_edit["result"]["dependency_blobs"]["cached_bytes"],
+        cache_before_source_edit["result"]["dependency_blobs"]["cached_bytes"],
+    );
+
+    let app_pom = workspace.join("app/pom.xml");
+    fs::write(
+        &app_pom,
+        fs::read_to_string(&app_pom).expect("app pom").replace(
+            "<artifactId>h2</artifactId><scope>runtime</scope>",
+            "<artifactId>h2</artifactId><scope>compile</scope>",
+        ),
+    )
+    .expect("changes Maven dependency scope");
+    let scope_plan = run_json(&workspace, ["index", "--plan", workspace.to_str().unwrap()]);
+    assert_eq!(scope_plan["manifest"], "resolve_required");
+    let scope_index = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+    assert!(
+        scope_index["analyzed"].as_u64().unwrap_or_default() > 0
+            && scope_index["reused"].as_u64().unwrap_or_default() > 0,
+        "Maven scope change must reindex only affected component owners: {scope_index}"
+    );
+}
+
+#[test]
+#[ignore = "requires the Kotlin worker distribution; run `make e2e`"]
+fn compatible_gradle_workspaces_reuse_a_shared_dependency_blob() {
+    let directory = tempdir().expect("temporary shared-cache root");
+    let cache = directory.path().join("artifact-cache");
+    let first_workspace = directory.path().join("first");
+    let second_workspace = directory.path().join("second");
+    copy_fixture(&fixture_root(), &first_workspace);
+    copy_fixture(&fixture_root(), &second_workspace);
+    initialize_workspace(&first_workspace);
+    initialize_workspace(&second_workspace);
+
+    let first = run_json_with_artifact_cache(
+        &first_workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            first_workspace.to_str().unwrap(),
+        ],
+        &cache,
+    );
+    assert_eq!(first["dependency_analyzed"], 1, "{first}");
+
+    let second = run_json_with_artifact_cache(
+        &second_workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            second_workspace.to_str().unwrap(),
+        ],
+        &cache,
+    );
+    assert_eq!(second["dependency_analyzed"], 0, "{second}");
+    assert_eq!(second["dependency_reused"], 1, "{second}");
+}
+
+#[test]
+#[ignore = "requires the Kotlin worker distribution; run `make e2e`"]
+fn tracked_gradle_inputs_make_semantic_facts_stale_before_reindex() {
+    for (name, relative_path, comment) in [
+        ("build", "app/build.gradle.kts", "//"),
+        ("settings", "settings.gradle.kts", "//"),
+        ("kide_config", ".kide/config.toml", "#"),
+    ] {
+        let directory = tempdir().expect("temporary workspace");
+        let workspace = directory.path().join(format!("tracked-input-{name}"));
+        copy_fixture(&fixture_root(), &workspace);
+        initialize_workspace(&workspace);
+        let indexed = run_json(&workspace, ["index", workspace.to_str().unwrap()]);
+        assert_eq!(indexed["status"], "ok", "{name}: {indexed}");
+        let symbol = run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "symbols",
+                "BookEntity",
+            ],
+        );
+        let symbol_id = symbol["result"]["symbols"][0]["id"]
+            .as_str()
+            .expect("BookEntity id")
+            .to_owned();
+
+        let input = workspace.join(relative_path);
+        fs::write(
+            &input,
+            format!(
+                "{}\n{comment} freshness e2e {name}\n",
+                fs::read_to_string(&input).unwrap()
+            ),
+        )
+        .expect("changes tracked input");
+        let status = run_json(
+            &workspace,
+            ["--workspace", workspace.to_str().unwrap(), "status"],
+        );
+        assert_eq!(status["metadata"]["freshness"], "stale", "{name}: {status}");
+        assert!(
+            status["result"]["configuration_inputs"]["changed"]
+                .as_u64()
+                .unwrap_or_default()
+                >= 1,
+            "{name}: {status}"
+        );
+        let stale_definition = run_json(
+            &workspace,
+            [
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "definition",
+                &symbol_id,
+            ],
+        );
+        assert_eq!(
+            stale_definition["status"], "stale",
+            "{name}: {stale_definition}"
+        );
+    }
 }
 
 fn measure<T>(name: &str, operation: impl FnOnce() -> T) -> T {
@@ -799,6 +1045,25 @@ fn copy_fixture(source: &Path, destination: &Path) {
     }
 }
 
+fn first_artifact_blob(root: &Path) -> std::path::PathBuf {
+    find_artifact_blob(root).unwrap_or_else(|| {
+        panic!(
+            "artifact cache should contain a blob under {}",
+            root.display()
+        )
+    })
+}
+
+fn find_artifact_blob(root: &Path) -> Option<std::path::PathBuf> {
+    fs::read_dir(root).ok()?.flatten().find_map(|entry| {
+        let path = entry.path();
+        path.is_dir()
+            .then(|| find_artifact_blob(&path))
+            .flatten()
+            .or_else(|| (path.extension() == Some(OsStr::new("blob"))).then_some(path))
+    })
+}
+
 fn write_query(workspace: &Path, name: &str, contents: &str) {
     let directory = workspace.join(".kide/queries");
     fs::create_dir_all(&directory).expect("creates fixture query directory");
@@ -807,6 +1072,28 @@ fn write_query(workspace: &Path, name: &str, contents: &str) {
 
 fn run_json<const N: usize>(workspace: &Path, args: [&str; N]) -> Value {
     let output = run(workspace, args);
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "CLI did not produce JSON: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn run_json_with_artifact_cache<const N: usize>(
+    workspace: &Path,
+    args: [&str; N],
+    artifact_cache: &Path,
+) -> Value {
+    let output = command(workspace, args)
+        .env("KIDE_ARTIFACT_CACHE_DIR", artifact_cache)
+        .output()
+        .expect("runs kide");
+    assert!(
+        output.status.success() || !output.stdout.is_empty(),
+        "kide failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "CLI did not produce JSON: {error}; stderr={}",

@@ -74,6 +74,21 @@ class MavenProjectImporterTest {
     }
 
     @Test
+    fun dependency_scope_changes_only_the_owning_component_context() {
+        val root = fixtureProject()
+        val environment = mavenEnvironment(root)
+        fun contexts() = MavenProjectImporter.import(root, environment).jsonObject["components"]!!.jsonArray
+            .map { it.jsonObject }.associate { it["id"]!!.jsonPrimitive.content to it["configuration"]!!.jsonPrimitive.content }
+        val before = contexts()
+        Files.writeString(root.resolve("app/pom.xml"), """
+            <project><modelVersion>4.0.0</modelVersion><parent><groupId>fixture</groupId><artifactId>reactor</artifactId><version>1</version></parent><artifactId>app</artifactId><dependencies><dependency><groupId>fixture</groupId><artifactId>api</artifactId><version>1</version><scope>runtime</scope></dependency></dependencies></project>
+        """.trimIndent())
+        val after = contexts()
+        assertNotEquals(before.getValue("maven:app:main"), after.getValue("maven:app:main"))
+        assertEquals(before.getValue("maven:api:main"), after.getValue("maven:api:main"))
+    }
+
+    @Test
     fun rejectsSourceRootSymlinkEscapingWorkspace() {
         val root = Files.createTempDirectory("kide-maven-import-")
         val environment = mavenEnvironment(root)

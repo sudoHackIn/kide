@@ -234,22 +234,20 @@ fn index(
         let mut cached = 0_usize;
         let mut artifacts = Vec::new();
         for descriptor in descriptors {
-            let key = ArtifactBlobKey::for_descriptor(&descriptor);
-            let artifact_locator = if artifact_cache.open_blob(&key)?.is_some() {
-                None
-            } else {
-                Some(
-                    artifact_locators
-                        .get(descriptor.source_unit.id.as_str())
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "resolved_artifact_locator_missing={}",
-                                descriptor.source_unit.id.as_str()
-                            )
-                        })?,
-                )
-            };
+            // Passing a locator even for a hit keeps this path simple and
+            // lets Core recognize/remove a corrupt cache entry before it
+            // decides whether the worker must stage a replacement.
+            let artifact_locator = Some(
+                artifact_locators
+                    .get(descriptor.source_unit.id.as_str())
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "resolved_artifact_locator_missing={}",
+                            descriptor.source_unit.id.as_str()
+                        )
+                    })?,
+            );
             let artifact_started = Instant::now();
             let (outcome, metrics) = cache_catalog_artifact_with_metrics(
                 &mut store,

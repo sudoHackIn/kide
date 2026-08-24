@@ -144,7 +144,10 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             continue;
         };
         match cache.open_blob(&kide_core::ArtifactBlobKey::from_identity(blob.identity)) {
-            Ok(Some(_)) => dependency_blobs.cached += 1,
+            Ok(Some(blob)) => {
+                dependency_blobs.cached += 1;
+                dependency_blobs.cached_bytes += blob.len();
+            }
             Ok(None) => dependency_blobs.missing += 1,
             Err(
                 ArtifactBlobCacheError::InvalidHeader

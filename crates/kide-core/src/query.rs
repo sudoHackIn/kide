@@ -162,6 +162,8 @@ pub struct StatusResult {
 pub struct ArtifactCoverage {
     pub cataloged: u64,
     pub cached: u64,
+    /// Sum of validated blob payload bytes, excluding cache framing headers.
+    pub cached_bytes: u64,
     pub missing: u64,
     pub invalid: u64,
 }

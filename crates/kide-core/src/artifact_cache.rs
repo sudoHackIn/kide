@@ -161,7 +161,13 @@ impl ArtifactBlobCache {
             Err(error) => return Err(error.into()),
         };
         let mut header = [0; HEADER_SIZE];
-        file.read_exact(&mut header)?;
+        match file.read_exact(&mut header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(ArtifactBlobCacheError::InvalidHeader);
+            }
+            Err(error) => return Err(error.into()),
+        }
         let payload_len = validate_header(&header, key)?;
         if file.metadata()?.len() != HEADER_SIZE as u64 + payload_len {
             return Err(ArtifactBlobCacheError::InvalidHeader);
@@ -173,6 +179,18 @@ impl ArtifactBlobCache {
         self.open_blob(key)?
             .map(|mut blob| blob.read_all())
             .transpose()
+    }
+
+    /// Removes a blob that a caller has already identified as invalid. This is
+    /// deliberately not an eviction API: cache ownership and retention stay
+    /// outside this type. A subsequent verified worker result can publish the
+    /// same immutable key again.
+    pub fn remove_invalid(&self, key: &ArtifactBlobKey) -> Result<bool, ArtifactBlobCacheError> {
+        match fs::remove_file(self.path_for(key)) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Publishes an opaque immutable payload. Returns `true` when this caller

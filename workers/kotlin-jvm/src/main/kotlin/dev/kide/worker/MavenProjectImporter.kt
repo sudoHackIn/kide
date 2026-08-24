@@ -58,15 +58,19 @@ internal object MavenProjectImporter {
         // de-duplication of shared JAR paths loses the association with later
         // modules and lets dependency descriptors disagree with this manifest.
         val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        val resolutions = modules.associateWith { module ->
+            MavenExternalResolver.resolveWithDiagnostics(module.model, reactorCoordinates)
+        }
         val classpath = modules.associate { module ->
-            componentId(root, module) to MavenExternalResolver
-                .resolveWithDiagnostics(module.model, reactorCoordinates)
+            componentId(root, module) to resolutions.getValue(module)
                 .artifacts
                 .map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }
                 .distinct()
                 .sorted()
         }
-        val components = modules.map { module -> component(root, module, classpath[componentId(root, module)].orEmpty()) }
+        val components = modules.map { module ->
+            component(root, module, classpath[componentId(root, module)].orEmpty(), resolutions.getValue(module).dependencyEdges)
+        }
         val configuration = fingerprint(modules.map { Files.readAllBytes(it.pom) })
         return buildJsonObject {
             put("workspace", "maven:${fingerprint(listOf(root.toString().encodeToByteArray()))}")
@@ -122,7 +126,7 @@ internal object MavenProjectImporter {
                 jdkHome = Path.of(System.getProperty("java.home")),
                 languageLevel = javaLanguageLevel(module.model),
                 unresolvedDependencies = resolution.unresolvedCoordinates,
-                artifactContext = component(root, module, classpathFingerprints)
+                artifactContext = component(root, module, classpathFingerprints, resolution.dependencyEdges)
                     .jsonObject["configuration"]!!.jsonPrimitive.content,
             )
         }
@@ -152,7 +156,7 @@ internal object MavenProjectImporter {
                 .sorted()
         }
         val contexts = modules.associate { module ->
-            componentId(root, module) to component(root, module, classpath[module].orEmpty())
+            componentId(root, module) to component(root, module, classpath[module].orEmpty(), resolutions.getValue(module).dependencyEdges)
                 .jsonObject["configuration"]!!.jsonPrimitive.content
         }
         return modules.flatMap { module ->
@@ -205,13 +209,25 @@ internal object MavenProjectImporter {
         }
     }
 
-    private fun component(root: Path, module: Module, classpath: List<String>): JsonElement {
+    private fun component(root: Path, module: Module, classpath: List<String>, resolvedEdges: List<String> = emptyList()): JsonElement {
         val sourceSets = sourceSets(root, module)
-        val configuration = fingerprint(
-            listOf(
-                Files.readAllBytes(module.pom),
-                sourceSets.joinToString("\n").encodeToByteArray(),
-                classpath.joinToString("\n").encodeToByteArray(),
+        val dependencyEdges = module.model.dependencies.orEmpty()
+            .filter { dependency -> dependency.scope != "import" && dependency.optional != "true" }
+            .map { dependency ->
+                val classifier = dependency.classifier?.takeIf(String::isNotBlank)?.let { ":$it" }.orEmpty()
+                "${dependency.scope ?: "compile"}:${dependency.groupId}:${dependency.artifactId}$classifier:${dependency.type ?: "jar"}:${dependency.version ?: "managed"}"
+            }
+        val configuration = ComponentContextDigest.fingerprint(
+            component = componentId(root, module),
+            sourceSets = sourceSets.map { sourceSet ->
+                "${sourceSet.name}:${sourceSet.test}:${sourceSet.roots.joinToString(",")}:${sourceSet.languages.joinToString(",")}"
+            },
+            artifacts = classpath,
+            dependencyEdges = dependencyEdges + resolvedEdges,
+            toolchain = listOf(
+                "build-tool=maven-model-$MODEL_VERSION",
+                "jvm=${System.getProperty("java.version")}",
+                "language-level=${javaLanguageLevel(module.model) ?: "default"}",
             ),
         )
         val relative = workspacePath(root, module.directory)

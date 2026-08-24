@@ -8,6 +8,7 @@ import org.eclipse.aether.artifact.DefaultArtifact
 import org.eclipse.aether.collection.CollectRequest
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory
 import org.eclipse.aether.graph.Dependency
+import org.eclipse.aether.graph.DependencyNode
 import org.eclipse.aether.impl.DefaultServiceLocator
 import org.eclipse.aether.repository.LocalRepository
 import org.eclipse.aether.repository.RemoteRepository
@@ -19,7 +20,11 @@ import org.eclipse.aether.transport.http.HttpTransporterFactory
 /** Official Maven Resolver adapter for external artifacts only. */
 internal object MavenExternalResolver {
     data class ResolvedArtifact(val path: Path, val coordinate: String, val version: String)
-    data class Resolution(val artifacts: List<ResolvedArtifact>, val unresolvedCoordinates: List<String>) {
+    data class Resolution(
+        val artifacts: List<ResolvedArtifact>,
+        val dependencyEdges: List<String>,
+        val unresolvedCoordinates: List<String>,
+    ) {
         val paths: List<Path> get() = artifacts.map(ResolvedArtifact::path)
     }
     private val repositorySystem: RepositorySystem by lazy {
@@ -51,26 +56,55 @@ internal object MavenExternalResolver {
                     dependency.scope ?: "compile",
                 )
             }
-        fun resolve(dependencies: List<Dependency>): List<ResolvedArtifact> {
+        fun resolve(dependencies: List<Dependency>): Resolution {
             val request = CollectRequest().apply {
                 repositories = listOf(RemoteRepository.Builder("central", "default", "https://repo.maven.apache.org/maven2/").build())
                 dependencies.forEach(::addDependency)
             }
-            return repositorySystem.resolveDependencies(session, DependencyRequest(request, null)).artifactResults
+            val result = repositorySystem.resolveDependencies(session, DependencyRequest(request, null))
+            val artifacts = result.artifactResults
                 .mapNotNull { result -> result.artifact?.let { artifact -> artifact.file?.toPath()?.let { path -> artifact to path } } }
                 .filter { (_, path) -> path.fileName.toString().endsWith(".jar") }
                 .map { (artifact, path) ->
                     val classifier = artifact.classifier.takeIf(String::isNotBlank)?.let { ":$it" }.orEmpty()
                     ResolvedArtifact(path, "${artifact.groupId}:${artifact.artifactId}$classifier:${artifact.extension}", artifact.version)
                 }
+            return Resolution(
+                artifacts = artifacts,
+                dependencyEdges = dependencyEdges(result.root),
+                unresolvedCoordinates = emptyList(),
+            )
         }
-        if (!bestEffortEnabled) return Resolution(resolve(dependencies).distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() }, emptyList())
+        if (!bestEffortEnabled) {
+            val result = resolve(dependencies)
+            return result.copy(artifacts = result.artifacts.distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() })
+        }
         val resolved = dependencies.map { dependency ->
             dependency to runCatching { resolve(listOf(dependency)) }
         }
         return Resolution(
-            artifacts = resolved.flatMap { (_, result) -> result.getOrDefault(emptyList()) }.distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() },
+            artifacts = resolved.flatMap { (_, result) -> result.getOrNull()?.artifacts.orEmpty() }.distinctBy(ResolvedArtifact::path).sortedBy { it.path.toString() },
+            dependencyEdges = resolved.flatMap { (_, result) -> result.getOrNull()?.dependencyEdges.orEmpty() }.distinct().sorted(),
             unresolvedCoordinates = resolved.mapNotNull { (dependency, result) -> result.exceptionOrNull()?.let { dependency.artifact.toString() } }.sorted(),
         )
+    }
+
+    private fun dependencyEdges(root: DependencyNode?): List<String> {
+        val edges = mutableListOf<String>()
+        fun coordinate(node: DependencyNode): String? = node.dependency?.artifact?.let { artifact ->
+            val classifier = artifact.classifier.takeIf(String::isNotBlank)?.let { ":$it" }.orEmpty()
+            "${artifact.groupId}:${artifact.artifactId}$classifier:${artifact.extension}:${artifact.version}"
+        }
+        fun visit(parent: DependencyNode, parentCoordinate: String?) {
+            parent.children.orEmpty().forEach { child ->
+                val target = coordinate(child)
+                if (parentCoordinate != null && target != null) {
+                    edges += "$parentCoordinate>${child.dependency?.scope ?: "compile"}>$target"
+                }
+                visit(child, target)
+            }
+        }
+        root?.let { visit(it, coordinate(it)) }
+        return edges.distinct().sorted()
     }
 }
