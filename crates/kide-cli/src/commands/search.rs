@@ -21,13 +21,16 @@ use super::{
     fields(workspace = %context.path().display(), human_output)
 )]
 pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<QueryStatus> {
-    let workspace = context.path();
+    // Discovery canonicalizes the workspace root.  Resolve it up front as well,
+    // so the metadata callback receives paths in the same namespace on macOS
+    // (`/var` vs `/private/var`) and can safely derive workspace-relative keys.
+    let workspace = kide_core::find_workspace_root(context.path())?;
     let store = {
         let _span = tracing::debug_span!(target: "kide::status", "open_index").entered();
-        IndexStore::open(IndexStore::default_path(workspace))?
+        IndexStore::open(IndexStore::default_path(&workspace))?
     };
     let Some(manifest) = store.latest_manifest()? else {
-        return print_query_response(QueryStatus::NoResult, None, Vec::new());
+        return print_query_response(context, &store, QueryStatus::NoResult, None, Vec::new());
     };
     let mut counts = kide_core::IndexCounts {
         fresh: 0,
@@ -43,8 +46,8 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             .map(|item| (item.path.as_str().to_owned(), item))
             .collect::<BTreeMap<_, _>>()
     };
-    let discovery = kide_core::discover_workspace_with_source_fingerprints(workspace, |path| {
-        super::source_metadata::observe_source_file(workspace, path, &cached_source_metadata)
+    let discovery = kide_core::discover_workspace_with_source_fingerprints(&workspace, |path| {
+        super::source_metadata::observe_source_file(&workspace, path, &cached_source_metadata)
             .map(|observation| observation.content)
     })?;
     let mut current_configuration_inputs = discovery.configuration_input_records.clone();
@@ -345,6 +348,25 @@ pub(super) fn symbols(
         1 => QueryStatus::Ok,
         _ => QueryStatus::Ambiguous,
     };
+    if !symbols.is_empty()
+        && let Some(problem) = super::freshness_gate::freshness_problem(
+            context,
+            &store,
+            &QueryPayload::Symbols {
+                symbols: symbols.clone(),
+            },
+        )?
+    {
+        let response = QueryResponse {
+            schema_version: CANONICAL_SCHEMA_VERSION,
+            status: QueryStatus::Stale,
+            result: None,
+            metadata: ResultMetadata::empty(),
+            problems: vec![problem],
+        };
+        print_response(&response)?;
+        return Ok(QueryStatus::Stale);
+    }
     if short && !symbols.is_empty() {
         print_short_symbols(&store, workspace, &symbols)?;
         return Ok(status);

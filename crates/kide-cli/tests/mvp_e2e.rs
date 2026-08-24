@@ -419,6 +419,21 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     });
     assert_eq!(stale["result"]["source_units"]["stale"], 1);
     assert_eq!(stale["metadata"]["freshness"], "stale");
+    let stale_definition = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "definition",
+            &book_entity_id,
+        ],
+    );
+    assert_eq!(stale_definition["status"], "stale");
+    assert!(stale_definition["result"].is_null());
+    assert_eq!(
+        stale_definition["problems"][0]["code"],
+        "stale_source_snapshot"
+    );
 
     let incremental = measure("incremental_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])

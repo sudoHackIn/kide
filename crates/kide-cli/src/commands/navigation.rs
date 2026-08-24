@@ -7,7 +7,7 @@ use kide_core::{
     document_from_bytes,
 };
 
-use super::{WorkspaceContext, print_response};
+use super::{WorkspaceContext, freshness_gate::freshness_problem, print_response};
 
 pub(super) fn fan_out(
     mut targets: Vec<String>,
@@ -69,6 +69,15 @@ pub(super) fn select_symbols(
             .push(SelectorPredicate::QualifiedNamePrefix(prefix));
     }
     let result = select(&store, &selector)?;
+    if let Some(problem) = freshness_problem(
+        context,
+        &store,
+        &QueryPayload::Symbols {
+            symbols: result.symbols.clone(),
+        },
+    )? {
+        return print_query_response(context, &store, QueryStatus::Stale, None, vec![problem]);
+    }
     if human_output {
         print_short_symbols(&store, workspace, &result.symbols)?;
     } else {
@@ -122,7 +131,7 @@ pub(super) fn definition(
 ) -> Result<QueryStatus> {
     let workspace = context.path();
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
-    let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
+    let (mut status, mut result, mut problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(id) => match store.symbol(&id)? {
             Some(symbol) => (
                 QueryStatus::Ok,
@@ -159,6 +168,14 @@ pub(super) fn definition(
             }],
         ),
     };
+    if status == QueryStatus::Ok
+        && let Some(payload) = result.as_ref()
+        && let Some(problem) = freshness_problem(context, &store, payload)?
+    {
+        status = QueryStatus::Stale;
+        result = None;
+        problems.push(problem);
+    }
     if human_output {
         match result {
             Some(QueryPayload::Definition { symbol }) => {
@@ -169,14 +186,7 @@ pub(super) fn definition(
         }
         return Ok(status);
     }
-    print_response(&QueryResponse {
-        schema_version: CANONICAL_SCHEMA_VERSION,
-        status,
-        result,
-        metadata: ResultMetadata::empty(),
-        problems,
-    })?;
-    Ok(status)
+    print_query_response(context, &store, status, result, problems)
 }
 
 pub(super) fn references(
@@ -235,6 +245,21 @@ pub(super) fn references(
             });
             references.dedup();
             if short {
+                if let Some(problem) = freshness_problem(
+                    context,
+                    &store,
+                    &QueryPayload::Refs {
+                        references: references.clone(),
+                    },
+                )? {
+                    return print_query_response(
+                        context,
+                        &store,
+                        QueryStatus::Stale,
+                        None,
+                        vec![problem],
+                    );
+                }
                 if references.is_empty() {
                     println!("no references");
                     return Ok(QueryStatus::NoResult);
@@ -246,7 +271,7 @@ pub(super) fn references(
         }
         resolution => target_problem(resolution),
     };
-    print_query_response(status, result, problems)
+    print_query_response(context, &store, status, result, problems)
 }
 
 fn print_short_references(
@@ -366,6 +391,21 @@ pub(super) fn callers(
                 .map(|edge| edge.source)
                 .collect::<Vec<_>>();
             if human_output {
+                if let Some(problem) = freshness_problem(
+                    context,
+                    &store,
+                    &QueryPayload::Callers {
+                        calls: calls.clone(),
+                    },
+                )? {
+                    return print_query_response(
+                        context,
+                        &store,
+                        QueryStatus::Stale,
+                        None,
+                        vec![problem],
+                    );
+                }
                 if calls.is_empty() {
                     println!("no callers");
                     return Ok(QueryStatus::NoResult);
@@ -377,7 +417,7 @@ pub(super) fn callers(
         }
         resolution => target_problem(resolution),
     };
-    print_query_response(status, result, problems)
+    print_query_response(context, &store, status, result, problems)
 }
 
 pub(super) fn implementations(
@@ -410,6 +450,21 @@ pub(super) fn implementations(
                 )?;
             }
             if human_output {
+                if let Some(problem) = freshness_problem(
+                    context,
+                    &store,
+                    &QueryPayload::Implementations {
+                        symbols: symbols.clone(),
+                    },
+                )? {
+                    return print_query_response(
+                        context,
+                        &store,
+                        QueryStatus::Stale,
+                        None,
+                        vec![problem],
+                    );
+                }
                 if symbols.is_empty() {
                     println!("no implementations");
                     return Ok(QueryStatus::NoResult);
@@ -421,7 +476,7 @@ pub(super) fn implementations(
         }
         resolution => target_problem(resolution),
     };
-    print_query_response(status, result, problems)
+    print_query_response(context, &store, status, result, problems)
 }
 
 pub(super) fn cached_dependency_implementations(
@@ -459,7 +514,7 @@ pub(super) fn type_at(
         .occurrences_at(&source_unit.id, offset)?
         .into_iter()
         .find(|occurrence| occurrence.type_id.is_some());
-    let (status, result) = match occurrence {
+    let (mut status, mut result) = match occurrence {
         Some(occurrence) => match occurrence.type_id.as_ref() {
             Some(type_id) => match store
                 .types_for(&source_unit.id)?
@@ -476,6 +531,15 @@ pub(super) fn type_at(
         },
         None => (QueryStatus::NoResult, None),
     };
+    let mut problems = Vec::new();
+    if status == QueryStatus::Ok
+        && let Some(payload) = result.as_ref()
+        && let Some(problem) = freshness_problem(context, &store, payload)?
+    {
+        status = QueryStatus::Stale;
+        result = None;
+        problems.push(problem);
+    }
     if human_output {
         match result {
             Some(QueryPayload::TypeAt { ty, .. }) => println!("{}", ty.display),
@@ -484,7 +548,7 @@ pub(super) fn type_at(
         }
         return Ok(status);
     }
-    print_query_response(status, result, Vec::new())
+    print_query_response(context, &store, status, result, problems)
 }
 
 #[derive(Debug)]
@@ -593,10 +657,22 @@ pub(super) fn target_problem(
 }
 
 pub(super) fn print_query_response(
+    context: &WorkspaceContext,
+    store: &IndexStore,
     status: QueryStatus,
-    result: Option<QueryPayload>,
-    problems: Vec<QueryProblem>,
+    mut result: Option<QueryPayload>,
+    mut problems: Vec<QueryProblem>,
 ) -> Result<QueryStatus> {
+    let status = if status == QueryStatus::Ok
+        && let Some(payload) = result.as_ref()
+        && let Some(problem) = freshness_problem(context, store, payload)?
+    {
+        result = None;
+        problems.push(problem);
+        QueryStatus::Stale
+    } else {
+        status
+    };
     print_response(&QueryResponse {
         schema_version: CANONICAL_SCHEMA_VERSION,
         status,

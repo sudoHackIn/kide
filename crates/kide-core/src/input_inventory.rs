@@ -215,7 +215,7 @@ pub(crate) fn component_scope(
 
 /// Content identity of one tracked input. The path is stored separately, so a
 /// rename is observable even when file contents are unchanged.
-pub(crate) fn fingerprint_file(path: &Path) -> Result<Fingerprint, io::Error> {
+pub fn fingerprint_file(path: &Path) -> Result<Fingerprint, io::Error> {
     Ok(Fingerprint::new(format!(
         "sha256:{:x}",
         Sha256::digest(fs::read(path)?)

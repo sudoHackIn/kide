@@ -9,6 +9,7 @@ use kide_core::{
 };
 
 mod config;
+mod freshness_gate;
 mod index;
 mod input;
 mod navigation;

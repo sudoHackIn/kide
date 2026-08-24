@@ -7,10 +7,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use kide_core::{
     DiscoveredWorker, Fingerprint, IndexStore, QueryCapabilityNegotiation, QueryCapabilityStatus,
-    QueryStatus, SemanticQueryArgument, SemanticQueryArgumentValue, SemanticQueryBudget,
-    SemanticQueryResponse, SemanticQueryResponseState, SemanticQueryResultKind, WorkerRegistry,
-    WorkerSupervisor, execute_semantic_capability, negotiate_query_capabilities,
-    plan_semantic_capability,
+    QueryPayload, QueryStatus, SemanticQueryArgument, SemanticQueryArgumentValue,
+    SemanticQueryBudget, SemanticQueryResponse, SemanticQueryResponseState,
+    SemanticQueryResultKind, WorkerRegistry, WorkerSupervisor, execute_semantic_capability,
+    negotiate_query_capabilities, plan_semantic_capability,
     project_query::ProjectQuery,
     query_package::{PackageCapability, PackageRegistry, PackageSource, RegisteredPackage},
     selector::{SelectorResult, SelectorState, records},
@@ -18,7 +18,9 @@ use kide_core::{
 };
 use serde::Serialize;
 
-use super::{WorkspaceContext, index::kotlin_worker_installation};
+use super::{
+    WorkspaceContext, freshness_gate::freshness_problem, index::kotlin_worker_installation,
+};
 
 const QUERY_CAPABILITY_MAX_BYTES: u64 = 1024 * 1024;
 const QUERY_CAPABILITY_DEADLINE_MILLIS: u64 = 5_000;
@@ -130,7 +132,7 @@ pub(super) fn run(
             }
             Ok(QueryStatus::Ok)
         }
-        [name] => invoke(workspace, name, params, verbosity),
+        [name] => invoke(context, name, params, verbosity),
         _ => bail!(
             "use `kide query list`, `kide query describe <name>`, or `kide query <name> --param name=value`"
         ),
@@ -138,11 +140,12 @@ pub(super) fn run(
 }
 
 fn invoke(
-    workspace: &Path,
+    context: &WorkspaceContext,
     name: &str,
     params: Vec<(String, String)>,
     verbosity: u8,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     let resolved = load(workspace, name)?;
     let values = params.into_iter().collect::<BTreeMap<_, _>>();
     let bound = resolved.query.bind(&values)?;
@@ -162,7 +165,7 @@ fn invoke(
     };
     let negotiations = negotiate_query_capabilities(&requirements, &workers);
     execute_resolved(
-        workspace,
+        context,
         resolved,
         bound,
         workers,
@@ -183,7 +186,7 @@ fn invoke(
 }
 
 fn execute_resolved(
-    workspace: &Path,
+    context: &WorkspaceContext,
     resolved: ResolvedProjectQuery,
     bound: QueryParameters,
     workers: Vec<DiscoveredWorker>,
@@ -193,6 +196,7 @@ fn execute_resolved(
         &kide_core::SemanticCapabilityPlan,
     ) -> Result<SemanticQueryResponse>,
 ) -> Result<QueryStatus> {
+    let workspace = context.path();
     let requirements = requirements(&resolved);
     let used = used_capabilities(&resolved);
     let mut plan = negotiated_plan(&resolved, &negotiations, &workers);
@@ -288,6 +292,17 @@ fn execute_resolved(
 
     if capability_partial && result.state == SelectorState::Complete {
         result.state = SelectorState::Partial;
+    }
+    if let Some(problem) = freshness_problem(
+        context,
+        &store,
+        &QueryPayload::Symbols {
+            symbols: result.symbols.clone(),
+        },
+    )? {
+        tracing::debug!(target: "kide::freshness", code = problem.code, "semantic query result rejected by freshness gate");
+        print_status_record(QueryStatus::Stale, &plan)?;
+        return Ok(QueryStatus::Stale);
     }
     let status = match result.state {
         SelectorState::Complete => QueryStatus::Ok,
@@ -704,7 +719,7 @@ mod tests {
         let resolved = load(workspace.path(), "demo.command").expect("loads query");
         let negotiations = negotiate_query_capabilities(&requirements(&resolved), &[]);
         let status = execute_resolved(
-            workspace.path(),
+            &WorkspaceContext::load(workspace.path()).expect("loads context"),
             resolved,
             QueryParameters::new(),
             Vec::new(),
@@ -726,7 +741,7 @@ mod tests {
         let resolved = load(workspace.path(), "demo.command").expect("loads query");
         let negotiations = negotiate_query_capabilities(&requirements(&resolved), &[]);
         let status = execute_resolved(
-            workspace.path(),
+            &WorkspaceContext::load(workspace.path()).expect("loads context"),
             resolved,
             QueryParameters::new(),
             Vec::new(),
@@ -751,7 +766,7 @@ mod tests {
             negotiate_query_capabilities(&requirements(&resolved), std::slice::from_ref(&worker));
         let mut calls = 0;
         let status = execute_resolved(
-            workspace.path(),
+            &WorkspaceContext::load(workspace.path()).expect("loads context"),
             resolved,
             QueryParameters::new(),
             vec![worker],

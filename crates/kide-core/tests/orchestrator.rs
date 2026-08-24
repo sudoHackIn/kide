@@ -37,6 +37,39 @@ fn indexes_a_cold_batch_then_reuses_unchanged_snapshots() {
 }
 
 #[test]
+fn changed_source_context_reanalyzes_only_affected_source() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let manifest = manifest();
+    let sources = vec![
+        source("One.kt", "sha256:one"),
+        source("Two.kt", "sha256:two"),
+    ];
+
+    index_batch(&mut store, &manifest, &sources, launch()).expect("cold index");
+
+    let mut changed = sources.clone();
+    changed[0].context = Fingerprint::new("sha256:dependency-graph-v2");
+    let run = index_batch(&mut store, &manifest, &changed, launch())
+        .expect("indexes affected source context");
+
+    assert_eq!(run.analyzed, 1);
+    assert_eq!(run.reused, 1);
+    assert_eq!(
+        store
+            .source_unit(&changed[0].id)
+            .expect("reads reindexed source"),
+        Some(changed[0].clone())
+    );
+    assert_eq!(
+        store
+            .source_unit(&changed[1].id)
+            .expect("reads reused source"),
+        Some(changed[1].clone())
+    );
+}
+
+#[test]
 fn selected_source_shards_reuse_one_source_worker_and_start_dependency_lane() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
