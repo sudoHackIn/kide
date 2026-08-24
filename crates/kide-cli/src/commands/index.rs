@@ -54,6 +54,132 @@ pub(super) fn index_with_source_metadata(
     Ok(result)
 }
 
+/// Local-only preview. It intentionally never asks Maven/Gradle for a new
+/// classpath: if tracked build inputs changed, the result says so explicitly
+/// rather than presenting a speculative dependency diff as authoritative.
+pub(super) fn plan_with_source_metadata(
+    invocation: &Path,
+    configuration: EffectiveConfiguration,
+    artifact_cache_root: PathBuf,
+    human_output: bool,
+) -> Result<QueryStatus> {
+    let root = kide_core::find_workspace_root(invocation)?;
+    let store = IndexStore::open(IndexStore::default_path(&root))?;
+    let cached = store
+        .source_file_metadata()?
+        .into_iter()
+        .map(|item| (item.path.as_str().to_owned(), item))
+        .collect::<BTreeMap<_, _>>();
+    let discovery = kide_core::discover_workspace_with_source_fingerprints(&root, |path| {
+        Ok(super::source_metadata::observe_source_file(&root, path, &cached)?.content)
+    })?;
+    let mut inputs = discovery.configuration_input_records.clone();
+    inputs.push(effective_configuration_input(
+        &configuration,
+        &discovery.manifest.components,
+    )?);
+    let configuration_current = store
+        .configuration_input_status(&inputs)?
+        .inputs
+        .iter()
+        .all(|input| input.state == kide_core::ConfigurationInputState::Current);
+    let manifest = configuration_current
+        .then(|| store.latest_manifest())
+        .transpose()?
+        .flatten();
+    let persisted_sources = store
+        .source_units()?
+        .into_iter()
+        .filter(|source| source.origin != kide_core::SourceOrigin::Dependency)
+        .collect::<Vec<_>>();
+    let mut sources = discovery.source_units;
+    if let Some(manifest) = &manifest {
+        for source in &mut sources {
+            if let Some(component) = manifest
+                .components
+                .iter()
+                .find(|component| component.id == source.component)
+            {
+                source.context = component.configuration.clone();
+            }
+        }
+    }
+    let descriptors = store.artifact_descriptors()?;
+    let cache = ArtifactBlobCache::open(artifact_cache_root)?;
+    let plan = plan_incremental_index(
+        if manifest.is_some() {
+            ManifestAction::Reuse
+        } else {
+            ManifestAction::Resolve
+        },
+        &sources,
+        &persisted_sources,
+        &descriptors,
+        &descriptors,
+        |key| cache.open_blob(key).ok().flatten().is_some(),
+    );
+    let source_reused = plan
+        .sources
+        .iter()
+        .filter(|action| matches!(action, kide_core::IndexAction::Reuse(_)))
+        .count();
+    let source_analyze = plan
+        .sources
+        .iter()
+        .filter(|action| matches!(action, kide_core::IndexAction::Reanalyze { .. }))
+        .count();
+    let source_removed = plan
+        .sources
+        .iter()
+        .filter(|action| matches!(action, kide_core::IndexAction::Remove { .. }))
+        .count();
+    let dependency_hits = plan
+        .dependencies
+        .iter()
+        .filter(|action| matches!(action, DependencyAction::CacheHit(_)))
+        .count();
+    let dependency_misses = plan
+        .dependencies
+        .iter()
+        .filter(|action| matches!(action, DependencyAction::CacheMiss(_)))
+        .count();
+    let cached_bytes = descriptors
+        .iter()
+        .filter_map(|descriptor| {
+            store
+                .artifact_blob_for(&descriptor.source_unit.id)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.byte_length)
+        })
+        .sum::<u64>();
+    let result = serde_json::json!({
+            "schema_version": CANONICAL_SCHEMA_VERSION,
+            "status": "ok",
+            "workspace": root,
+            "manifest": if manifest.is_some() { "reused" } else { "resolve_required" },
+            "sources": { "reused": source_reused, "analyze": source_analyze, "removed": source_removed },
+            "dependencies": { "cataloged": descriptors.len(), "cache_hits": dependency_hits, "cache_misses": dependency_misses, "cached_bytes": cached_bytes },
+            "worker_starts": 0,
+    });
+    if human_output {
+        println!(
+            "index plan: manifest={} sources reuse/analyze/remove={}/{}/{} dependencies cataloged/hit/miss={}/{}/{} cached_bytes={}",
+            result["manifest"],
+            source_reused,
+            source_analyze,
+            source_removed,
+            descriptors.len(),
+            dependency_hits,
+            dependency_misses,
+            cached_bytes,
+        );
+    } else {
+        println!("{result}");
+    }
+    Ok(QueryStatus::Ok)
+}
+
 fn index(
     discovery: WorkspaceDiscovery,
     configuration: EffectiveConfiguration,

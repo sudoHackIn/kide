@@ -82,12 +82,21 @@ fn dispatch_configured(
         }
         Command::Index {
             path,
+            plan,
             force,
             warm_dependencies,
             materialize_only,
         } => {
             let root = kide_core::find_workspace_root(&path)?;
             let index_context = WorkspaceContext::load_required(&root)?;
+            if plan {
+                return index::plan_with_source_metadata(
+                    &path,
+                    index_context.configuration,
+                    index_context.artifact_cache_root,
+                    human_output,
+                );
+            }
             index::index_with_source_metadata(
                 &path,
                 index_context.configuration,

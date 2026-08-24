@@ -42,6 +42,9 @@ pub(crate) enum Command {
     },
     Index {
         path: PathBuf,
+        /// Inspect local incremental work without starting a build or language worker.
+        #[arg(long)]
+        plan: bool,
         #[arg(long)]
         force: bool,
         /// Materialize dependency blobs; omit value for 16, use 0 for all.

@@ -20,6 +20,18 @@ kide --workspace /path/to/project status
 
 `status` is worker-free. It verifies the persisted checkpoint against current sources and configuration and reports `fresh`, `stale`, or `unknown`.
 
+Preview incremental work without starting Maven, Gradle, or a language worker:
+
+```bash
+kide index --plan /path/to/project
+```
+
+The stable JSON result reports whether the resolved manifest can be reused,
+source `reused`/`analyze`/`removed` counts, dependency cache hits and misses,
+and cached blob bytes. When build inputs changed it reports
+`manifest: "resolve_required"`; run `kide index` to obtain the authoritative
+new classpath.
+
 ## Maven projects with unavailable private dependencies
 
 For repositories whose Maven dependencies are only available on a private repository, keep indexing source facts while recording unavailable dependencies as unresolved:
