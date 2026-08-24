@@ -15,6 +15,7 @@ mod navigation;
 mod output;
 mod query;
 mod search;
+mod source_metadata;
 
 /// Immutable command-scoped inputs loaded once before semantic dispatch.
 #[derive(Debug)]

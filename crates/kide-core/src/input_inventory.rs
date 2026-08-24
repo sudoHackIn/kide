@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ArtifactDescriptor, Component, ComponentId, Fingerprint, SourceUnit, WorkspaceId, WorkspacePath,
+    ArtifactDescriptor, Component, ComponentId, Fingerprint, SourceUnit, SourceUnitId, WorkspaceId,
+    WorkspacePath,
 };
 
 /// One individually verifiable configuration or dependency-resolution input.
@@ -29,6 +30,14 @@ pub struct SourceFileMetadata {
     pub path: WorkspacePath,
     pub byte_size: i64,
     pub modified_nanos: i128,
+    pub content: Fingerprint,
+}
+
+/// Minimal persisted identity needed to check whether an indexed source still
+/// matches the current filesystem. It deliberately omits semantic facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSnapshotInput {
+    pub id: SourceUnitId,
     pub content: Fingerprint,
 }
 

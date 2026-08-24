@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::Result;
 use kide_core::{
     ArtifactBlobCache, ArtifactBlobCacheError, CANONICAL_SCHEMA_VERSION, Completeness, Freshness,
     IndexStore, Precision, QueryPayload, QueryProblem, QueryResponse, QueryStatus, ResultMetadata,
-    SymbolRecord, document_from_bytes, fingerprint_artifact_catalog,
-    fingerprint_configuration_inputs, fingerprint_source_inputs,
+    SymbolRecord, fingerprint_artifact_catalog, fingerprint_configuration_inputs,
+    fingerprint_source_inputs,
 };
 
 use super::{
@@ -35,7 +35,18 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         unknown: 0,
         unsupported: 0,
     };
-    let discovery = kide_core::discover_workspace(workspace)?;
+    let cached_source_metadata = {
+        let _span = tracing::debug_span!(target: "kide::status", "read_source_metadata").entered();
+        store
+            .source_file_metadata()?
+            .into_iter()
+            .map(|item| (item.path.as_str().to_owned(), item))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let discovery = kide_core::discover_workspace_with_source_fingerprints(workspace, |path| {
+        super::source_metadata::observe_source_file(workspace, path, &cached_source_metadata)
+            .map(|observation| observation.content)
+    })?;
     let mut current_configuration_inputs = discovery.configuration_input_records.clone();
     current_configuration_inputs.push(super::index::effective_configuration_input(
         &context.configuration,
@@ -55,34 +66,47 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             kide_core::ConfigurationInputState::Missing => configuration_counts.missing += 1,
         }
     }
-    let persisted_sources = {
-        let _span = tracing::debug_span!(target: "kide::status", "read_source_units").entered();
-        store.source_units()?
+    let current_source_content = discovery
+        .source_units
+        .iter()
+        .map(|source| (source.id.as_str(), &source.content))
+        .collect::<BTreeMap<_, _>>();
+    let source_inputs = fingerprint_source_inputs(&discovery.source_units);
+    let checkpoint = {
+        let _span = tracing::debug_span!(target: "kide::status", "read_checkpoint").entered();
+        store.workspace_checkpoint()?
     };
-    let _span = tracing::debug_span!(target: "kide::status", "validate_source_units", sources = persisted_sources.len()).entered();
-    for source in persisted_sources {
-        match source.origin {
-            kide_core::SourceOrigin::Source | kide_core::SourceOrigin::Generated => {
-                let current = std::fs::read(workspace.join(source.path.as_str()))
-                    .ok()
-                    .and_then(|bytes| document_from_bytes(source.path.clone(), bytes).ok());
-                match current {
-                    Some(current) if current.fingerprint == source.content => counts.fresh += 1,
-                    Some(_) => counts.stale += 1,
-                    None => counts.unknown += 1,
-                }
+    let source_checkpoint_matches = checkpoint.as_ref().is_some_and(|checkpoint| {
+        checkpoint.committed
+            && checkpoint.workspace == manifest.workspace
+            && checkpoint.manifest == manifest.fingerprint
+            && checkpoint.source_inputs == source_inputs
+    });
+    if source_checkpoint_matches {
+        // A matching checkpoint is written only after all source snapshots are
+        // published, so this common path needs no source_snapshots query.
+        counts.fresh = u64::try_from(discovery.source_units.len())?;
+    } else {
+        let persisted_sources = {
+            let _span = tracing::debug_span!(target: "kide::status", "read_source_snapshot_inputs")
+                .entered();
+            store.source_snapshot_inputs()?
+        };
+        let _span = tracing::debug_span!(target: "kide::status", "validate_source_units", sources = persisted_sources.len()).entered();
+        for source in persisted_sources {
+            match current_source_content.get(source.id.as_str()) {
+                Some(current) if **current == source.content => counts.fresh += 1,
+                Some(_) => counts.stale += 1,
+                None => counts.unknown += 1,
             }
-            kide_core::SourceOrigin::Dependency => counts.unknown += 1,
         }
     }
-    drop(_span);
     let configuration_stale = configuration_counts.added > 0
         || configuration_counts.changed > 0
         || configuration_counts.missing > 0;
-    let (checkpoint, artifact_descriptors) = {
-        let _span =
-            tracing::debug_span!(target: "kide::status", "read_checkpoint_and_catalog").entered();
-        (store.workspace_checkpoint()?, store.artifact_descriptors()?)
+    let artifact_descriptors = {
+        let _span = tracing::debug_span!(target: "kide::status", "read_artifact_catalog").entered();
+        store.artifact_descriptors()?
     };
     let checkpoint_matches = checkpoint.as_ref().is_some_and(|checkpoint| {
         checkpoint.committed
@@ -90,7 +114,7 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
             && checkpoint.manifest == manifest.fingerprint
             && checkpoint.configuration_inputs
                 == fingerprint_configuration_inputs(&current_configuration_inputs)
-            && checkpoint.source_inputs == fingerprint_source_inputs(&discovery.source_units)
+            && checkpoint.source_inputs == source_inputs
             && checkpoint.artifact_catalog == fingerprint_artifact_catalog(&artifact_descriptors)
     });
     let freshness = if checkpoint.is_none() {
@@ -131,11 +155,11 @@ pub(super) fn status(context: &WorkspaceContext, human_output: bool) -> Result<Q
         }
     }
     drop(_span);
-    let mut provenance = store
-        .analysis_inputs()?
-        .into_iter()
-        .map(|input| input.provenance)
-        .collect::<Vec<_>>();
+    let mut provenance = {
+        let _span =
+            tracing::debug_span!(target: "kide::status", "read_analysis_provenance").entered();
+        store.analysis_provenance()?
+    };
     provenance.sort_by(|left, right| {
         (
             left.backend.as_str(),

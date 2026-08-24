@@ -918,7 +918,7 @@ pub use framework_query::*;
 pub use freshness::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
-    ConfigurationInputStatus, SourceFileMetadata, WorkspaceCheckpoint,
+    ConfigurationInputStatus, SourceFileMetadata, SourceSnapshotInput, WorkspaceCheckpoint,
     fingerprint_artifact_catalog, fingerprint_configuration_inputs, fingerprint_source_inputs,
     reconcile_configuration_inputs,
 };

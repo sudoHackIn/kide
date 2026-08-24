@@ -18,8 +18,9 @@ use crate::{
     ComponentId, ConfigurationInput, ConfigurationInputReconciliation, DiagnosticRecord,
     FileAnalysisSnapshot, Fingerprint, HierarchyEdge, INDEX_FORMAT_VERSION, LexicalMatch,
     ProjectManifest, Provenance, ReferenceEdge, ResolvedDependencyIdentity, SourceFileMetadata,
-    SourceOccurrence, SourceUnit, SourceUnitId, SymbolId, SymbolRecord, TextDocument, TypeRecord,
-    WORKER_PROTOCOL_VERSION, WorkspaceCheckpoint, WorkspacePath, reconcile_configuration_inputs,
+    SourceOccurrence, SourceSnapshotInput, SourceUnit, SourceUnitId, SymbolId, SymbolRecord,
+    TextDocument, TypeRecord, WORKER_PROTOCOL_VERSION, WorkspaceCheckpoint, WorkspacePath,
+    reconcile_configuration_inputs,
 };
 
 const MIGRATION_1: &str = r#"
@@ -230,6 +231,16 @@ ALTER TABLE workspace_checkpoints
 const MIGRATION_14: &str = r#"
 ALTER TABLE workspace_checkpoints
     ADD COLUMN publication_state TEXT NOT NULL DEFAULT 'committed';
+"#;
+const MIGRATION_15: &str = r#"
+CREATE TABLE IF NOT EXISTS source_provenance (
+    source_unit_id TEXT PRIMARY KEY,
+    provenance_blob BLOB NOT NULL
+);
+INSERT OR REPLACE INTO source_provenance (source_unit_id, provenance_blob)
+    SELECT source_unit_id, provenance_blob
+    FROM source_snapshots
+    WHERE provenance_blob IS NOT NULL;
 "#;
 
 const SYMBOL_RECORD_FORMAT_VERSION: u8 = 2;
@@ -523,6 +534,20 @@ impl IndexStore {
             self.connection.execute_batch(MIGRATION_14)?;
             self.connection
                 .execute("INSERT INTO schema_migrations (version) VALUES (14)", [])?;
+        }
+        if self
+            .connection
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 15",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .is_none()
+        {
+            self.connection.execute_batch(MIGRATION_15)?;
+            self.connection
+                .execute("INSERT INTO schema_migrations (version) VALUES (15)", [])?;
         }
         Ok(())
     }
@@ -1059,6 +1084,25 @@ impl IndexStore {
             .collect()
     }
 
+    /// Reads only the durable identity columns required by status validation.
+    /// Full source snapshots can contain substantial semantic JSON and should
+    /// be decoded only by operations that actually need those facts.
+    pub fn source_snapshot_inputs(&self) -> Result<Vec<SourceSnapshotInput>, IndexStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT source_unit_id, content_fingerprint
+             FROM source_snapshots ORDER BY source_unit_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(SourceSnapshotInput {
+                    id: SourceUnitId::new(row.get::<_, String>(0)?),
+                    content: Fingerprint::new(row.get::<_, String>(1)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(IndexStoreError::from)
+    }
+
     /// Replaces the complete eligible workspace text inventory atomically.
     /// Unchanged documents keep their rows; paths absent from `documents` are
     /// removed in the same transaction so stale lexical matches cannot leak.
@@ -1193,6 +1237,20 @@ impl IndexStore {
                     public_api_fingerprint: public_api_fingerprint.map(crate::Fingerprint::new),
                 })
             })
+            .collect()
+    }
+
+    /// Reads the distinct worker provenances without decoding source snapshots.
+    pub fn analysis_provenance(&self) -> Result<Vec<Provenance>, IndexStoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT provenance_blob FROM source_provenance")?;
+        let records = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|record| bincode::deserialize(&record).map_err(IndexStoreError::from))
             .collect()
     }
 
@@ -1698,6 +1756,7 @@ fn delete_file_owned_facts(
         "annotation_edges",
         "occurrences",
         "symbols",
+        "source_provenance",
         "source_snapshots",
     ] {
         transaction.execute(
@@ -1743,6 +1802,14 @@ fn insert_snapshot(
                 .public_api_fingerprint
                 .as_ref()
                 .map(crate::Fingerprint::as_str),
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO source_provenance (source_unit_id, provenance_blob)
+         VALUES (?1, ?2)",
+        params![
+            source.id.as_str(),
+            bincode::serialize(&snapshot.provenance)?,
         ],
     )?;
     for symbol in &snapshot.symbols {
@@ -2261,12 +2328,22 @@ mod tests {
                 public_api_fingerprint: None,
             }]
         );
+        assert_eq!(
+            store.analysis_provenance().expect("lists provenance"),
+            vec![provenance()]
+        );
         store.remove_snapshot(&source.id).expect("removes source");
         assert!(store.source_units().expect("lists inputs").is_empty());
         assert!(
             store
                 .symbols_named("PaymentService")
                 .expect("reads facts")
+                .is_empty()
+        );
+        assert!(
+            store
+                .analysis_provenance()
+                .expect("removes provenance")
                 .is_empty()
         );
     }

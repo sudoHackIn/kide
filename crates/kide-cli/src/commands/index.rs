@@ -1,9 +1,8 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs,
     path::{Path, PathBuf},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, bail};
@@ -11,8 +10,8 @@ use kide_core::{
     ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, Component,
     ComponentId, ConfigurationInput, EffectiveConfiguration, Fingerprint, IndexStore,
     OpaqueExecutionPlan, ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus,
-    SourceFileMetadata, WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch,
-    WorkerMessage, WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
+    WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage,
+    WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
     cache_catalog_artifact_with_metrics, collect_workspace_text, fingerprint_artifact_catalog,
     fingerprint_configuration_inputs, fingerprint_source_inputs,
     index_batch_with_artifact_cache_provenance_and_execution_plan,
@@ -37,33 +36,9 @@ pub(super) fn index_with_source_metadata(
         .collect::<BTreeMap<_, _>>();
     let mut observed = Vec::new();
     let discovery = kide_core::discover_workspace_with_source_fingerprints(&root, |path| {
-        let key = path
-            .strip_prefix(&root)
-            .expect("workspace path")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let metadata = fs::metadata(path)?;
-        let modified_nanos = metadata
-            .modified()?
-            .duration_since(UNIX_EPOCH)
-            .map_err(std::io::Error::other)?
-            .as_nanos();
-        let modified_nanos = i128::try_from(modified_nanos).map_err(std::io::Error::other)?;
-        let byte_size = i64::try_from(metadata.len()).map_err(std::io::Error::other)?;
-        let content = if let Some(previous) = cached.get(&key).filter(|previous| {
-            previous.byte_size == byte_size && previous.modified_nanos == modified_nanos
-        }) {
-            previous.content.clone()
-        } else {
-            let bytes = fs::read(path)?;
-            Fingerprint::new(format!("sha256:{:x}", Sha256::digest(bytes)))
-        };
-        observed.push(SourceFileMetadata {
-            path: WorkspacePath::new(key),
-            byte_size,
-            modified_nanos,
-            content: content.clone(),
-        });
+        let observation = super::source_metadata::observe_source_file(&root, path, &cached)?;
+        let content = observation.content.clone();
+        observed.push(observation);
         Ok(content)
     })?;
     let result = index(
