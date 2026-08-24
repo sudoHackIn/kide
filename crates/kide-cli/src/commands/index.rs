@@ -7,14 +7,14 @@ use std::{
 
 use anyhow::{Result, bail};
 use kide_core::{
-    ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, Component,
-    ComponentId, ConfigurationInput, DependencyAction, EffectiveConfiguration, Fingerprint,
-    IndexStore, ManifestAction, OpaqueExecutionPlan, ProjectManifestRequest,
-    ProjectManifestResponse, Provenance, QueryStatus, WorkerCapability, WorkerEnvelope,
-    WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry, WorkerSupervisor,
-    WorkspaceDiscovery, WorkspacePath, cache_catalog_artifact_with_metrics, collect_workspace_text,
-    fingerprint_artifact_catalog, fingerprint_configuration_inputs, fingerprint_source_inputs,
-    index_batch_with_artifact_cache_provenance_and_execution_plan,
+    ArtifactBlobCache, ArtifactBlobKey, ArtifactDiscoveryRequest, BuildSystem,
+    CANONICAL_SCHEMA_VERSION, Component, ComponentId, ConfigurationInput, DependencyAction,
+    EffectiveConfiguration, Fingerprint, IndexStore, ManifestAction, OpaqueExecutionPlan,
+    ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus, WorkerCapability,
+    WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry,
+    WorkerSupervisor, WorkspaceDiscovery, WorkspacePath, cache_catalog_artifact_with_metrics,
+    collect_workspace_text, fingerprint_artifact_catalog, fingerprint_configuration_inputs,
+    fingerprint_source_inputs, index_batch_with_artifact_cache_provenance_and_execution_plan,
     index_selected_batches_with_execution_plan, plan_incremental_index,
 };
 use sha2::{Digest, Sha256};
@@ -217,6 +217,11 @@ fn index(
         let mut worker =
             WorkerSupervisor::new(kotlin_worker_installation(&discovery.root, verbosity)?.launch);
         worker.handshake("materialize-only")?;
+        // Resolve the build model once, then retain the returned JAR paths only
+        // for this worker session. Passing the locator below prevents the
+        // materializer from re-importing Maven/Gradle for every cache miss.
+        let resolved = request_project_manifest(&mut worker)?;
+        let artifact_locators = discover_artifact_locators(&mut worker, resolved.execution_plan)?;
         let started = Instant::now();
         let mut budget = kide_core::MaterializationBudget {
             remaining_artifacts: if warm_limit == 0 {
@@ -229,6 +234,22 @@ fn index(
         let mut cached = 0_usize;
         let mut artifacts = Vec::new();
         for descriptor in descriptors {
+            let key = ArtifactBlobKey::for_descriptor(&descriptor);
+            let artifact_locator = if artifact_cache.open_blob(&key)?.is_some() {
+                None
+            } else {
+                Some(
+                    artifact_locators
+                        .get(descriptor.source_unit.id.as_str())
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "resolved_artifact_locator_missing={}",
+                                descriptor.source_unit.id.as_str()
+                            )
+                        })?,
+                )
+            };
             let artifact_started = Instant::now();
             let (outcome, metrics) = cache_catalog_artifact_with_metrics(
                 &mut store,
@@ -236,7 +257,7 @@ fn index(
                 &artifact_cache,
                 discovery.manifest.root.clone(),
                 &descriptor.source_unit.id,
-                None,
+                artifact_locator,
                 &staging,
                 &mut budget,
             )?;
@@ -803,6 +824,10 @@ fn index(
 fn resolve_project_manifest(launch: &WorkerLaunch) -> Result<ProjectManifestResponse> {
     let mut worker = WorkerSupervisor::new(launch.clone());
     worker.handshake("index-build-resolution")?;
+    request_project_manifest(&mut worker)
+}
+
+fn request_project_manifest(worker: &mut WorkerSupervisor) -> Result<ProjectManifestResponse> {
     let response = worker.request(WorkerEnvelope::new(
         "index-project-manifest",
         WorkerMessage::ProjectManifestRequest(ProjectManifestRequest {
@@ -812,6 +837,48 @@ fn resolve_project_manifest(launch: &WorkerLaunch) -> Result<ProjectManifestResp
     match response.message {
         WorkerMessage::ProjectManifestResponse(response) => Ok(response),
         received => bail!("invalid_project_manifest_response={received:?}"),
+    }
+}
+
+/// Returns worker-local paths from one resolved build-model session. The map
+/// must only be used while `worker` remains alive; it is never written to the
+/// project index or shared artifact cache catalog.
+fn discover_artifact_locators(
+    worker: &mut WorkerSupervisor,
+    execution_plan: OpaqueExecutionPlan,
+) -> Result<BTreeMap<String, String>> {
+    let mut cursor = None;
+    let mut page = 0_u64;
+    let mut locators = BTreeMap::new();
+    loop {
+        let response = worker.request(WorkerEnvelope::new(
+            format!("materialize-only-artifact-descriptors-{page}"),
+            WorkerMessage::ArtifactDiscoveryRequest(ArtifactDiscoveryRequest {
+                workspace_root: WorkspacePath::new("."),
+                max_artifacts: 64,
+                cursor: cursor.clone(),
+                execution_plan: execution_plan.clone(),
+            }),
+        ))?;
+        let WorkerMessage::ArtifactDiscoveryResponse(response) = response.message else {
+            bail!("invalid_artifact_discovery_response");
+        };
+        for locator in response.artifact_locators {
+            let source_unit = locator.source_unit.as_str().to_owned();
+            let locator_path = locator.locator;
+            if let Some(previous) = locators.insert(source_unit.clone(), locator_path.clone())
+                && previous != locator_path
+            {
+                bail!("duplicate_resolved_artifact_locator={source_unit}");
+            }
+        }
+        match response.next_cursor {
+            Some(next) => {
+                cursor = Some(next);
+                page += 1;
+            }
+            None => return Ok(locators),
+        }
     }
 }
 

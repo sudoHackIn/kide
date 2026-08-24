@@ -114,6 +114,23 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
     assert_eq!(warm_cache_hit["dependency_reused"], 1);
     assert_eq!(warm_cache_hit["worker_starts"], 0);
 
+    // This path has no source-analysis lane. It resolves the build model once
+    // and hands the resulting worker-local JAR locator to each cache miss,
+    // rather than letting artifact materialization import Maven again.
+    let materialize_only = run_json(
+        &workspace,
+        [
+            "index",
+            "--materialize-only",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(materialize_only["materialization_only"], true);
+    assert_eq!(materialize_only["materialized"], 1, "{materialize_only}");
+    assert_eq!(materialize_only["worker_starts"], 1, "{materialize_only}");
+
     let book_entity = measure("warm_symbols", || {
         run_json(
             &workspace,
