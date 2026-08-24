@@ -84,6 +84,31 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
             .is_empty()
     );
 
+    let warmed = run_json(
+        &workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        warmed["dependency_analyzed"], 1,
+        "warm index result: {warmed}"
+    );
+    let warm_cache_hit = run_json(
+        &workspace,
+        [
+            "index",
+            "--warm-dependencies",
+            "1",
+            workspace.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(warm_cache_hit["dependency_reused"], 1);
+    assert_eq!(warm_cache_hit["worker_starts"], 0);
+
     let book_entity = measure("warm_symbols", || {
         run_json(
             &workspace,

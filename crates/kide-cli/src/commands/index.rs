@@ -8,14 +8,14 @@ use std::{
 use anyhow::{Result, bail};
 use kide_core::{
     ArtifactBlobCache, ArtifactBlobKey, BuildSystem, CANONICAL_SCHEMA_VERSION, Component,
-    ComponentId, ConfigurationInput, EffectiveConfiguration, Fingerprint, IndexStore,
-    OpaqueExecutionPlan, ProjectManifestRequest, ProjectManifestResponse, Provenance, QueryStatus,
-    WorkerCapability, WorkerEnvelope, WorkerInstallation, WorkerLaunch, WorkerMessage,
-    WorkerRegistry, WorkerSupervisor, WorkspaceDiscovery, WorkspacePath,
-    cache_catalog_artifact_with_metrics, collect_workspace_text, fingerprint_artifact_catalog,
-    fingerprint_configuration_inputs, fingerprint_source_inputs,
+    ComponentId, ConfigurationInput, DependencyAction, EffectiveConfiguration, Fingerprint,
+    IndexStore, ManifestAction, OpaqueExecutionPlan, ProjectManifestRequest,
+    ProjectManifestResponse, Provenance, QueryStatus, WorkerCapability, WorkerEnvelope,
+    WorkerInstallation, WorkerLaunch, WorkerMessage, WorkerRegistry, WorkerSupervisor,
+    WorkspaceDiscovery, WorkspacePath, cache_catalog_artifact_with_metrics, collect_workspace_text,
+    fingerprint_artifact_catalog, fingerprint_configuration_inputs, fingerprint_source_inputs,
     index_batch_with_artifact_cache_provenance_and_execution_plan,
-    index_selected_batches_with_execution_plan,
+    index_selected_batches_with_execution_plan, plan_incremental_index,
 };
 use sha2::{Digest, Sha256};
 
@@ -68,6 +68,7 @@ fn index(
     let discovery_millis = discovery_started.elapsed().as_millis();
     tracing::debug!(target: "kide::cli", "opening index");
     let mut store = IndexStore::open(IndexStore::default_path(&discovery.root))?;
+    let persisted_artifact_descriptors = store.artifact_descriptors()?;
     let mut configuration_input_records = discovery.configuration_input_records.clone();
     configuration_input_records.push(effective_configuration_input(
         &configuration,
@@ -271,6 +272,18 @@ fn index(
     let mut materialized_artifacts = Vec::new();
     if let Some(warm_limit) = warm_dependencies {
         let descriptors = store.artifact_descriptors()?;
+        let dependency_plan = plan_incremental_index(
+            if reused_build_resolution {
+                ManifestAction::Reuse
+            } else {
+                ManifestAction::Resolve
+            },
+            &[],
+            &[],
+            &descriptors,
+            &persisted_artifact_descriptors,
+            |key| artifact_cache.open_blob(key).ok().flatten().is_some(),
+        );
         let cataloged = descriptors.len();
         let artifacts_total = if warm_limit == 0 {
             cataloged
@@ -284,9 +297,33 @@ fn index(
             "starting dependency materialization phase"
         );
         let materialization_started = Instant::now();
-        let mut worker =
-            WorkerSupervisor::new(selection.batches[0].worker.installation.launch.clone());
-        worker.handshake("warm-dependency-cache")?;
+        let selected = descriptors
+            .into_iter()
+            .take(artifacts_total)
+            .collect::<Vec<_>>();
+        let misses = dependency_plan
+            .dependencies
+            .iter()
+            .filter_map(|action| match action {
+                DependencyAction::CacheMiss(descriptor) => Some(descriptor.source_unit.id.as_str()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut requested = Vec::new();
+        for descriptor in selected {
+            if misses.contains(descriptor.source_unit.id.as_str()) {
+                requested.push(descriptor);
+            } else {
+                run.dependency_reused += 1;
+                materialized_artifacts.push(serde_json::json!({"source_unit": descriptor.source_unit.id, "component": descriptor.source_unit.component, "dependency": descriptor.source_unit.path, "outcome": "cached", "millis": 0}));
+            }
+        }
+        let mut worker = (!requested.is_empty()).then(|| {
+            WorkerSupervisor::new(selection.batches[0].worker.installation.launch.clone())
+        });
+        if let Some(worker) = &mut worker {
+            worker.handshake("warm-dependency-cache")?;
+        }
         let mut budget = kide_core::MaterializationBudget {
             remaining_artifacts: if warm_limit == 0 {
                 u32::MAX
@@ -294,7 +331,7 @@ fn index(
                 warm_limit
             },
         };
-        for (artifact_index, descriptor) in descriptors.into_iter().enumerate() {
+        for (artifact_index, descriptor) in requested.into_iter().enumerate() {
             let artifact_index = artifact_index + 1;
             let artifact_started = Instant::now();
             let artifact_locator = run.take_artifact_locator(&descriptor.source_unit.id);
@@ -306,7 +343,7 @@ fn index(
                 .to_owned();
             let (outcome, metrics) = cache_catalog_artifact_with_metrics(
                 &mut store,
-                &mut worker,
+                worker.as_mut().expect("worker exists for cache miss"),
                 &artifact_cache,
                 manifest.root.clone(),
                 &descriptor.source_unit.id,
@@ -373,7 +410,7 @@ fn index(
             }
         }
         run.clear_artifact_locators();
-        run.worker_starts += worker.start_count();
+        run.worker_starts += worker.as_ref().map_or(0, WorkerSupervisor::start_count);
         run.dependency_materialization_millis += materialization_started.elapsed().as_millis();
         tracing::info!(
             target: "kide::index",

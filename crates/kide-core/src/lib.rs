@@ -900,6 +900,7 @@ mod config;
 mod dependency_identity;
 mod discovery;
 mod freshness;
+mod incremental_plan;
 mod input_inventory;
 mod orchestrator;
 mod protocol;
@@ -916,6 +917,7 @@ pub use dependency_identity::*;
 pub use discovery::*;
 pub use framework_query::*;
 pub use freshness::*;
+pub use incremental_plan::*;
 pub use input_inventory::{
     ConfigurationInput, ConfigurationInputReconciliation, ConfigurationInputState,
     ConfigurationInputStatus, SourceFileMetadata, SourceSnapshotInput, WorkspaceCheckpoint,

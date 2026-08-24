@@ -12,10 +12,11 @@ use thiserror::Error;
 use crate::{
     AnalysisFact, AnalysisInput, AnalyzeBatchRequest, ArtifactBlobCache, ArtifactBlobCacheError,
     ArtifactBlobKey, ArtifactDescriptor, ArtifactDiscoveryRequest, ArtifactMaterializationRequest,
-    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError,
+    FileAnalysisSnapshot, Fingerprint, IndexAction, IndexStore, IndexStoreError, ManifestAction,
     OpaqueExecutionPlan, ProjectManifest, Provenance, SourceOrigin, SourceUnit, WorkerBatch,
     WorkerCapability, WorkerEnvelope, WorkerLaunch, WorkerMessage, WorkerSelection,
-    WorkerSupervisor, WorkerSupervisorError, WorkspacePath, plan_invalidation,
+    WorkerSupervisor, WorkerSupervisorError, WorkspacePath, plan_incremental_analysis_index,
+    plan_incremental_index,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +200,21 @@ pub fn index_selected_batches_with_execution_plan(
         .into_iter()
         .filter(|source| source.origin != SourceOrigin::Dependency)
         .collect::<Vec<_>>();
-    let actions = plan_invalidation(current, &persisted_sources);
+    // Source and dependency lanes have separate invalidation boundaries.  A
+    // new resolved manifest can change artifact identities even when every
+    // source fingerprint remains reusable.
+    let dependency_catalog_needed = store
+        .latest_manifest()?
+        .is_none_or(|previous| previous.fingerprint != manifest.fingerprint);
+    let actions = plan_incremental_index(
+        ManifestAction::Reuse,
+        current,
+        &persisted_sources,
+        &[],
+        &[],
+        |_| false,
+    )
+    .sources;
     let mut reanalyze = BTreeSet::new();
     let mut run = IndexRun {
         reused: 0,
@@ -237,7 +252,7 @@ pub fn index_selected_batches_with_execution_plan(
     // the source lane so its cold worker and resolver work overlap with
     // source analysis. It currently uses one worker because the paginated
     // protocol has no independent artifact partitions yet.
-    let dependency_lane = (!reanalyze.is_empty()).then(|| {
+    let dependency_lane = (dependency_catalog_needed || !reanalyze.is_empty()).then(|| {
         let launch = selection
             .batches
             .first()
@@ -761,8 +776,12 @@ fn index_batch_with_optional_cache(
         .into_iter()
         .filter(|source| source.origin != SourceOrigin::Dependency)
         .collect::<Vec<_>>();
+    let dependency_catalog_needed = store
+        .latest_manifest()?
+        .is_none_or(|previous| previous.fingerprint != manifest.fingerprint);
     let actions = if let Some(provenance) = current_provenance {
-        crate::plan_analysis_invalidation(
+        plan_incremental_analysis_index(
+            ManifestAction::Reuse,
             &current
                 .iter()
                 .cloned()
@@ -773,9 +792,21 @@ fn index_batch_with_optional_cache(
                 })
                 .collect::<Vec<_>>(),
             &store.analysis_inputs()?,
+            &[],
+            &[],
+            |_| false,
         )
+        .sources
     } else {
-        plan_invalidation(current, &persisted_sources)
+        plan_incremental_index(
+            ManifestAction::Reuse,
+            current,
+            &persisted_sources,
+            &[],
+            &[],
+            |_| false,
+        )
+        .sources
     };
     let _span = tracing::info_span!(target: "kide::index", "index_batch", sources = current.len())
         .entered();
@@ -809,19 +840,34 @@ fn index_batch_with_optional_cache(
     }
     // An unchanged manifest/source context also means the artifact model has
     // not changed, so do not start a worker merely to rediscover dependencies.
-    if reanalyze.is_empty() {
+    if reanalyze.is_empty() && !dependency_catalog_needed {
         store.put_manifest(manifest)?;
         return Ok(run);
     }
     // Artifact discovery starts from the resolved build model, not from a
     // source batch response. Running it separately lets its resolver overlap
     // the one source worker without handing SQLite to another thread.
-    let dependency_lane = thread::spawn({
-        let launch = launch.clone();
-        let manifest = manifest.clone();
-        let dependency_plan = execution_plan.clone();
-        move || discover_dependency_catalog(launch, manifest, dependency_plan)
+    let dependency_lane = dependency_catalog_needed.then(|| {
+        thread::spawn({
+            let launch = launch.clone();
+            let manifest = manifest.clone();
+            let dependency_plan = execution_plan.clone();
+            move || discover_dependency_catalog(launch, manifest, dependency_plan)
+        })
     });
+    if reanalyze.is_empty() {
+        if let Some(dependency_lane) = dependency_lane {
+            let catalog = dependency_lane
+                .join()
+                .map_err(|_| IndexOrchestratorError::DependencyWorkerPanicked)??;
+            store.replace_artifact_descriptors(&catalog.descriptors)?;
+            run.artifact_locators = catalog.artifact_locators;
+            run.worker_starts += catalog.worker_starts;
+            run.dependency_catalog_millis += catalog.elapsed_millis;
+        }
+        store.put_manifest(manifest)?;
+        return Ok(run);
+    }
     let mut supervisor = WorkerSupervisor::new(launch);
     tracing::debug!(target: "kide::index", "starting worker handshake");
     supervisor.handshake("index-handshake")?;
@@ -898,13 +944,15 @@ fn index_batch_with_optional_cache(
         }
     }
     run.source_commit_millis += commit_started.elapsed().as_millis();
-    let catalog = dependency_lane
-        .join()
-        .map_err(|_| IndexOrchestratorError::DependencyWorkerPanicked)??;
-    store.replace_artifact_descriptors(&catalog.descriptors)?;
-    run.artifact_locators = catalog.artifact_locators;
-    run.worker_starts += catalog.worker_starts;
-    run.dependency_catalog_millis += catalog.elapsed_millis;
+    if let Some(dependency_lane) = dependency_lane {
+        let catalog = dependency_lane
+            .join()
+            .map_err(|_| IndexOrchestratorError::DependencyWorkerPanicked)??;
+        store.replace_artifact_descriptors(&catalog.descriptors)?;
+        run.artifact_locators = catalog.artifact_locators;
+        run.worker_starts += catalog.worker_starts;
+        run.dependency_catalog_millis += catalog.elapsed_millis;
+    }
     let source = reanalyze.first().expect("non-empty batch");
     run.batches.push(BatchIndexMetrics {
         component: source.component.as_str().to_owned(),

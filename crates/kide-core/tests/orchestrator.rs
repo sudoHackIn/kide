@@ -37,6 +37,23 @@ fn indexes_a_cold_batch_then_reuses_unchanged_snapshots() {
 }
 
 #[test]
+fn changed_manifest_refreshes_dependency_catalog_without_source_worker() {
+    let directory = tempdir().expect("temporary workspace");
+    let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
+    let sources = vec![source("One.kt", "sha256:one")];
+    index_batch(&mut store, &manifest(), &sources, launch()).expect("cold index");
+
+    let mut changed_manifest = manifest();
+    changed_manifest.fingerprint = Fingerprint::new("sha256:changed-project");
+    let run = index_batch(&mut store, &changed_manifest, &sources, launch())
+        .expect("refreshes dependencies without reanalyzing sources");
+
+    assert_eq!(run.analyzed, 0);
+    assert_eq!(run.reused, 1);
+    assert_eq!(run.worker_starts, 1);
+}
+
+#[test]
 fn changed_source_context_reanalyzes_only_affected_source() {
     let directory = tempdir().expect("temporary workspace");
     let mut store = IndexStore::open(directory.path().join("index.sqlite3")).expect("opens index");
