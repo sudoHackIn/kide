@@ -155,6 +155,18 @@ class MavenProjectImporterTest {
             .single().jsonObject
 
         assertEquals(3, manifest["components"]!!.jsonArray.size)
+        val manifestContexts = manifest["components"]!!.jsonArray
+            .map { component -> component.jsonObject }
+            .associate { component ->
+                component["id"]!!.jsonPrimitive.content to component["configuration"]!!.jsonPrimitive.content
+            }
+        contexts.forEach { context ->
+            assertEquals(
+                manifestContexts.getValue(context.component),
+                context.artifactContext,
+                "manifest and Java execution plan must agree on the Maven component context",
+            )
+        }
         assertTrue(descriptor["source_unit"]!!.jsonObject["id"]!!.jsonPrimitive.content.isNotBlank())
         assertTrue(materialized.byteLength > 0)
         assertTrue(manifest["components"]!!.jsonArray.any { it.jsonObject["classpath"]!!.jsonArray.isNotEmpty() })

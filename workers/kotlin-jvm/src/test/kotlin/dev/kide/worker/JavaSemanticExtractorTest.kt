@@ -1,6 +1,7 @@
 package dev.kide.worker
 
 import java.nio.file.Files
+import javax.tools.ToolProvider
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.buildJsonArray
@@ -60,7 +61,84 @@ class JavaSemanticExtractorTest {
         assertTrue(incrementalTargets.contains(apiName), incremental.toString())
     }
 
-    private fun sourceUnit(path: String) = buildJsonObject {
-        put("id", "gradle:::main:$path"); put("path", path); put("language", "java"); put("component", "gradle:::"); put("context", "sha256:test")
+    @Test
+    fun preservesHierarchyAcrossMavenReactorSourceContexts() {
+        val root = Files.createTempDirectory("kide-java-reactor-hierarchy-")
+        val api = root.resolve("api/src/main/java/fixture/Api.java")
+        val implementation = root.resolve("app/src/main/java/fixture/Impl.java")
+        Files.createDirectories(api.parent)
+        Files.createDirectories(implementation.parent)
+        Files.writeString(api, "package fixture; public interface Api {}")
+        Files.writeString(implementation, "package fixture; public final class Impl implements Api {}")
+        val apiClasses = Files.createTempDirectory("kide-java-reactor-api-")
+        compileJava(api, apiClasses)
+
+        val apiContext = JavaCompilationContext(
+            component = "maven:api:main",
+            sourceFiles = listOf(api),
+            ownedSourceFiles = listOf(api),
+            sourceRoots = listOf(api.parent),
+            classpath = emptyList(),
+            jdkHome = javaHome(),
+        )
+        val appContext = JavaCompilationContext(
+            component = "maven:app:main",
+            // Model a reactor dependency already available only as a module
+            // artifact to this javac invocation.  The canonical source ID is
+            // still known through the API context.
+            sourceFiles = listOf(implementation),
+            ownedSourceFiles = listOf(implementation),
+            sourceRoots = listOf(api.parent, implementation.parent),
+            classpath = listOf(apiClasses),
+            jdkHome = javaHome(),
+        )
+        val contexts = listOf(apiContext, appContext)
+        val apiUnit = sourceUnit("api/src/main/java/fixture/Api.java", apiContext.component)
+        val implementationUnit = sourceUnit("app/src/main/java/fixture/Impl.java", appContext.component)
+        val snapshots = JavaSemanticExtractor.analyze(listOf(apiUnit, implementationUnit), root, contexts)
+            .map { it.jsonObject }
+        val apiId = snapshots
+            .flatMap { it["symbols"]!!.jsonArray }
+            .single { it.jsonObject["qualified_name"]!!.toString().contains("fixture.Api") }
+            .jsonObject["id"]!!.toString()
+        val implementationSnapshot = snapshots.single {
+            it["source_unit"]!!.jsonObject["path"]!!.toString().contains("Impl.java")
+        }
+        assertTrue(
+            implementationSnapshot["hierarchy"]!!.jsonArray.any { edge ->
+                edge.jsonObject["supertype"]!!.toString() == apiId
+            },
+            implementationSnapshot.toString(),
+        )
+
+        val incremental = JavaSemanticExtractor.analyze(listOf(implementationUnit), root, contexts)
+            .single().jsonObject
+        assertTrue(
+            incremental["hierarchy"]!!.jsonArray.any { edge ->
+                edge.jsonObject["supertype"]!!.toString() == apiId
+            },
+            incremental.toString(),
+        )
+    }
+
+    private fun sourceUnit(path: String, component: String = "gradle:::main") = buildJsonObject {
+        put("id", "$component:$path"); put("path", path); put("language", "java"); put("component", component); put("context", "sha256:test")
+    }
+
+    private fun javaHome() = java.nio.file.Path.of(System.getProperty("java.home"))
+
+    private fun compileJava(source: java.nio.file.Path, output: java.nio.file.Path) {
+        val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler())
+        compiler.getStandardFileManager(null, null, Charsets.UTF_8).use { fileManager ->
+            val task = compiler.getTask(
+                null,
+                fileManager,
+                null,
+                listOf("-d", output.toString()),
+                null,
+                fileManager.getJavaFileObjectsFromPaths(listOf(source)),
+            )
+            assertTrue(task.call(), "compiles reactor API artifact")
+        }
     }
 }

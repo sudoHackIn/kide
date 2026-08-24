@@ -53,8 +53,18 @@ internal object MavenProjectImporter {
         require(rootPom.isRegularFile()) { "Maven workspace has no pom.xml at $rootPom" }
         val maven = selectMaven(root, environment)
         val modules = effectiveReactor(root, canonicalPath(root, rootPom, "Maven workspace POM"), maven, environment)
-        val classpath = resolvedArtifacts(root, environment).groupBy { it.component }.mapValues { (_, artifacts) ->
-            artifacts.map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }.distinct().sorted()
+        // The manifest and every later worker lane must derive a component's
+        // context from the same per-module resolution.  A workspace-wide
+        // de-duplication of shared JAR paths loses the association with later
+        // modules and lets dependency descriptors disagree with this manifest.
+        val reactorCoordinates = modules.map { module -> modelKey(module.model) }.toSet()
+        val classpath = modules.associate { module ->
+            componentId(root, module) to MavenExternalResolver
+                .resolveWithDiagnostics(module.model, reactorCoordinates)
+                .artifacts
+                .map { artifact -> fingerprint(listOf(Files.readAllBytes(artifact.path))) }
+                .distinct()
+                .sorted()
         }
         val components = modules.map { module -> component(root, module, classpath[componentId(root, module)].orEmpty()) }
         val configuration = fingerprint(modules.map { Files.readAllBytes(it.pom) })

@@ -88,12 +88,13 @@ internal object JavaSemanticExtractor {
         workspaceRoot: Path,
     ): Map<Path, JsonObject> {
         val fallbackContext = selected.values.first().jsonObject.requiredString("context")
+        val canonicalRoot = canonical(workspaceRoot)
         return buildMap {
             selected.forEach { (path, sourceUnit) -> put(path, sourceUnit.jsonObject) }
             contexts.forEach { compilation -> compilation.ownedSourceFiles.forEach { sourceFile ->
                 val path = canonical(sourceFile)
                 if (path !in this) {
-                    val relativePath = workspaceRoot.relativize(path).toString()
+                    val relativePath = canonicalRoot.relativize(path).toString()
                     put(path, buildJsonObject {
                         put("id", "java:${compilation.component}:$relativePath")
                         put("path", relativePath)
@@ -149,7 +150,14 @@ internal object JavaSemanticExtractor {
             addTiming("semantic_analyze", analyzeStarted)
             if (analysisFailure != null && !MavenExternalResolver.bestEffortEnabled) throw analysisFailure
             val trees = Trees.instance(task)
-            val collector = FactCollector(trees, selected, sourceIdentities, allSources, staged?.declarationIds.orEmpty())
+            val collector = FactCollector(
+                trees,
+                selected,
+                sourceIdentities,
+                allSources,
+                staged?.declarationIds.orEmpty(),
+                sourceTypeIds(sourceIdentities),
+            )
             if (analysisFailure == null) {
                 val factsStarted = System.nanoTime()
                 collector.collectDeclarations(parsed)
@@ -224,7 +232,14 @@ internal object JavaSemanticExtractor {
                     return null
                 }
                 val allSelected = sources.associateWith { source -> sourceIdentities[source] ?: return null }
-                val collector = FactCollector(Trees.instance(task), allSelected, sourceIdentities, sources)
+                val collector = FactCollector(
+                    Trees.instance(task),
+                    allSelected,
+                    sourceIdentities,
+                    sources,
+                    emptyMap(),
+                    sourceTypeIds(sourceIdentities),
+                )
                 collector.collectDeclarations(parsed)
                 task.generate()
                 StagedContext(output, collector.declarationIds()).also {
@@ -318,12 +333,52 @@ internal object JavaSemanticExtractor {
         }
     }
 
+    /**
+     * A Maven dependent module can resolve a workspace supertype from an
+     * already-built reactor artifact.  Such a binary element has no tree path,
+     * so build a small source-derived type index as the canonical fallback.
+     */
+    private fun sourceTypeIds(sourceIdentities: Map<Path, JsonObject>): Map<String, String> = buildMap {
+        val simpleTypeIds = mutableMapOf<String, MutableSet<String>>()
+        sourceIdentities.forEach { (path, source) ->
+            val text = runCatching { Files.readString(path) }.getOrNull() ?: return@forEach
+            val packageName = Regex("(?m)^\\s*package\\s+([A-Za-z_][\\w.]*)\\s*;")
+                .find(text)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
+            Regex("\\b(class|interface|enum)\\s+([A-Za-z_]\\w*)")
+                .findAll(text)
+                .forEach { declaration ->
+                    val kind = when (declaration.groupValues[1]) {
+                        "interface" -> "interface"
+                        "enum" -> "enum"
+                        else -> "class"
+                    }
+                    val name = declaration.groupValues[2]
+                    val qualifiedName = listOf(packageName, name).filter(String::isNotEmpty).joinToString(".")
+                    val nameOffset = declaration.range.first + declaration.value.lastIndexOf(name)
+                    val id = "java:${source.requiredString("component")}:${source.requiredString("path")}#$kind:$name:$nameOffset"
+                    putIfAbsent(qualifiedName, id)
+                    simpleTypeIds.getOrPut(name, ::linkedSetOf).add(id)
+                }
+        }
+        // During the incremental javac pass a reactor dependency can surface
+        // as an error type with only its simple name. Resolve that form only
+        // when it identifies exactly one workspace type; ambiguity is safer
+        // than inventing a cross-package hierarchy edge.
+        simpleTypeIds
+            .filterValues { ids -> ids.size == 1 }
+            .forEach { (name, ids) -> putIfAbsent(name, ids.single()) }
+    }
+
     private class FactCollector(
         private val trees: Trees,
         private val selected: Map<Path, JsonElement>,
         private val sourceIdentities: Map<Path, JsonObject>,
         allSources: List<Path>,
         private val stagedDeclarationIds: Map<String, String> = emptyMap(),
+        private val sourceTypeIds: Map<String, String> = emptyMap(),
     ) : TreePathScanner<Unit, Unit>() {
         private val symbols = linkedMapOf<Path, MutableList<Symbol>>()
         private val occurrences = linkedMapOf<Path, MutableList<Occurrence>>()
@@ -442,6 +497,7 @@ internal object JavaSemanticExtractor {
          */
         private fun elementId(element: Element): String? = elementIds[element]
             ?: stagedDeclarationIds[elementKey(element)]
+            ?: (element as? TypeElement)?.let { sourceTypeIds[qualifiedName(it)] }
             ?: trees.getPath(element)?.let { path ->
             val sourcePath = sourcePath(path.compilationUnit) ?: return@let null
             val positions = trees.sourcePositions
@@ -459,7 +515,15 @@ internal object JavaSemanticExtractor {
             return "java:${source.requiredString("component")}:${source.requiredString("path")}#${kind(element)}:$name:$nameStart"
         }
 
-        private fun elementKey(element: Element) = "${element.kind}|${qualifiedName(element)}|$element"
+        // A supertype resolved from a staged source and the same type resolved
+        // from a Maven reactor artifact have the same qualified name but need
+        // not render identically through javac's `toString()`.  Type identity
+        // is unambiguous at this boundary, so do not make the source-to-binary
+        // bridge depend on that renderer detail.
+        private fun elementKey(element: Element) = when (element) {
+            is TypeElement -> "${element.kind}|${qualifiedName(element)}"
+            else -> "${element.kind}|${qualifiedName(element)}|$element"
+        }
 
         private fun symbolJson(symbol: Symbol, source: JsonObject, text: String, provenance: JsonElement) = buildJsonObject {
             put("id", symbol.id); put("backend_key", buildJsonObject { put("backend", WORKER_NAME); put("schema_version", 1); put("value", symbol.element.toString()) })
