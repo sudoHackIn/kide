@@ -7,6 +7,14 @@ use kide_core::{IndexStore, QueryPayload, QueryProblem, document_from_bytes};
 
 use super::WorkspaceContext;
 
+pub(super) fn stale_source_problem() -> QueryProblem {
+    QueryProblem {
+        code: "stale_source_snapshot".to_owned(),
+        message: "a source owning this result changed after indexing; run kide index".to_owned(),
+        retryable: true,
+    }
+}
+
 pub(super) fn freshness_problem(
     context: &WorkspaceContext,
     store: &IndexStore,
@@ -124,12 +132,7 @@ pub(super) fn freshness_problem(
             .ok()
             .and_then(|bytes| document_from_bytes(source.path.clone(), bytes).ok());
         if !matches!(current, Some(current) if current.fingerprint == source.content) {
-            return Ok(Some(QueryProblem {
-                code: "stale_source_snapshot".to_owned(),
-                message: "a source owning this result changed after indexing; run kide index"
-                    .to_owned(),
-                retryable: true,
-            }));
+            return Ok(Some(stale_source_problem()));
         }
     }
     Ok(None)

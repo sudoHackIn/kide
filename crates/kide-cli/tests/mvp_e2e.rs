@@ -537,6 +537,29 @@ fn spring_crud_mvp_survives_cold_restarts_and_incremental_updates() {
         stale_definition["problems"][0]["code"],
         "stale_source_snapshot"
     );
+    let stale_refs = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "refs",
+            &book_entity_id,
+        ],
+    );
+    assert_eq!(stale_refs["status"], "stale", "{stale_refs}");
+    let stale_implementations = run_json(
+        &workspace,
+        [
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "implementations",
+            &book_entity_id,
+        ],
+    );
+    assert_eq!(
+        stale_implementations["status"], "stale",
+        "{stale_implementations}"
+    );
 
     let incremental = measure("incremental_index", || {
         run_json(&workspace, ["index", workspace.to_str().unwrap()])

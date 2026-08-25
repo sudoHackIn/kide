@@ -7,7 +7,11 @@ use kide_core::{
     document_from_bytes,
 };
 
-use super::{WorkspaceContext, freshness_gate::freshness_problem, print_response};
+use super::{
+    WorkspaceContext,
+    freshness_gate::{freshness_problem, stale_source_problem},
+    print_response,
+};
 
 pub(super) fn fan_out(
     mut targets: Vec<String>,
@@ -151,15 +155,7 @@ pub(super) fn definition(
             ),
         },
         TargetResolution::NoResult => (QueryStatus::NoResult, None, Vec::new()),
-        TargetResolution::Stale => (
-            QueryStatus::Stale,
-            None,
-            vec![QueryProblem {
-                code: "stale_source_snapshot".to_owned(),
-                message: "the source file changed after it was indexed; run kide index".to_owned(),
-                retryable: true,
-            }],
-        ),
+        TargetResolution::Stale => (QueryStatus::Stale, None, vec![stale_source_problem()]),
         TargetResolution::Ambiguous(candidates) => (
             QueryStatus::Ambiguous,
             None,
@@ -205,6 +201,15 @@ pub(super) fn references(
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
+            if let Some(problem) = target_freshness_problem(context, &store, &symbol)? {
+                return print_query_response(
+                    context,
+                    &store,
+                    QueryStatus::Stale,
+                    None,
+                    vec![problem],
+                );
+            }
             let mut references = store
                 .references_to(&symbol)?
                 .into_iter()
@@ -393,6 +398,15 @@ pub(super) fn callers(
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
+            if let Some(problem) = target_freshness_problem(context, &store, &symbol)? {
+                return print_query_response(
+                    context,
+                    &store,
+                    QueryStatus::Stale,
+                    None,
+                    vec![problem],
+                );
+            }
             let calls = store
                 .calls_to(&symbol)?
                 .into_iter()
@@ -439,6 +453,15 @@ pub(super) fn implementations(
     let store = IndexStore::open(IndexStore::default_path(workspace))?;
     let (status, result, problems) = match resolve_target(&store, workspace, &value)? {
         TargetResolution::Symbol(symbol) => {
+            if let Some(problem) = target_freshness_problem(context, &store, &symbol)? {
+                return print_query_response(
+                    context,
+                    &store,
+                    QueryStatus::Stale,
+                    None,
+                    vec![problem],
+                );
+            }
             let edges = if transitive {
                 store.implementations_of_transitive(&symbol)?
             } else {
@@ -642,20 +665,23 @@ fn query_result(payload: QueryPayload) -> (QueryStatus, Option<QueryPayload>, Ve
     }
 }
 
+fn target_freshness_problem(
+    context: &WorkspaceContext,
+    store: &IndexStore,
+    symbol: &SymbolId,
+) -> Result<Option<QueryProblem>> {
+    let Some(symbol) = store.symbol(symbol)? else {
+        return Ok(None);
+    };
+    freshness_problem(context, store, &QueryPayload::Definition { symbol })
+}
+
 pub(super) fn target_problem(
     resolution: TargetResolution,
 ) -> (QueryStatus, Option<QueryPayload>, Vec<QueryProblem>) {
     match resolution {
         TargetResolution::NoResult => (QueryStatus::NoResult, None, Vec::new()),
-        TargetResolution::Stale => (
-            QueryStatus::Stale,
-            None,
-            vec![QueryProblem {
-                code: "stale_source_snapshot".to_owned(),
-                message: "the source file changed after it was indexed; run kide index".to_owned(),
-                retryable: true,
-            }],
-        ),
+        TargetResolution::Stale => (QueryStatus::Stale, None, vec![stale_source_problem()]),
         TargetResolution::Ambiguous(candidates) => (
             QueryStatus::Ambiguous,
             None,
